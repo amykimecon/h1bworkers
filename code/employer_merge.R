@@ -80,7 +80,9 @@ state_cw[nrow(state_cw) + 1, ] <- t(c("RI", "Rhode Island"))
 
 # CLEANING H1B EMPLOYER DATA ----
 foia_emp <- raw %>% group_by(FEIN, lottery_year) %>% 
-  mutate(n_tot_fein_yr = n()) %>% ungroup() %>%
+  # getting total number of applications and cleaning name (lowercase + remove commas and periods)
+  mutate(n_tot_fein_yr = n(),
+         company_FOIA = str_to_lower(str_remove_all(employer_name, ",|\\."))) %>% ungroup() %>%
   # filtering duplicate applications
   filter(ben_multi_reg_ind == 0) %>%
   # indicator for likely fraud (high ratio of applications to current employees in us)
@@ -92,19 +94,20 @@ foia_emp <- raw %>% group_by(FEIN, lottery_year) %>%
   left_join(zip_to_msa %>% select(c(zip, city, `CBSA Title`)) %>%
               rename(worksite_msa = `CBSA Title`), by = c("WORKSITE_ZIP" = "zip")) %>%
   # grouping by employer location, then employer (getting modal employer msa)
-  group_by(employer_name, FEIN, msa, state) %>%
+  group_by(FEIN, msa, state) %>%
   mutate(n_by_msa = n()) %>% arrange(desc(n_by_msa)) %>% ungroup() %>%
-  group_by(employer_name, FEIN) %>%
+  group_by(FEIN) %>%
   mutate(modal_msaname = first(msa),
          modal_msastate = first(state),
          n_by_msa = first(n_by_msa)) %>% ungroup() %>%
   # grouping by worksite, then employer (getting modal worksite msa)
-  group_by(employer_name, FEIN, worksite_msa, WORKSITE_STATE) %>%
+  group_by(FEIN, worksite_msa, WORKSITE_STATE) %>%
   mutate(n_by_msa_worksite = sum(ifelse(!is.na(worksite_msa), 1, 0))) %>% arrange(desc(n_by_msa_worksite)) %>% ungroup() %>%
-  group_by(employer_name, FEIN) %>%
+  group_by(FEIN) %>%
   mutate(modal_msaworksitename = first(worksite_msa),
          modal_msaworksitestate = first(WORKSITE_STATE),
-         n_by_msa_worksite = first(n_by_msa_worksite)) %>% 
+         n_by_msa_worksite = first(n_by_msa_worksite)) %>% ungroup() %>%
+  group_by(FEIN, company_FOIA) %>%
   summarize(n_apps = n(),
             n_success = sum(ifelse(status_type == "SELECTED", 1, 0)),
             across(c(modal_msaname, modal_msastate, n_by_msa, modal_msaworksitename,
@@ -124,9 +127,9 @@ foia_emp <- raw %>% group_by(FEIN, lottery_year) %>%
 # TESTING MERGE ----
 revelio_emp <- revelio_raw %>%
   select(c(company, rcid, n, n_users, recent_start, recent_end, top_metro_area, top_state, lei,
-           ultimate_parent_company_name))
+           ultimate_parent_company_name, naics_code))
 
-foia_samp_ids <- sample_n(foia_emp, 100) %>% select(c(employer_name, FEIN))
+foia_samp_ids <- sample_n(foia_emp, 100) %>% select(c(company_FOIA, FEIN))
 revelio_samp <- sample_n(revelio_emp, 100000)
 
 extra_words <- c("inc", "ltd", "plc", "pllc", "mso", "svc", "ggmbh", "gmbh", "limited", "pvt", "md", "private",
@@ -152,8 +155,8 @@ clean_emp_name <- function(df, empnamecol){
   return(df_out)
 }
 
-foia_samp <- foia_emp %>% filter(employer_name %in% foia_samp_ids$employer_name & FEIN %in% foia_samp_ids$FEIN)
-foia_emp_clean <- clean_emp_name(foia_samp, "employer_name")
+foia_samp <- foia_emp %>% filter(company_FOIA %in% foia_samp_ids$company_FOIA & FEIN %in% foia_samp_ids$FEIN)
+foia_emp_clean <- clean_emp_name(foia_samp, "company_FOIA")
 revelio_emp_clean <- clean_emp_name(revelio_emp , "company") %>% arrange(n_users)
 
 exact_match <- matchfunc("empnameraw")

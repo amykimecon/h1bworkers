@@ -4,3 +4,5 @@
 .Ruserdata
 .DS_Store
 h1b.Rproj
+code/.tmp/
+code/__pycache__/
