@@ -68,7 +68,7 @@ def tokenize(con, table_in, table_out, column, delimiter, rare_quantile = 0.999,
         -- get rarest token
         SELECT * FROM (SELECT unique_id, token as rarest_token, freq as rarest_freq,
             ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY freq ASC) AS rarity_rank,
-        FROM {table_in}_unnested_with_freqs) WHERE rarity_rank = 1) AS rarest_token
+        FROM {table_in}_unnested_with_freqs) WHERE rarity_rank = 1 AND rarest_freq < {token_freq_cutoff}) AS rarest_token
         ON all_tokens.unique_id = rarest_token.unique_id
         LEFT JOIN(
         -- get second rarest token
@@ -110,12 +110,16 @@ def token_frequencies(con, table_in, show = False):
     create_replace_table(con, query, f"{table_in}_token_freqs", show = show)
 
 ## UTILITIES
-def create_replace_table(con, query, table_out, show = True):
+def create_replace_table(con, query, table_out, show = True, temp = True):
     """
     Creates a table with a query
     """
+    if temp:
+        tempstring = "TEMP"
+    else:
+        tempstring = ""
     query_out = f"""
-    CREATE OR REPLACE TABLE {table_out} AS
+    CREATE OR REPLACE {tempstring} TABLE {table_out} AS
     {query}
     """
     con.sql(query_out)
@@ -131,32 +135,39 @@ def clean_company_string(column):
     REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(strip_accents(lower({column})), ',|\\.', '', 'g'), ' & ', ' and ', 'g'), '\\s*\\(.*\\)\\s*', ' ', 'g')
     """)
 
-def get_matching_freqs(column, key, val, default = 0.0):
+def get_matching_freqs(column, key, val, default = 0.0, dotnote = False):
     """
     From matched table with l.column and r.column with structure [{key:key, val:val}], intersect keys and return zipped list of values with structure [{lval:lval, rval:rval}]
     """
+    if dotnote:
+        lcolname = f"l.{column}"
+        rcolname = f"r.{column}"
+    else:
+        lcolname = f"{column}_l"
+        rcolname = f"{column}_r"
     return(f"""
         -- First: intersecting keys 
         list_intersect(
-           list_transform({column}_l, x -> x.{key}), list_transform({column}_r, x -> x.{key})
+           list_transform({lcolname}, x -> x.{key}), list_transform({rcolname}, x -> x.{key})
         -- Second: getting positions of intersecting keys in l and r and using to extract values
         ).list_transform(
             y -> struct_pack(
-                lval := list_extract({column}_l, list_position(list_transform({column}_l, x -> x.{key}), y)).{val},
-                rval := list_extract({column}_l, list_position(list_transform({column}_r, x -> x.{key}), y)).{val})
+                lval := list_extract({lcolname}, list_position(list_transform({lcolname}, x -> x.{key}), y)).{val},
+                rval := list_extract({rcolname}, list_position(list_transform({rcolname}, x -> x.{key}), y)).{val})
         ).list_concat([struct_pack(lval:={default},rval:={default})]) -- adding 0.0 for missing values
     """)
 
-def dot_prod_matching_freqs(column, key, val):
+def dot_prod_matching_freqs(column, key, val, dotnote = False):
     return(f"""
-        {get_matching_freqs(column, key, val, default = 0.0)}.list_transform(x -> x.lval * x.rval).list_sum()
+        {get_matching_freqs(column, key, val, default = 0.0, dotnote = dotnote)}.list_transform(x -> x.lval * x.rval).list_sum()
            """)
 
-def mult_prod_matching_freqs(column, key, val):
+def mult_prod_matching_freqs(column, key, val, dotnote = False):
     return(f"""
-        {get_matching_freqs(column, key, val, default = 1)}.list_transform(x -> x.lval * x.rval).list_product()
+        {get_matching_freqs(column, key, val, default = 1, dotnote = dotnote)}.list_transform(x -> x.lval * x.rval).list_product()
            """)
 
+## TODO: reduce to one function!
 def group_by_naics_code_foia(naics_digits = ""):
     return(f"""
     SELECT FEIN, 
