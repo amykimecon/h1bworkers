@@ -8,6 +8,7 @@ library(glue)
 library(httr)
 library(readxl)
 library(RPostgres)
+library(stringdist)
 
 # SETTING WORKING DIRECTORIES ----
 root <- "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
@@ -47,26 +48,38 @@ get_head <- function(tablename, n = 10, filter = ""){
 }
 
 # FOIA MERGE ----
-matchfunc <- function(matchtype = "empnamestub", dbfoia = foia_emp_clean, dbrev = revelio_emp_clean){
-  matchdf <- left_join(dbfoia, dbrev, by = c(matchtype)) %>%
+matchfunc <- function(matchtype = c("empnamestub"), dbfoia = foia_emp_clean, dbrev = revelio_emp_clean){
+  matchdf <- left_join(dbfoia, dbrev, by = matchtype, relationship = "many-to-many") %>%
     mutate(statematch = case_when(is.na(top_state) ~ -1,
-                                  modal_msastatename == top_state ~ 1,
-                                  is.na(modal_msaworksitestatename) | modal_msaworksitestatename != top_state ~ 0,
-                                  modal_msaworksitestatename == top_state ~ 1,
+                                  top_emp_state == top_state ~ 1,
+                                  is.na(top_worksite_state) | top_worksite_state != top_state ~ 0,
+                                  top_worksite_state == top_state ~ 1,
+                                  TRUE ~ 0),
+           naicsmatch = case_when(is.na(top_naics) | is.na(naics_code) | top_naics == 999999 ~ -1,
+                                  top_naics == naics_code ~ 1,
+                                  TRUE ~ 0),
+           top_naics2 = substr(top_naics, 1, 2),
+           naics_code2 = substr(naics_code, 1, 2),
+           naics2match = case_when(is.na(top_naics2) | is.na(naics_code2) | top_naics2 == "99" ~ -1,
+                                  top_naics2 == naics_code2 ~ 1,
                                   TRUE ~ 0)) %>%
-    group_by(employer_name) %>% mutate(statematchind = max(statematch, na.rm=TRUE))
-  print(glue("Total number of companies matched: {length(unique(filter(matchdf, !is.na(company))$employer_name))}"))
-  print(glue("Total number of companies matched with state mismatch: {length(unique(filter(matchdf, statematchind == 0)$employer_name))}"))
+    group_by(company_FOIA) %>% mutate(statematchind = max(statematch, na.rm=TRUE),
+                                       naicsmatchind = max(naicsmatch, na.rm=TRUE),
+                                      naics2matchind = max(naics2match, na.rm=TRUE))
+  print(glue("Total number of companies matched: {length(unique(filter(matchdf, !is.na(company))$id.x))}"))
+  print(glue("Total number of companies matched with state or naics match: {length(unique(filter(matchdf, statematchind == 1 | naics2matchind == 1)$id.x))}"))
+  #print(glue("Total number of companies matched with state and naics mismatch: {length(unique(filter(matchdf, statematchind == 0 & naicsmatchind == 0)$company_FOIA))}"))
+  
   return(matchdf)
 }
 
 # VIEWERS/UTILITIES ----
 ## look at relevant columns of matched df
 matchedview <- function(matchdf){
-  View(base_match %>% select(employer_name, company, statematchind, n_apps, n_success, n, n_users, modal_msaname, modal_msastate,
-                             top_metro_area, top_state,
-                             fraud_ratio, last_lot_year, recent_start, recent_end,
-                             modal_msaworksitename, modal_msaworksitestate, lei))
+  View(matchdf %>% select(company_FOIA, company, statematch, naics2match, n_apps, n_success, n, n_users, 
+                          top_naics, naics_code, top_naics2, naics_code2, top_emp_state, top_worksite_state,
+                             top_state,
+                             fraud_ratio, last_lot_year, recent_start, recent_end, lei))
 }
 
 ## look for keyword match (up to 4) in company name in revelio data
