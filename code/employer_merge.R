@@ -36,7 +36,7 @@ revelio_raw <- read_csv(glue("{root}/data/int/revelio/companies_by_positions_loc
 foia_emp <- raw %>% group_by(FEIN, lottery_year) %>% 
   # getting total number of applications and cleaning name (lowercase + remove commas and periods)
   mutate(n_tot_fein_yr = n(),
-         company_FOIA = str_to_lower(str_remove_all(employer_name, ",|\\.")),
+         company_FOIA = str_to_lower(str_remove_all(employer_name, ",|\\.|'")),
   ) %>% ungroup() %>%
   # filtering duplicate applications
   filter(ben_multi_reg_ind == 0) %>%
@@ -60,12 +60,11 @@ foia_emp <- raw %>% group_by(FEIN, lottery_year) %>%
   group_by(FEIN) %>%
   mutate(top_naics = first(NAICS_CODE),
          n_by_naics = first(n_by_naics)) %>% ungroup() %>%
-  group_by(FEIN, company_FOIA) %>%
+  group_by(FEIN, company_FOIA, lottery_year) %>%
   summarize(n_apps = n(),
             n_success = sum(ifelse(status_type == "SELECTED", 1, 0)),
             across(c(top_emp_state, top_worksite_state, n_by_state, n_by_worksite_state, top_naics, n_by_naics), first),
-            fraud_ratio = max(fraud_ratio, na.rm=TRUE),
-            last_lot_year = max(lottery_year)
+            fraud_ratio = max(fraud_ratio, na.rm=TRUE)
   ) %>%
   mutate(share_state = n_by_state/n_apps,
          share_worksite_state = n_by_worksite_state/n_success,
@@ -77,14 +76,9 @@ revelio_emp <- revelio_raw %>%
   filter(!is.na(rcid)) %>%
   select(c(company, rcid, n, n_users, recent_start, recent_end, top_metro_area, top_state, lei,
            ultimate_parent_company_name, naics_code)) %>%
-  mutate(id = row_number())
+  mutate(id = row_number(),
+         company_rev = str_to_lower(str_remove_all(company, ",|\\.|'")))
 
-foia_samp_ids <- sample_n(foia_emp, 100) %>% select(c(company_FOIA, FEIN))
-revelio_samp <- sample_n(revelio_emp, 100000)
-
-# extra_words <- c("inc", "ltd", "plc", "pllc", "mso", "svc", "ggmbh", "gmbh", "limited", "pvt", "md", "private",
-#                  "llp", "pc", "corporation", "corp", "intl", "international", "group", "co", "usa", "na", "management", 
-#                  "global", "america", )
 clean_emp_name <- function(df, empnamecol){
   # step zero: convert to lowercase and remove symbols
   df[["empnameraw"]] <- str_remove(str_to_lower(df[[empnamecol]]), "™|®|©")
@@ -107,99 +101,183 @@ clean_emp_name <- function(df, empnamecol){
   return(df_out)
 }
 
-#foia_samp <- foia_emp %>% filter(company_FOIA %in% foia_samp_ids$company_FOIA & FEIN %in% foia_samp_ids$FEIN)
-foia_emp_clean <- clean_emp_name(foia_emp, "company_FOIA")
-revelio_emp_clean <- clean_emp_name(revelio_emp , "company") #%>% arrange(n_users)
+foia_names <- foia_emp %>% select(company_FOIA, FEIN) %>% distinct()
+foia_names_clean <- clean_emp_name(foia_names, "company_FOIA")
+
+revelio_names <- revelio_emp %>% select(company_rev, rcid)
+revelio_names_clean <- clean_emp_name(revelio_names, "company_rev")
+
+# #foia_samp <- foia_emp %>% filter(company_FOIA %in% foia_samp_ids$company_FOIA & FEIN %in% foia_samp_ids$FEIN)
+# foia_emp_clean <- clean_emp_name(foia_emp, "company_FOIA")
+# revelio_emp_clean <- clean_emp_name(revelio_emp , "company") #%>% arrange(n_users)
 
 # tokenizing
-tokens_long <- bind_rows(list(foia_emp_clean %>% select(id, empfortoken) %>% mutate(data = "foia"),
-                              revelio_emp_clean %>% select(id, empfortoken) %>% mutate(data = "rev"))) %>%
+tokens_long <- data.frame(empfortoken = c(foia_names_clean$empfortoken, revelio_names_clean$empfortoken)) %>%
   mutate(fullname = empfortoken) %>% #sample_n(10000) %>%
   separate_longer_delim(empfortoken, " ") %>%
   group_by(1) %>% mutate(tot = n(), token = empfortoken) %>% ungroup() %>%
   group_by(token) %>% mutate(freq = n()/tot) %>% ungroup() 
 
-# getting frequency cutoff for top 200 most frequent tokens
-token_freq_cutoff <- arrange(tokens_long %>% group_by(token) %>% summarize(freq = mean(freq)), desc(freq))$freq[200]
+# getting frequency cutoff for top 100 most frequent tokens
+token_freq_cutoff <- arrange(tokens_long %>% group_by(token) %>% summarize(freq = mean(freq)), desc(freq))$freq[100]
 
-tokens_wide <- tokens_long %>% filter(freq < token_freq_cutoff) %>%
-  group_by(id, data) %>% arrange(freq) %>% mutate(rank = row_number()) %>% filter(rank <= 5) %>%
-  pivot_wider(id_cols = c(id, data), names_prefix = "token", names_from = "rank", values_from = "token")
+tokens_wide <- tokens_long %>% distinct(fullname, token, freq) %>% arrange(freq) %>% 
+  filter(freq < token_freq_cutoff) %>% group_by(fullname) %>% mutate(rank = row_number()) %>% filter(rank <= 5) %>%
+  pivot_wider(id_cols = c(fullname), names_prefix = "token", names_from = "rank", values_from = c("token", "freq"))
 
-foia_emp_tokens <- foia_emp_clean %>% left_join(filter(tokens_wide, data == "foia") %>% select(-c(data)))
-revelio_emp_tokens <- revelio_emp_clean %>% left_join(filter(tokens_wide, data == "rev") %>% select(-c(data)))
+foia_emp_tokens <- foia_emp %>% left_join(foia_names_clean, by = c("company_FOIA", "FEIN")) %>%
+  left_join(tokens_wide, by = c("empfortoken" = "fullname")) %>% filter(!is.na(token_token1))
+
+revelio_emp_tokens <- revelio_emp %>% left_join(revelio_names_clean, by = c("rcid", "company_rev")) %>%
+  left_join(tokens_wide, by = c("empfortoken" = "fullname")) %>% filter(!is.na(token_token1))
 
 
 ## matching on rarest and second rarest tokens
-token_match <- matchfunc(matchtype = c("token1", "token2"), 
-                         dbfoia = foia_emp_tokens %>% filter(!is.na(token1)), 
-                         dbrev = revelio_emp_tokens %>% filter(!is.na(token1)))
-write_csv(token_match, glue("{root}/data/int/token_match_r_mar10.csv"))
+token_match <- matchfunc(matchtype = c("token_token1", "token_token2", "token_token3"), 
+                         dbfoia = foia_emp_tokens, 
+                         dbrev = revelio_emp_tokens)
+write_csv(token_match, glue("{root}/data/int/token_match_r_mar12.csv"))
 
-## matching directly on strings               
-exact_match <- matchfunc(c("empnameraw"))
-write_csv(exact_match, glue("{root}/data/int/exact_match_r_mar6.csv"))
-stub_match <- matchfunc()
-write_csv(exact_match, glue("{root}/data/int/stub_match_r_mar6.csv"))
-base_match <- matchfunc(c("empnamebase"))
-write_csv(exact_match, glue("{root}/data/int/base_match_r_mar6.csv"))
+token_match_clean <- token_match %>% 
+  filter(!is.na(rcid)) %>%
+  rowwise() %>%
+  mutate(f1 = log10(freq_token1.x),
+         f2 = log10(freq_token2.x),
+         f3 = log10(freq_token3.x),
+         ftot = sum(f1, f2, f3, na.rm=TRUE)) %>%
+  mutate(rawstringdist = stringdist(empnameraw.x, empnameraw.y),
+         stubstringdist = stringdist(empnamestub.x, empnamestub.y),
+         basestringdist = stringdist(empnamebase.x, empnamebase.y))
+
+## looking for duplicate linkedin companies
+token_dup <- token_match_clean %>% filter((basestringdist <= 2 & ftot < -6.9) |
+                                            (f1 < -6.9) | (ftot < -15) | (f1 < -5.5 & ftot < -9)) %>%
+  group_by(FEIN, lottery_year) %>% mutate(unique_rcid = n_distinct(rcid))
+
+
+token_dup2 <- token_match_clean %>% filter((basestringdist <= 2 & ftot < -6.9) |
+                                            (f1 < -6.9) | (ftot < -15) | (f1 < -5.5 & ftot < -9))
+
+# this is a dataset that maps rcids to 'duplicate' rcids -- when outputting final matched
+#   dataset, make sure to link back here 
+dup_rcids <- token_dup2 %>%
+  group_by(empnamebase.x) %>% mutate(unique_rcid = n_distinct(rcid)) %>% 
+  filter(unique_rcid > 1 & unique_rcid < 4) %>%
+  group_by(empnamebase.x, rcid, empnamebase.y, n) %>% summarize() %>%
+  group_by(empnamebase.x) %>%
+  arrange(desc(n)) %>% mutate(main_rcid = ifelse(row_number() == 1, rcid, NA)) %>%
+  fill(main_rcid)
+
+write_csv(dup_rcids, glue("{root}/data/int/dup_rcids_mar19.csv"))
+
+## looking for duplicate FEINs
+dup_feins <- token_dup2 %>% 
+  group_by(rcid) %>% 
+  mutate(unique_fein = n_distinct(FEIN)) %>%
+  filter(unique_fein > 1) %>%
+  group_by(rcid, company_rev, FEIN) %>% summarize(n_success = sum(n_success)) %>%
+  group_by(rcid) %>% arrange(desc(n_success)) %>% mutate(main_fein = ifelse(row_number() == 1, FEIN, NA)) %>%
+  fill(main_fein)
 
 ## good matches
+## iding and removing dups
+token_match_nodups <- token_match_clean %>% 
+  left_join(dup_rcids %>% group_by(rcid, main_rcid) %>% summarize(), by = c("rcid")) %>%
+  mutate(main_rcid = ifelse(is.na(main_rcid), rcid, main_rcid)) %>%
+  group_by(id.x) %>%
+  mutate(main_match = ifelse(rcid == main_rcid, 1, 0)) %>%
+  filter(main_match | max(main_match) == 0)
+
 ### for 1-1 matches, keep all for now
-single_match <- token_match %>% group_by(id.x) %>% mutate(nmatch = sum(ifelse(!is.na(company), 1, 0))) %>%
+single_match <- token_match_nodups %>% group_by(id.x) %>% mutate(nmatch = sum(ifelse(!is.na(company), 1, 0))) %>%
   filter(nmatch == 1) %>%
   rowwise() %>% mutate(recent_act = max(recent_start, recent_end, as.Date("2000-01-01"), na.rm=TRUE)) %>% ungroup() #%>%
 #filter(n > 5 & recent_act >= as.Date("2020-01-01"))
 
 ### for many-1 matches
-mult_match_all <- token_match %>% group_by(id.x) %>% mutate(nmatch = sum(ifelse(!is.na(company), 1, 0))) %>%
-  filter(nmatch > 1) %>%
-  mutate(rawstringdist = stringdist(empnameraw.x, empnameraw.y),
-         stubstringdist = stringdist(empnamestub.x, empnamestub.y)) 
-
+mult_match_all <- token_match_nodups %>% group_by(id.x) %>% mutate(nmatch = sum(ifelse(!is.na(company), 1, 0))) %>%
+  filter(nmatch > 1) 
+  
+# best matches: exact match of stub name and state match and high n AND unique (after all those filters)
 mult_match_certain <- mult_match_all %>%
   filter(empnamestub.x == empnamestub.y & n >= max(n)*0.5 & statematch == 1) %>%
   mutate(nmatch = n()) %>% filter(nmatch == 1)
 
+# second best matches: among matches with stub name lev dist of 2 or less, keep companies with 5 or fewer matches
+#   remaining (indicator of stub name lev dist being a good filter), then keep if naics code match OR 
+#   n > 100 OR state match with sufficient n AND unique (after all those filters)
 mult_match_certain2 <- mult_match_all %>% left_join(mult_match_certain %>% select(id.x) %>% mutate(certainmatch = 1)) %>%
   filter(is.na(certainmatch)) %>%
   filter(stubstringdist <= 2) %>%
   mutate(nmatch = n()) %>% 
-  filter(nmatch <= 5) %>% filter(top_naics2 == naics_code2 | n > 100 | (statematch == 1 & n >= 0.5*max(n))) %>%
+  # filter(nmatch <= 5) %>% 
+  filter(top_naics2 == naics_code2 | n > 100 | 
+           (statematch == 1 & n >= 0.5*max(n))) %>%
   mutate(nmatch = n()) %>% filter(nmatch == 1)
 
-mult_match_filt <- mult_match_all %>% left_join(bind_rows(list(mult_match_certain, mult_match_certain2)) %>% 
-                                                  select(id.x) %>% mutate(certainmatch = 1)) %>%
-  filter(is.na(certainmatch)) %>% mutate(nmatch = n()) %>%
-  filter(nmatch < 5 | rawstringdist <= median(rawstringdist)) %>%
-  # filter((!is.na(top_naics) & !is.na(naics_code) & top_naics != 999999 & top_naics == naics_code) |
-  #          (max(ifelse(!is.na(top_naics) & !is.na(naics_code) & top_naics != 999999 & top_naics == naics_code, 1, 0)) == 0)) %>%
-  filter((!is.na(top_naics2) & !is.na(naics_code2) & top_naics2 != "99" & top_naics2 == naics_code2) |
-           (max(ifelse(!is.na(top_naics2) & !is.na(naics_code2) & top_naics2 != "99" & top_naics2 == naics_code2, 1, 0)) == 0)) %>%
-  filter(
-    (!is.na(top_worksite_state) & !is.na(top_state) & top_worksite_state == top_state) | 
-      (!is.na(top_emp_state) & !is.na(top_state) & top_emp_state == top_state) |
-      (max(ifelse(!is.na(top_worksite_state) & !is.na(top_state) & top_worksite_state == top_state, 1, 0)) == 0 &
-         max(ifelse(!is.na(top_emp_state) & !is.na(top_state) & top_emp_state == top_state, 1, 0)) == 0)
-  ) %>%
-  mutate(nmatch = n())
-
-mult_match3 <- mult_match_filt %>%
-  filter(nmatch <= 5 & stubstringdist <= min(stubstringdist) + 2 & n >= max(n)*0.5) %>%
-  mutate(nmatch = n()) %>% filter(nmatch == 1)
-
-# FINAL SET OF DECENT ONE-ONE MATCHES
+# FINAL SET OF DECENT ONE-ONE MATCHES ----
 good_matches <- bind_rows(list(
-  single_match %>% filter(stringdist(empnamestub.x, empnamestub.y) <= 2 | statematch == 1 | naics2match == 1),
-  mult_match_certain,
-  mult_match_certain2,
-  mult_match3
-))
+  single_match %>% filter(stringdist(empnamestub.x, empnamestub.y) <= 2 | statematch == 1 | naics2match == 1) %>%
+    mutate(matchtype = "single"),
+  mult_match_certain %>% mutate(matchtype = "mult_high"),
+  mult_match_certain2 %>% mutate(matchtype = "mult_med")#, mult_match3
+)) %>% 
+  group_by(rcid, lottery_year) %>%
+  mutate(foia_id = cur_group_id())
+# 
+# dup_feins2 <- good_matches_all %>% group_by(rcid) %>% mutate(n_feins = n_distinct(FEIN)) %>%
+#   filter(n_feins > 1) %>% group_by(rcid, company_rev, FEIN) %>% summarize(n_success = sum(n_success)) %>%
+#   group_by(rcid) %>% arrange(desc(n_success)) %>% mutate(main_fein = ifelse(row_number() == 1, FEIN, NA)) %>%
+#   fill(main_fein)
+# 
+# dup_feins_all <- bind_rows(list(dup_feins, dup_feins2)) %>%
+#   group_by(FEIN, main_fein) %>% summarize()
+# 
+# write_csv(dup_feins_all, glue("{root}/data/int/dup_feins_mar19.csv"))
+
 print(glue("Total FEINs: {length(unique(foia_emp$FEIN))}"))
 print(glue("Matched FEINs: {length(unique(good_matches$FEIN))} ({round(length(unique(good_matches$FEIN))*100/length(unique(foia_emp$FEIN)), 1)}%)"))
 
 unmatched <- filter(foia_emp, !(id %in% good_matches$id.x))
 unmatched_fein <- filter(foia_emp, !(FEIN %in% good_matches$FEIN))
+
+write_csv(good_matches, glue("{root}/data/int/good_matches_mar19.csv"))
+
+# FILTERING TO LOTTERY YEAR 2021, REMOVING DUPLICATES
+# goodmatch21 <- filter(raw, lottery_year == 2021) %>%
+#   mutate(company_FOIA_original = str_to_lower(str_remove_all(employer_name, ",|\\."))) %>%
+#   group_by(FEIN, company_FOIA_original) %>% summarize(n_foia=n()) %>%
+#   left_join(good_matches %>% filter(lottery_year == 2021), by = c("FEIN")) %>%
+#   left_join(dup_rcids %>% )
+# 
+# write_csv(good_matches, glue("{root}/data/int/good_matches_mar14.csv"))
+
+# unique_goodmatch21 <- goodmatch21 %>% group_by(FEIN, rcid) %>%
+#   summarize(n=n()) %>% ungroup() %>% group_by(FEIN) %>% mutate(nmatch = n()) %>%
+#   filter(nmatch == 1)
+# 
+# filtered_goodmatch21 <- goodmatch21 %>% filter(!(FEIN %in% unique_goodmatch21$FEIN))
+# 
+# # drop duplicates with very different strings (if good string match exists)
+# #   then drop duplicates with way fewer n (if high n match exists)
+# x <- filtered_goodmatch21 %>% group_by(FEIN) %>%
+#   mutate(strmatch = ifelse(!is.na(company_FOIA) & !is.na(company_FOIA_original) &
+#                              stringdist(company_FOIA_original, company_FOIA) <= 2, 1, 0)) %>%
+#   filter(strmatch == 1) %>%
+#   filter(n >= 0.5*max(n) | max(n) < 50) %>%
+#   group_by(FEIN) %>% mutate(unique_rcid = n_distinct(rcid))
+
+# 
+# %>%
+#   mutate(strmatch = ifelse(!is.na(company_FOIA) & !is.na(company_FOIA_original) &
+#                              stringdist(company_FOIA_original, company_FOIA) <= 1, 1, 0)) %>%
+#   group_by(FEIN) %>%
+#   mutate(strmatchind = max(strmatch)) %>%
+#   filter(strmatch == 1 | strmatchind == 0) %>%
+#   mutate(nmatch = n())
+# 
+# x <- filter(goodmatch21, is.na(rcid)) %>%
+#   select(c(FEIN, company_FOIA)) %>% left_join(good_matches, by = "FEIN")
 
 # OLD CODE ----
 # ## HUD API ZIP-CBSA CROSSWALK ----

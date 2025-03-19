@@ -58,8 +58,16 @@ matchfunc <- function(matchtype = c("empnamestub"), dbfoia = foia_emp_clean, dbr
            naicsmatch = case_when(is.na(top_naics) | is.na(naics_code) | top_naics == 999999 ~ -1,
                                   top_naics == naics_code ~ 1,
                                   TRUE ~ 0),
-           top_naics2 = substr(top_naics, 1, 2),
-           naics_code2 = substr(naics_code, 1, 2),
+           top_naics2raw = substr(top_naics, 1, 2),
+           top_naics2 = case_when(top_naics2raw %in% c("31", "32", "33") ~ "31",
+                                  top_naics2raw %in% c("44", "45") ~ "44",
+                                  top_naics2raw %in% c("48", "49") ~ "48",
+                                  TRUE ~ top_naics2raw),
+           naics_code2raw = substr(naics_code, 1, 2),
+           naics_code2 = case_when(naics_code2raw %in% c("31", "32", "33") ~ "31",
+                                   naics_code2raw %in% c("44", "45") ~ "44",
+                                   naics_code2raw %in% c("48", "49") ~ "48",
+                                   TRUE ~ naics_code2raw),
            naics2match = case_when(is.na(top_naics2) | is.na(naics_code2) | top_naics2 == "99" ~ -1,
                                   top_naics2 == naics_code2 ~ 1,
                                   TRUE ~ 0)) %>%
@@ -76,10 +84,10 @@ matchfunc <- function(matchtype = c("empnamestub"), dbfoia = foia_emp_clean, dbr
 # VIEWERS/UTILITIES ----
 ## look at relevant columns of matched df
 matchedview <- function(matchdf){
-  View(matchdf %>% select(company_FOIA, company, statematch, naics2match, n_apps, n_success, n, n_users, 
+  View(matchdf %>% select(id.x, ftot, lottery_year, company_FOIA, company_rev, statematch, naics2match, n_apps, n_success, n, n_users, 
                           top_naics, naics_code, top_naics2, naics_code2, top_emp_state, top_worksite_state,
                              top_state,
-                             fraud_ratio, last_lot_year, recent_start, recent_end, lei))
+                             fraud_ratio, recent_start, recent_end, lei))
 }
 
 ## look for keyword match (up to 4) in company name in revelio data
