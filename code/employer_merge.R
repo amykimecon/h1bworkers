@@ -34,41 +34,43 @@ revelio_raw <- read_csv(glue("{root}/data/int/revelio/companies_by_positions_loc
 
 # CLEANING H1B EMPLOYER DATA ----
 foia_emp <- raw %>% group_by(FEIN, lottery_year) %>% 
+  filter(FEIN != "(b)(3) (b)(6) (b)(7)(c)") %>%
   # getting total number of applications and cleaning name (lowercase + remove commas and periods)
   mutate(n_tot_fein_yr = n(),
          company_FOIA = str_to_lower(str_remove_all(employer_name, ",|\\.|'")),
+         valid_app = ifelse(ben_multi_reg_ind == 0, 1, 0)
   ) %>% ungroup() %>%
   # filtering duplicate applications
-  filter(ben_multi_reg_ind == 0) %>%
+  #filter(ben_multi_reg_ind == 0) %>%
   # indicator for likely fraud (high ratio of applications to current employees in us)
   mutate(fraud_ratio = ifelse(is.na(NUM_OF_EMP_IN_US) | NUM_OF_EMP_IN_US == 0, -1,
                               n_tot_fein_yr/NUM_OF_EMP_IN_US)) %>%
   # grouping by employer location, then employer (getting modal employer state)
   group_by(FEIN, state_name) %>%
-  mutate(n_by_state = n()) %>% arrange(desc(n_by_state)) %>% ungroup() %>%
+  mutate(n_by_state = sum(valid_app)) %>% arrange(desc(n_by_state)) %>% ungroup() %>%
   group_by(FEIN) %>%
   mutate(top_emp_state = first(state_name),
          n_by_state = first(n_by_state)) %>% ungroup() %>%
   # grouping by worksite, then employer (getting modal worksite state)
   group_by(FEIN, worksite_state_name) %>%
-  mutate(n_by_worksite_state = sum(ifelse(!is.na(worksite_state_name), 1, 0))) %>% arrange(desc(n_by_worksite_state)) %>% ungroup() %>%
+  mutate(n_by_worksite_state = sum(ifelse(!is.na(worksite_state_name), valid_app, 0))) %>% arrange(desc(n_by_worksite_state)) %>% ungroup() %>%
   group_by(FEIN) %>%
   mutate(top_worksite_state = first(worksite_state_name),
          n_by_worksite_state = first(n_by_worksite_state)) %>% ungroup() %>%
   group_by(FEIN, NAICS_CODE) %>%
-  mutate(n_by_naics = sum(ifelse(!is.na(NAICS_CODE), 1, 0))) %>% arrange(desc(n_by_naics)) %>% ungroup() %>%
+  mutate(n_by_naics = sum(ifelse(!is.na(NAICS_CODE), valid_app, 0))) %>% arrange(desc(n_by_naics)) %>% ungroup() %>%
   group_by(FEIN) %>%
   mutate(top_naics = first(NAICS_CODE),
          n_by_naics = first(n_by_naics)) %>% ungroup() %>%
   group_by(FEIN, company_FOIA, lottery_year) %>%
-  summarize(n_apps = n(),
-            n_success = sum(ifelse(status_type == "SELECTED", 1, 0)),
+  summarize(n_apps = sum(valid_app),
+            n_success = sum(ifelse(status_type == "SELECTED", valid_app, 0)),
             across(c(top_emp_state, top_worksite_state, n_by_state, n_by_worksite_state, top_naics, n_by_naics), first),
             fraud_ratio = max(fraud_ratio, na.rm=TRUE)
   ) %>%
   mutate(share_state = n_by_state/n_apps,
          share_worksite_state = n_by_worksite_state/n_success,
-         share_naics = n_by_naics/n_success) %>% ungroup()%>%
+         share_naics = n_by_naics/n_success) %>% ungroup() %>%
   mutate(id=row_number())
 
 # TESTING MERGE ----
@@ -136,7 +138,7 @@ revelio_emp_tokens <- revelio_emp %>% left_join(revelio_names_clean, by = c("rci
 token_match <- matchfunc(matchtype = c("token_token1", "token_token2", "token_token3"), 
                          dbfoia = foia_emp_tokens, 
                          dbrev = revelio_emp_tokens)
-write_csv(token_match, glue("{root}/data/int/token_match_r_mar12.csv"))
+write_csv(token_match, glue("{root}/data/int/token_match_r_mar20.csv"))
 
 token_match_clean <- token_match %>% 
   filter(!is.na(rcid)) %>%
@@ -168,7 +170,7 @@ dup_rcids <- token_dup2 %>%
   arrange(desc(n)) %>% mutate(main_rcid = ifelse(row_number() == 1, rcid, NA)) %>%
   fill(main_rcid)
 
-write_csv(dup_rcids, glue("{root}/data/int/dup_rcids_mar19.csv"))
+write_csv(dup_rcids, glue("{root}/data/int/dup_rcids_mar20.csv"))
 
 ## looking for duplicate FEINs
 dup_feins <- token_dup2 %>% 
@@ -222,7 +224,7 @@ good_matches <- bind_rows(list(
   mult_match_certain %>% mutate(matchtype = "mult_high"),
   mult_match_certain2 %>% mutate(matchtype = "mult_med")#, mult_match3
 )) %>% 
-  group_by(rcid, lottery_year) %>%
+  group_by(main_rcid, lottery_year) %>%
   mutate(foia_id = cur_group_id())
 # 
 # dup_feins2 <- good_matches_all %>% group_by(rcid) %>% mutate(n_feins = n_distinct(FEIN)) %>%
@@ -241,7 +243,8 @@ print(glue("Matched FEINs: {length(unique(good_matches$FEIN))} ({round(length(un
 unmatched <- filter(foia_emp, !(id %in% good_matches$id.x))
 unmatched_fein <- filter(foia_emp, !(FEIN %in% good_matches$FEIN))
 
-write_csv(good_matches, glue("{root}/data/int/good_matches_mar19.csv"))
+write_csv(good_matches %>% select(foia_id, FEIN, lottery_year, rcid, main_rcid, matchtype), 
+          glue("{root}/data/int/good_match_ids_mar20.csv"))
 
 # FILTERING TO LOTTERY YEAR 2021, REMOVING DUPLICATES
 # goodmatch21 <- filter(raw, lottery_year == 2021) %>%
