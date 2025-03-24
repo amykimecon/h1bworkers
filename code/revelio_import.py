@@ -68,4 +68,37 @@ data.to_parquet(f"{root}/data/int/revelio/revelio_agg.parquet")
 end = time.time()
 print(f"Time to query and save: {end-start}")
 
+
+## TRYING TO IDENTIFY DUPLICATES IN REVELIO DATA
+# company_clean = """
+# TRIM(REGEXP_REPLACE(
+#     REGEXP_REPLACE(
+#         REGEXP_REPLACE(
+#             REGEXP_REPLACE(
+#                 TRANSLATE(lower(company)), ',|\\.', '', 'g'
+#             ), 
+#             '\\s*\\(.*\\)\\s*', ' ', 'g'
+#         ), 
+#         '(l\\s?l\\s?c|corp|inc|ltd|plc|pllc|mso|svc|gmbh|&?\\s?co|limited|pvt|llp)', '', 'g'
+#     ),
+#     ' & ', ' and ', 'g'
+# ))"""
+company_clean = """
+TRIM(REGEXP_REPLACE(
+    REGEXP_REPLACE(
+        REGEXP_REPLACE(
+            REGEXP_REPLACE(
+                lower(company), ',|\\.', '', 'g'
+            ), 
+            '\\s*\\(.*\\)\\s*', ' ', 'g'
+        ), 
+        '(l\\s?l\\s?c|corp|inc|ltd|plc|pllc|mso|svc|gmbh|&?\\s?co|limited|pvt|llp)', '', 'g'
+    ),
+    ' & ', ' and ', 'g'
+))"""
+dup_query = f"""SELECT * FROM (
+    (SELECT *, {company_clean} AS company_clean FROM revelio.company_mapping WHERE lei IS NOT NULL LIMIT 1000) as withlei 
+    LEFT JOIN (SELECT *, {company_clean} AS company_clean FROM revelio.company_mapping WHERE lei IS NULL LIMIT 10000) as withoutlei
+    ON withlei.company_clean = withoutlei.company_clean) """
+rev_with_lei = db.raw_sql(dup_query)
 db.close()
