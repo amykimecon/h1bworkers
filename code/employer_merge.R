@@ -219,7 +219,7 @@ mult_match_certain2 <- mult_match_all %>% left_join(mult_match_certain %>% selec
 
 # FINAL SET OF DECENT ONE-ONE MATCHES ----
 good_matches <- bind_rows(list(
-  single_match %>% filter(stringdist(empnamestub.x, empnamestub.y) <= 2 | statematch == 1 | naics2match == 1) %>%
+  single_match %>% filter(stubstringdist <= 2 | statematch == 1 | naics2match == 1) %>%
     mutate(matchtype = "single"),
   mult_match_certain %>% mutate(matchtype = "mult_high"),
   mult_match_certain2 %>% mutate(matchtype = "mult_med")#, mult_match3

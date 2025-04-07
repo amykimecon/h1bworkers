@@ -36,6 +36,8 @@ raw_i129 <- bind_rows(all_i129_data_list)
 #   lapply(all_i129_data_list, function(x) mutate(x, across(c(REC_FY, NUMBER_OF_BENEFICIARIES), ~as.character(.x)),
 #                                                 across(c(REC_DATE, ACT_DATE, VALID_FROM, VALID_TO), ~ifelse(is.Date(.x), format(.x, "%Y-%m-%d"), as.character(.x)))))
 # )
+i129_noquotes <- raw_i129 %>% mutate(across(c(EMPLOYER_NAME, JOB_TITLE), function(.x) str_remove_all(.x, '\\"')))
+write_csv(i129_noquotes, glue("{root}/data/raw/foia_i129/i129_allfys.csv"))
 
 ## USCIS data
 all_uscis_data_list <- list(read_xlsx(glue("{root}/data/raw/uscis/emp_info_fy2009_2012.xlsx")),

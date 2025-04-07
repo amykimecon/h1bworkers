@@ -38,6 +38,44 @@ foiadf = con.sql("SELECT * FROM all_tokenized WHERE dataset = 'foia'")# LIMIT 10
 revdf = con.sql("SELECT * FROM all_tokenized WHERE dataset = 'rev'")# LIMIT 500000")
 
 #################################
+# DEDUPING
+#################################
+# FOIA 
+foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all.csv")
+con.sql("CREATE TABLE foia_raw AS SELECT * FROM foia_raw_file")
+
+
+# REVELIO
+rev_raw_file = con.read_parquet(f"{root}/data/int/revelio/revelio_agg.parquet")
+con.sql("CREATE TABLE rev_raw AS SELECT * FROM rev_raw_file")
+x = con.sql("SELECT *, ROW_NUMBER() OVER() AS unique_id, lei IS NULL AS lei_ind FROM rev_raw")
+lei = con.sql("SELECT * FROM rev_raw WHERE NOT lei IS NULL")
+lei_null = con.sql("SELECT * FROM rev_raw WHERE lei IS NULL")
+
+
+counts = count_comparisons_from_blocking_rule(
+    table_or_tables=x,
+    blocking_rule = CustomRule("NOT l.lei_ind = r.lei_ind"),                 
+    db_api=db_api, link_type = "dedupe_only", max_rows_limit=1e20)
+print(counts)
+
+emh.create_replace_table(con=con, query="SELECT *,  FROM rev_raw WHERE n_positions_us > 0 AND (recent_startdate_global > '2018-01-01' OR recent_enddate_global > '2018-01-01')", table_out="rev_filt", show = False)
+
+settings_dedupe_rev = SettingsCreator(
+    link_type="dedupe_only",
+    blocking_rules_to_generate_predictions= [
+        CustomRule("l.rarest_token = r.rarest_token AND l.second_rarest_token = r.second_rarest_token"),
+        CustomRule("l.rarest_token = r.second_rarest_token AND l.second_rarest_token = r.rarest_token")],
+    comparisons = [
+        name_comp, 
+        locs_comp,
+        naics_comp],
+    retain_intermediate_calculation_columns=True,
+    retain_matching_columns=True
+)
+
+
+#################################
 # DEFINING COMPARISONS FOR SPLINK
 #################################
 tf_adj_wt = 1

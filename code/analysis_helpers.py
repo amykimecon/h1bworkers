@@ -43,6 +43,19 @@ def get_quarter_foia_sql(date):
     year = int(splits[2])
     return year + np.floor((month-1)/3)/4
 
+# get fiscal year from quarter (sql)
+def get_fy_from_quarter_sql(q):
+    return(np.floor(q+0.25))
+
+# get sql strings for getting month, day, year from FOIA Bloomberg format dates
+def get_info_from_bb_date(datecol, unit):
+    if unit == 'month':
+        return(f"CASE WHEN {datecol} = 'NA' THEN NULL ELSE SUBSTRING({datecol}, 1, STRPOS({datecol}, '/') -1)::INT END")    
+    elif unit == 'day':
+        return(f"CASE WHEN {datecol} = 'NA' THEN NULL ELSE SUBSTRING({datecol}, STRPOS({datecol}, '/') + 1, STRPOS(SUBSTRING({datecol}, STRPOS({datecol}, '/') + 1, 3), '/') - 1)::INT END")
+    elif unit == 'year':
+        return(f"CASE WHEN {datecol} = 'NA' THEN NULL ELSE SUBSTRING({datecol}, STRPOS({datecol}, '/') + STRPOS(SUBSTRING({datecol}, STRPOS({datecol}, '/') + 1, 3), '/') + 1, 4)::INT END")
+    print("ERROR WITH UNIT TYPE!")
 
 ## MORE HELPERS
 def bin_long_diffs(df, varlist):

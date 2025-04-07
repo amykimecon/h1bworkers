@@ -3,16 +3,18 @@
 # Date Created: Wed Mar 12
 
 # Imports and Paths
+root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
+code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+
 import duckdb as ddb
 import pandas as pd
 import numpy as np
-import fiscalyear
+from scipy import stats
+import matplotlib.pyplot as plt
 import seaborn as sns
 import employer_merge_helpers as emh
 import analysis_helpers as ah
-
-root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
-code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+import statsmodels.formula.api as smf
 
 con = ddb.connect()
 
@@ -25,42 +27,24 @@ con.create_function("get_quarter", ah.get_quarter_sql, ["VARCHAR"], "FLOAT")
 
 con.create_function("get_quarter_foia", ah.get_quarter_foia_sql, ["VARCHAR"], "FLOAT")
 
-#####################
-# IMPORTING DATA
-#####################
-## duplicate rcids
+con.create_function("get_fy_from_quarter", ah.get_fy_from_quarter_sql, ['FLOAT'], 'FLOAT')
+
+# importing data
+## duplicate rcids (companies that appear more than once in linkedin data)
 dup_rcids = con.read_csv(f"{root}/data/int/dup_rcids_mar20.csv")
-con.sql("CREATE OR REPLACE TABLE dup_rcids AS SELECT main_rcid, rcid FROM dup_rcids, GROUP BY main_rcid, rcid")
 
-## Importing R Matched data
+## matched company data from R
 rmerge = con.read_csv(f"{root}/data/int/good_match_ids_mar20.csv")
-con.sql("CREATE OR REPLACE TABLE rmerge AS SELECT * FROM rmerge")
 
-## raw foia data
+## raw FOIA bloomberg data
 foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all.csv")
-# merging with rmerge to get foia_ids (drop missings and multi_reg_ind = 1 ???) ## TODO: figure out how to deal w multi_reg
-con.sql("CREATE OR REPLACE TABLE foia_with_ids AS SELECT foia_id, employer_name, NUM_OF_EMP_IN_US, a.FEIN AS FEIN, status_type, ben_multi_reg_ind, rec_date, first_decision_date, FIRST_DECISION, a.lottery_year AS lottery_year FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
 
-## merged revelio data
-merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
-con.sql("CREATE OR REPLACE TABLE merged_pos AS SELECT * FROM merged_pos")
+## joining raw FOIA data with merged data to get foia_ids in raw foia data
+foia_with_ids = con.sql("SELECT *, CASE WHEN matched IS NULL THEN 0 ELSE matched END AS matchind FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id, 1 AS matched FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
 
-
-#####################################
-# COLLAPSING DATA FOR ANALYSIS
-#####################################
-# STEP ONE: get central crosswalk of matched IDs unique at the main_rcid x FEIN x lottery_year level (note: RMERGE is unique at the FEIN x year level (no duplicate main_RCIDs), but is not unique at the main_rcid x year level (may have duplicate FEINs), so need to collapse)
-query1 = """
--- collapse matched IDs to be unique at the rcid x FEIN x lottery_year level
-SELECT lottery_year, main_rcid, foia_id
-FROM rmerge 
-GROUP BY foia_id, lottery_year, main_rcid
-"""
-emh.create_replace_table(con = con, query = query1, table_out="id_merge", show = False)
-
-# STEP TWO: clean and collapse FOIA raw data to foia_id level
-query2 = """
-SELECT foia_id, FIRST(employer_name) AS company_FOIA, lottery_year,
+# collapsing FOIA raw data to foia_id level
+foia_for_merge = con.sql("""
+SELECT foia_id, FIRST(employer_name) AS company_FOIA, lottery_year, 
     MAX(CASE WHEN NOT NUM_OF_EMP_IN_US = 'NA' THEN NUM_OF_EMP_IN_US::INTEGER END) AS n_us_employees,
     COUNT(*) AS n_apps_tot,
     COUNT(CASE WHEN ben_multi_reg_ind = 0 THEN 1 END) AS n_apps, 
@@ -68,264 +52,184 @@ SELECT foia_id, FIRST(employer_name) AS company_FOIA, lottery_year,
     COUNT(CASE WHEN status_type = 'SELECTED' AND ben_multi_reg_ind = 0 THEN 1 END) AS n_success,
     COUNT(CASE WHEN status_type = 'SELECTED' AND ben_multi_reg_ind = 0 AND rec_date != 'NA' THEN 1 END) AS n_i129
 FROM foia_with_ids WHERE foia_id IS NOT NULL GROUP BY foia_id, lottery_year
-"""
-emh.create_replace_table(con = con, query = query2, table_out="foia_for_merge", show = False)
+""").df()
 
-# STEP THREE: clean and collapse revelio data to main_rcid level (by fiscal year of start date)
-query3 = """
-SELECT main_rcid, startfy AS t,
-    COUNT(*) AS new_positions,
-    COUNT(CASE WHEN rank = 1 THEN 1 END) AS new_hires
-FROM 
-    -- rank positions by start date within user id x main_rcid and get FY of start date
-    (SELECT ROW_NUMBER() OVER(PARTITION BY main_rcid, user_id ORDER BY get_fiscal_year(startdate)) AS rank,
-        get_fiscal_year(startdate) AS startfy,
-        country, main_rcid 
-    FROM (
-        SELECT startdate, user_id, country,
-            CASE WHEN main_rcid IS NULL THEN pos.rcid ELSE main_rcid END AS main_rcid
-        FROM (merged_pos AS pos
-        LEFT JOIN 
-            dup_rcids AS dup_cw
-        ON pos.rcid = dup_cw.rcid)
-        )
-    )
-WHERE country = 'United States'
-GROUP BY main_rcid, startfy
-"""
-emh.create_replace_table(con = con, query = query3, table_out="rev_for_merge", show = False)
+## revelio data (pre-filtered to only companies in rmerge)
+merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
 
-# STEP THREE POINT FIVE: clean and collapse revelio data to main_rcid level (by quarter of start date)
-query3_5 = """
-SELECT main_rcid, startq AS t,
-    COUNT(*) AS new_positions,
-    COUNT(CASE WHEN rank = 1 THEN 1 END) AS new_hires
-FROM 
-    -- rank positions by start date within user id x main_rcid and get quarter of start date
-    (SELECT ROW_NUMBER() OVER(PARTITION BY main_rcid, user_id ORDER BY get_quarter(startdate)) AS rank,
-        get_quarter(startdate) AS startq,
-        country, main_rcid 
-    FROM (
-        SELECT startdate, user_id, country,
-            CASE WHEN main_rcid IS NULL THEN pos.rcid ELSE main_rcid END AS main_rcid
-        FROM (merged_pos AS pos
-        LEFT JOIN 
-            dup_rcids AS dup_cw
-        ON pos.rcid = dup_cw.rcid)
-        )
-    )
-WHERE country = 'United States'
-GROUP BY main_rcid, startq
-"""
-emh.create_replace_table(con = con, query = query3_5, table_out="rev_for_merge_q", show = False)
+## pre-processed data
+merged_for_analysis = con.read_parquet(f"{root}/data/int/merged_for_analysis_mar31.parquet")
+balanced_full = con.read_parquet(f"{root}/data/int/balanced_full_mar25.parquet")
 
-# STEP FOUR: merge all datasets
-merge_query = """
-SELECT lottery_year, ids.main_rcid AS main_rcid, ids.foia_id AS foia_id, company_FOIA, n_us_employees, n_apps_tot, n_apps, n_success_tot, n_success, n_i129, t, new_positions, new_hires FROM (
-    id_merge AS ids 
-    JOIN 
-    foia_for_merge AS foia
-    ON ids.foia_id = foia.foia_id
-    LEFT JOIN
-    rev_for_merge AS rev
-    ON ids.main_rcid = rev.main_rcid
-)
-WHERE t IS NOT NULL
-"""
-emh.create_replace_table(con = con, query = merge_query, table_out="merged_for_analysis", show = False)
 
-# STEP FOUR POINT FIVE: merge all datasets (Q level, not FY)
-merge_queryq = """
-SELECT lottery_year, ids.main_rcid AS main_rcid, ids.foia_id AS foia_id, company_FOIA, n_us_employees, n_apps_tot, n_apps, n_success_tot, n_success, n_i129,  t, new_positions, new_hires FROM (
-    id_merge AS ids 
-    JOIN 
-    foia_for_merge AS foia
-    ON ids.foia_id = foia.foia_id
-    LEFT JOIN
-    rev_for_merge_q AS rev
-    ON ids.main_rcid = rev.main_rcid
-)
-WHERE t IS NOT NULL
-"""
-emh.create_replace_table(con = con, query = merge_queryq, table_out="merged_for_analysisq", show = False)
+#####################################
+# DEFINING MAIN SAMPLE
+#####################################
+# IDing outsourcing/staffing companies
+foia_main_samp_unfilt = con.sql("SELECT FEIN, lottery_year, COUNT(CASE WHEN ben_multi_reg_ind = 1 THEN 1 END)/COUNT(*) AS share_multireg, COUNT(*) AS n_apps_tot, COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END) AS n_success, COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END)/COUNT(*) AS win_rate FROM foia_with_ids GROUP BY FEIN, lottery_year")
+
+n = con.sql('SELECT COUNT(*) FROM foia_main_samp_unfilt').df().iloc[0,0]
+print(f"Total Employer x Years: {n}")
+print(f"Employer x Years with Fewer than 50 Apps: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE n_apps_tot < 50").df().iloc[0,0]}")
+print(f"Employer x Years with Fewer than 50% Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg < 0.5").df().iloc[0,0]}")
+print(f"Employer x Years with No Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg = 0").df().iloc[0,0]}")
+
+foia_main_samp = con.sql("SELECT * FROM foia_main_samp_unfilt WHERE n_apps_tot < 50 AND share_multireg = 0")
+print(f"Preferred Sample: {foia_main_samp.df().shape[0]} ({round(100*foia_main_samp.df().shape[0]/n)}%)")
+
+foia_main_samp_def = con.sql("SELECT *, CASE WHEN n_apps_tot < 50 AND share_multireg = 0 THEN 'insamp' ELSE 'outsamp' END AS sampgroup FROM foia_main_samp_unfilt")
+con.sql("SELECT sampgroup, SUM(n_success)/SUM(n_apps_tot) AS total_win_rate FROM foia_main_samp_def GROUP BY sampgroup")
+
+# foia_df = con.sql("SELECT * FROM ((SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS a JOIN foia_with_ids AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year)").df()
 
 ########################################################
 # FIRST STAGE: EFFECT OF WINNING IN t ON NUMBER OF I129s
 ########################################################
-# idea: for balanced panel of firms (observed in foia data in all years), plot mean number of i129s submitted in each FY by n_success
-ly = 2023
-p = 0.269
+lottery_year = 2023 
+fs_joined = con.sql("SELECT a.FEIN AS FEIN, a.lottery_year::FLOAT AS ly, t::FLOAT AS t, n_apps_tot AS n_apps, n_success_tot AS n_wins, n_i129, n_appr, sampgroup FROM (balanced_full AS a JOIN (SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year)")
 
-# step one: get balanced panel of firms (observed in all four years, drop any duplicate rcids or feins for now)
-balanced_panel = con.sql("SELECT lottery_year, foia_id, FEIN FROM (SELECT FEIN, foia_id, lottery_year, COUNT(DISTINCT lottery_year) OVER(PARTITION BY FEIN) AS n_lot_years, COUNT(DISTINCT main_rcid) OVER(PARTITION BY FEIN) AS n_main_rcids FROM (SELECT *, COUNT(DISTINCT FEIN) OVER (PARTITION BY foia_id) AS n_feins FROM rmerge) WHERE n_feins = 1) WHERE n_lot_years = 4 AND n_main_rcids = 1 GROUP BY lottery_year, foia_id, FEIN")
+# single win
+fs_collapsed = con.sql(f"SELECT ly, t, n_wins::VARCHAR AS n_wins, MEAN(CASE WHEN n_appr IS NULL THEN 0 ELSE n_appr END) AS mean_appr FROM fs_joined WHERE n_apps = 1 AND sampgroup = 'insamp' AND ly = {lottery_year} AND t < 2024 GROUP BY n_wins, ly, t").df()
 
-# step two: merge with raw foia data 
-balanced_samp = con.sql("SELECT *, get_fiscal_year_foia(rec_date) AS rec_fy, get_fiscal_year_foia(first_decision_date) AS dec_fy, get_quarter_foia(rec_date) AS rec_q, get_quarter_foia(first_decision_date) AS dec_q FROM (foia_with_ids AS a JOIN balanced_panel AS b ON a.foia_id = b.foia_id)")
+print(con.sql(f"SELECT COUNT(DISTINCT FEIN) FROM fs_joined WHERE n_apps = 1 AND sampgroup = 'insamp' AND ly = {lottery_year} "))
+#print(fs_collapsed)
+pivot_long = fs_collapsed.pivot(index = ['t','ly'], columns = ['n_wins'], values = ['mean_appr'])
+pivot_long = pivot_long.join(pivot_long.groupby(level = 0, axis = 1).diff().rename(columns={'1':'diff'}).loc(axis = 1)[:,'diff']).reset_index().melt(id_vars = [('t',''),('ly','')])
 
-# step three: restrict to ly to get n apps and successes (for treatment variable and sample restriction) at the FEIN level [note: can't use foia_for_merge because it's collapsed at the foia_id level not FEIN x lottery_year]
-samp_treat = con.sql(
-f"""
-SELECT FEIN, 
-    COUNT(*) AS n_apps_tot,
-    COUNT(CASE WHEN ben_multi_reg_ind = 0 THEN 1 END) AS n_apps, 
-    COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END) AS n_success_tot,
-    COUNT(CASE WHEN status_type = 'SELECTED' AND ben_multi_reg_ind = 0 THEN 1 END) AS n_success
-FROM balanced_samp 
-WHERE lottery_year = {ly} 
-GROUP BY FEIN
-""")
+pivot_long.columns = ['t', 'ly', 'var', 'treat', 'value']
 
-# step four: group raw foia data by fiscal year received to get number of i129s received by fiscal year
-foia_i129_rec = con.sql(
-"""
-SELECT FEIN, rec_fy, 
-    COUNT(CASE WHEN ben_multi_reg_ind = 0 THEN 1 END) AS n_i129
-FROM balanced_samp
-WHERE rec_date != 'NA'
-GROUP BY FEIN, rec_fy
-""")
+rawvars = pivot_long.loc[pivot_long['treat'] != 'diff']
+diffs = pivot_long.loc[pivot_long['treat'] == 'diff']
 
-foia_approvals = con.sql(
-"""
-SELECT FEIN, dec_fy, 
-    COUNT(CASE WHEN ben_multi_reg_ind = 0 AND FIRST_DECISION = 'Approved' THEN 1 END) AS n_appr
-FROM balanced_samp
-WHERE first_decision_date != 'NA'
-GROUP BY FEIN, dec_fy
-""")
-
-# step four point five: do this by quarter
-foia_i129_recq = con.sql(
-"""
-SELECT FEIN, rec_q, 
-    COUNT(CASE WHEN ben_multi_reg_ind = 0 THEN 1 END) AS n_i129
-FROM balanced_samp
-WHERE rec_date != 'NA'
-GROUP BY FEIN, rec_q
-""")
-
-# step five: merge together (left join onto cross join of foia_i129_rec rec_fys and FEINs to code missing n_i129s as 0s)
-fs_full = con.sql(
-f"""
-SELECT *, n_success - (n_apps*{p}) AS U FROM (
-    (SELECT * FROM (SELECT rec_fy FROM foia_i129_rec WHERE rec_fy != 2019 GROUP BY rec_fy) CROSS JOIN (SELECT FEIN FROM balanced_panel GROUP BY FEIN)) AS a 
-    LEFT JOIN 
-    samp_treat AS b
-    ON a.FEIN = b.FEIN
-    LEFT JOIN 
-    foia_i129_rec AS c
-    ON a.rec_fy = c.rec_fy AND a.FEIN = c.FEIN
-)
-"""
-)
-
-fs_full_approvals = con.sql(
-f"""
-SELECT *, n_success - (n_apps*{p}) AS U FROM (
-    (SELECT * FROM (SELECT dec_fy FROM foia_approvals WHERE dec_fy != 2019 GROUP BY dec_fy) CROSS JOIN (SELECT FEIN FROM balanced_panel GROUP BY FEIN)) AS a 
-    LEFT JOIN 
-    samp_treat AS b
-    ON a.FEIN = b.FEIN
-    LEFT JOIN 
-    foia_approvals AS c
-    ON a.dec_fy = c.dec_fy AND a.FEIN = c.FEIN
-)
-"""
-)
-
-
-fs_fullq = con.sql(
-"""
-SELECT *, n_success - (n_apps*{p}) AS U FROM (
-    (SELECT * FROM (SELECT rec_q FROM foia_i129_recq WHERE rec_q >= 2020 GROUP BY rec_q) CROSS JOIN (SELECT FEIN FROM balanced_panel GROUP BY FEIN)) AS a 
-    LEFT JOIN 
-    samp_treat AS b
-    ON a.FEIN = b.FEIN
-    LEFT JOIN 
-    foia_i129_recq AS c
-    ON a.rec_q = c.rec_q AND a.FEIN = c.FEIN
-)
-"""
-)
-
-fs_collapsed = con.sql("SELECT rec_fy::FLOAT AS t, n_success::VARCHAR AS treat, MEAN(CASE WHEN n_i129 IS NULL THEN 0 ELSE n_i129 END) AS mean_y, SUM(CASE WHEN n_i129 IS NULL THEN 0 ELSE n_i129 END) AS sum_y, FROM fs_full WHERE n_apps = 1 GROUP BY n_success, rec_fy").df()
-
-(fs_rawvars, fs_diffs) = ah.bin_long_diffs(fs_collapsed, ["mean_y"])
-ah.graph_df_hue(fs_rawvars, ly, 'treat').set(ylabel = "Number of H1B Visa Forms Submitted")
-ah.graph_df_nohue(fs_diffs, ly)
-
-fs_approvals = con.sql("SELECT dec_fy::FLOAT AS t, n_success::VARCHAR AS treat, MEAN(CASE WHEN n_appr IS NULL THEN 0 ELSE n_appr END) AS mean_y, SUM(CASE WHEN n_appr IS NULL THEN 0 ELSE n_appr END) AS sum_y, FROM fs_full_approvals WHERE n_apps = 1 GROUP BY n_success, dec_fy").df()
-
-(fs_rawvars_appr, fs_diffs_appr) = ah.bin_long_diffs(fs_approvals, ["mean_y"])
-ah.graph_df_hue(fs_rawvars_appr, ly, 'treat').set(ylabel = "Number of H1B Visas Initially Approved")
-ah.graph_df_nohue(fs_diffs_appr, ly)
-
-fs_collapsedq = con.sql("SELECT rec_q::FLOAT AS t, n_success::VARCHAR AS treat, MEAN(CASE WHEN n_i129 IS NULL THEN 0 ELSE n_i129 END) AS mean_y, SUM(CASE WHEN n_i129 IS NULL THEN 0 ELSE n_i129 END) AS sum_y, FROM fs_fullq WHERE n_apps = 1 GROUP BY n_success, rec_q").df()
-
-(fs_rawvarsq, fs_diffsq) = bin_long_diffs(fs_collapsedq, ["mean_y", "sum_y"])
-ah.graph_df_hue(fs_rawvarsq, ly, 'treat')
-ah.graph_df_nohue(fs_diffsq, ly)
-
-
-fs_collapsed_full = con.sql("SELECT rec_fy::FLOAT AS t, n_success::VARCHAR AS treat, MEAN(CASE WHEN n_i129 IS NULL THEN 0 ELSE n_i129 END) AS mean_y, SUM(CASE WHEN n_i129 IS NULL THEN 0 ELSE n_i129 END) AS sum_y, FROM fs_full WHERE n_apps < 5 GROUP BY n_success, rec_fy").df()
-
-fs_full_rawvars = fs_collapsed_full.melt(id_vars=['t','treat'])
-fs_full_rawvars.columns = ['t','treat','var','value']
-
-ah.graph_df_hue(fs_full_rawvars, ly, 'treat')
-
-# continuous
-fs_all_fy2022 = con.sql("SELECT U, n_i129 FROM fs_full WHERE rec_fy = 2022").df() 
-sns.regplot(data = fs_all_fy2022, x = "U", y = "n_i129", x_bins = 20)
+fs_plot = sns.scatterplot(data = rawvars, x = 't', y = 'value', hue = 'treat', s = 100)
+fs_plot.axvline(x = lottery_year-1.25)
+fs_plot.set(xlabel = "Fiscal Year", ylabel = "Avg. Number of H-1B Visas Approved")
+fs_plot.legend_.set(title = f"{lottery_year-1} Lottery Wins")
+fs_plot
 
 #####################################
 # INITIAL ANALYSIS
 #####################################
-# to change time period from here, just change 't_unit' to ''/'q'
-t_unit = ''
-lottery_year = 2021
-yvar = 'new_hires'
-treatvar = 'n_success'
-bin_treat = True
+import statsmodels.formula.api as smf
 
-# defining sample for analysis
-analysis = con.sql(f"SELECT t::FLOAT AS t, {yvar} AS y, {treatvar}::VARCHAR AS treat, SUM(new_hires) OVER(PARTITION BY main_rcid) AS n_hires_tot FROM merged_for_analysis{t_unit} WHERE t::FLOAT > 2018 AND t::FLOAT < 2025 AND lottery_year = {lottery_year} AND n_apps = 1")
+samp_to_foia_id = con.sql("SELECT * FROM ((SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS a JOIN (SELECT FEIN, lottery_year, foia_id FROM foia_with_ids GROUP BY FEIN, lottery_year, foia_id) AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year) WHERE foia_id IS NOT NULL")
 
-analysisdf = analysis.df()
+# assumes lottery happens in q2 of previous year -- if q1, change to (t - ly + 1)
+out_joined = con.sql(
+"""SELECT a.foia_id AS foia_id, main_rcid, 
+        a.lottery_year::FLOAT AS ly, 
+        t::FLOAT AS t, 
+        FLOOR((t - ly + 0.75)::FLOAT) AS t_rel,
+        t-ly+0.75 AS q_rel,
+        n_apps_tot AS n_apps, 
+        n_success_tot AS n_wins, 
+        new_positions, 
+        new_positions_weighted,
+        new_positions_top3,
+        new_positions_top10,
+        new_positions_highn,
+        new_hires, 
+        new_hires_weighted,
+        new_hires_top3,
+        new_hires_top10,
+        new_hires_highn,
+        n_emp, 
+        n_emp_weighted,
+        n_emp_top3,
+        n_emp_top10,
+        n_emp_highn,
+        sampgroup,
+        MAX(CASE WHEN t > 2019 AND t < ly THEN n_emp ELSE 0 END) OVER(PARTITION BY a.foia_id) AS n_emp_max
+    FROM (
+        merged_for_analysis AS a 
+        JOIN 
+        (SELECT foia_id, sampgroup FROM samp_to_foia_id) AS b 
+        ON a.foia_id = b.foia_id
+    )""")
 
-analysis_cont = con.sql(f"SELECT t::FLOAT AS t, new_hires, n_success - (n_apps*{p}) AS U, n_apps AS n, SUM(new_hires) OVER(PARTITION BY main_rcid) AS n_hires_tot FROM merged_for_analysis WHERE t::FLOAT = {lottery_year - 1} AND lottery_year = {lottery_year}")
+# regressions
+out_for_reg = con.sql("""SELECT ly, main_rcid, q_rel, t, n_wins/n_apps AS win_rate, 
+    new_hires, new_positions, n_emp, new_hires_top3, new_hires_top10, new_hires_highn, new_positions_top3, new_positions_top10, new_positions_highn, n_emp_top3, n_emp_top10, n_emp_highn, n_emp_max
+    FROM out_joined WHERE t < 2025 AND t > 2014 AND t_rel >= -4 AND t_rel <= 4""").df()
+out_for_reg.to_csv(f"{root}/data/int/out_for_reg_apr4.csv")
 
-analysis_contdf = analysis_cont.df()
+out_collapsed  = con.sql(
+f"""SELECT ly, t_rel, 
+        n_wins::VARCHAR AS n_wins, 
+        MEAN(CASE WHEN new_hires IS NULL THEN 0 ELSE new_hires END) AS mean_new_hires, 
+        MEAN(new_hires) AS mean_new_hires_nulls, 
+        MEAN(CASE WHEN new_positions IS NULL THEN 0 ELSE new_positions END) AS mean_new_positions, 
+        MEAN(new_positions) AS mean_new_positions_nulls, 
+        MEAN(CASE WHEN n_emp IS NULL THEN 0 ELSE n_emp END) AS mean_n_emp, 
+        MEAN(n_emp) AS mean_n_emp_nulls, 
+        MEAN(CASE WHEN new_hires_weighted IS NULL THEN 0 ELSE new_hires_weighted END) AS mean_new_hires_weighted, 
+        MEAN(new_hires_weighted) AS mean_new_hires_nulls_weighted, 
+        MEAN(CASE WHEN new_positions_weighted IS NULL THEN 0 ELSE new_positions_weighted END) AS mean_new_positions_weighted, 
+        MEAN(new_positions_weighted) AS mean_new_positions_nulls_weighted, 
+        MEAN(CASE WHEN n_emp_weighted IS NULL THEN 0 ELSE n_emp_weighted END) AS mean_n_emp_weighted, 
+        MEAN(n_emp_weighted) AS mean_n_emp_nulls_weighted,
+        MEAN(CASE WHEN new_hires_top3 IS NULL THEN 0 ELSE new_hires_top3 END) AS mean_new_hires_top3,
+        MEAN(CASE WHEN new_hires_top10 IS NULL THEN 0 ELSE new_hires_top10 END) AS mean_new_hires_top10,
+        MEAN(CASE WHEN new_hires_highn IS NULL THEN 0 ELSE new_hires_highn END) AS mean_new_hires_highn,
+        MEAN(CASE WHEN new_positions_top3 IS NULL THEN 0 ELSE new_positions_top3 END) AS mean_new_positions_top3,
+        MEAN(CASE WHEN new_positions_top10 IS NULL THEN 0 ELSE new_positions_top10 END) AS mean_new_positions_top10,
+        MEAN(CASE WHEN new_positions_highn IS NULL THEN 0 ELSE new_positions_highn END) AS mean_new_positions_highn,
+        MEAN(CASE WHEN n_emp_top3 IS NULL THEN 0 ELSE n_emp_top3 END) AS mean_n_emp_top3,
+        MEAN(CASE WHEN n_emp_top10 IS NULL THEN 0 ELSE n_emp_top10 END) AS mean_n_emp_top10,
+        MEAN(CASE WHEN n_emp_highn IS NULL THEN 0 ELSE n_emp_highn END) AS mean_n_emp_highn
+    FROM out_joined 
+    WHERE n_apps = 2 AND sampgroup = 'insamp' AND t < 2025 AND t > 2010 AND t_rel > - 8 AND n_emp_max > 10
+    GROUP BY n_wins, ly, t_rel
+""").df()
 
-sns.regplot(data = analysis_contdf.loc[(analysis_contdf['new_hires'] < 1000)&(analysis_contdf['n'] < 10)], x = "U", y = "new_hires", x_bins = 50)
+lotyear = 2023
+print(con.sql(f"SELECT COUNT(DISTINCT foia_id) FROM out_joined WHERE n_apps = 1 AND sampgroup = 'insamp' AND ly = {lotyear} AND n_emp_max > 10"))
+#print(fs_collapsed)
+print(con.sql(f"SELECT COUNT(*) FROM out_joined WHERE n_apps = 1 AND sampgroup = 'insamp' AND ly = {lotyear}"))
+# TODO: GET BALANCED SAMPLE?
 
-# collapsing by treatment
-collapsed = con.sql("SELECT MEAN(y) AS mean_y, MEDIAN(y) AS median_y, SUM(y)/COUNT(y) AS wmean_y, VARIANCE(y) AS var_y, t, treat FROM analysis GROUP BY treat, t").df()
+pivot_long = out_collapsed.pivot(index = ['t_rel','ly'], columns = ['n_wins'], values = ['mean_new_hires','mean_new_positions','mean_n_emp','mean_new_hires_nulls','mean_new_positions_nulls','mean_n_emp_nulls','mean_new_hires_weighted','mean_new_positions_weighted','mean_n_emp_weighted','mean_new_hires_nulls_weighted','mean_new_positions_nulls_weighted','mean_n_emp_nulls_weighted', 'mean_new_hires_top3', 'mean_new_hires_top10', 'mean_new_hires_highn', 'mean_new_positions_top3', 'mean_new_positions_top10', 'mean_new_positions_highn', 'mean_n_emp_top3', 'mean_n_emp_top10', 'mean_n_emp_highn'])
 
-# for binary treatment: pivot long and get diffs
-varlist = ['mean_y', 'var_y']# ['mean_y', 'median_y', 'wmean_y', 'var_y']
-if bin_treat:
-    pivot_long = collapsed.pivot(index = 't', columns = ['treat'], values = varlist)
-    pivot_long = pivot_long.join(pivot_long.groupby(level=0,axis=1).diff().rename(columns={'1':'diff'}).loc(axis = 1)[:,'diff']).reset_index().melt(id_vars = [('t','')])
+oneapp = False
+if oneapp:
+    pivot_long = pivot_long.join(pivot_long.groupby(level = 0, axis = 1).diff().rename(columns={'1':'diff'}).loc(axis = 1)[:,'diff']).reset_index().melt(id_vars = [('t_rel',''),('ly','')])
 
-    pivot_long.columns = ['t', 'var', 'treat', 'value']
+    pivot_long.columns = ['t_rel', 'ly', 'var', 'treat', 'value']
 
     rawvars = pivot_long.loc[pivot_long['treat'] != 'diff']
     diffs = pivot_long.loc[pivot_long['treat'] == 'diff']
 
 else:
-    rawvars = collapsed.melt(id_vars = 't')
+    pivot_long = pivot_long.reset_index().melt(id_vars = [('t_rel',''),('ly','')])
 
-# g = sns.FacetGrid(data = rawvars, row = 'var', hue = 'treat', sharey = False, height = 2, aspect = 2)
-# g.map(sns.scatterplot, 't', 'value')
-# g.refline(x = lottery_year - 0.75)
+    pivot_long.columns = ['t_rel', 'ly', 'var', 'treat', 'value']
+    rawvars = pivot_long
 
-g_diff = sns.FacetGrid(data = diffs, row = 'var', sharey = False, height = 2, aspect = 2)
-g_diff.map(sns.scatterplot, 't', 'value')
-g_diff.refline(x = lottery_year - 0.75)
-# for var in pivot_long['var'].unique():
 
-# sns.scatterplot(x = 't', y = 'value', data = pivot_long.loc[(pivot_long['n_success']=='diff') & (pivot_long['var'] == 'mean_hires')]).axvline(2022.5)
+g = sns.FacetGrid(data = rawvars.loc[(rawvars['var']=='mean_new_positions')&(rawvars['ly'] != 2024)], hue = 'treat', row = 'ly', height = 2, aspect = 4)
+g.map(sns.lineplot, 't_rel', 'value').add_legend()
+g.refline(x = 0)
 
-# sns.scatterplot(x = 'startfy', y = 'value', hue = 'n_success', data = pivot_long.loc[(pivot_long['n_success']!='diff') & (pivot_long['var'] == 'mean_hires')]).axvline(2022.5)
+g = sns.FacetGrid(data = diffs.loc[diffs['var']=='mean_new_hires_top3'], row = 'ly')
+g.map(sns.lineplot, 't_rel', 'value').add_legend()
+g.refline(x = 0)
 
+
+g = sns.FacetGrid(data = diffs.loc[diffs['var']=='mean_new_positions_weighted'], row = 'ly')
+g.map(sns.lineplot, 't_rel', 'value').add_legend()
+g.refline(x = 0)
+
+
+g = sns.FacetGrid(data = diffs.loc[diffs['var']=='mean_n_emp_weighted'], row = 'ly')
+g.map(sns.lineplot, 't_rel', 'value').add_legend()
+g.refline(x = 0)
+# out = sns.lineplot(data = rawvars.loc[rawvars['var']=='mean_new_positions'], x = 't', y = 'value', hue = 'treat')
+# out.axvline(x = lotyear-0.75)
+# out.set(xlabel = "Quarter of Start Date", ylabel = "Avg. Number of New Hires")
+# out.legend_.set(title = f"{lotyear-1} Lottery Wins")
+
+# plt.figure()
+# out2 = sns.lineplot(data = rawvars.loc[rawvars['var']=='mean_n_emp'], x = 't', y = 'value', hue = 'treat')
+# out2.axvline(x = lotyear-0.75)
+# out2.set(xlabel = "Quarter of Start Date", ylabel = "Avg. Number of Employees")
+# out2.legend_.set(title = f"{lotyear - 1} Lottery Wins")

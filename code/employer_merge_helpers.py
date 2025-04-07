@@ -57,9 +57,15 @@ def tokenize(con, table_in, table_out, column, delimiter, rare_quantile = 0.999,
         FROM {table_in}_unnested_with_freqs
         GROUP BY unique_id) AS all_tokens
         LEFT JOIN (
-        -- collapse rare tokens by unique_id into list (no counts)
+        -- collapse rare tokens by unique_id into list with counts
         SELECT unique_id,
-            array_agg(token ORDER BY token_id) as rare_name_tokens
+            list_transform(
+                list_zip(
+                    array_agg(token ORDER BY token_id),
+                    array_agg(freq ORDER BY token_id)
+                ),
+                x -> struct_pack(token := x[1], freq := x[2])
+            ) as rare_name_tokens_with_freq
         FROM {table_in}_unnested_with_freqs WHERE freq < {token_freq_cutoff}
         GROUP BY unique_id
         ) AS rare_tokens
@@ -166,6 +172,16 @@ def mult_prod_matching_freqs(column, key, val, dotnote = False):
     return(f"""
         {get_matching_freqs(column, key, val, default = 1, dotnote = dotnote)}.list_transform(x -> x.lval * x.rval).list_product()
            """)
+
+def calculate_tf_product_array_sql(token_rel_freq_array_name):
+
+    return f"""
+    list_intersect({token_rel_freq_array_name}_l, {token_rel_freq_array_name}_r)
+        .list_transform(x -> x.rel_freq::float)
+        .list_concat([1.0::FLOAT]) -- in case there are no matches
+        .list_reduce((p, q) -> p * q)
+    """
+
 
 ## TODO: reduce to one function!
 def group_by_naics_code_foia(naics_digits = ""):
