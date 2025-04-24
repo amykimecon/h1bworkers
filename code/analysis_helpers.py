@@ -43,6 +43,13 @@ def get_quarter_foia_sql(date):
     year = int(splits[2])
     return year + np.floor((month-1)/3)/4
 
+def get_date_foia_sql(date):
+    splits = date.split("/")
+    month = int(splits[0])
+    year = int(splits[2])
+    day = int(splits[1])
+    return f"{year}-{month:02}-{day:02}"
+
 # get fiscal year from quarter (sql)
 def get_fy_from_quarter_sql(q):
     return(np.floor(q+0.25))

@@ -18,6 +18,8 @@ source(glue("{code}/merge_helper.R"))
 
 # READING IN DATA ----
 ## FOIA DATA ----
+raw_old <- read_csv(glue("{root}/data/raw/i129_fy2006_2008.csv"))
+
 all_data_list <- list()
 for (yr in 2021:2023){
   all_data_list[[yr - 2020]] <- read_csv(glue("{root}/data/raw/foia_bloomberg/TRK_13139_FY{yr}.csv"))

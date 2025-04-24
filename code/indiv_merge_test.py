@@ -12,6 +12,7 @@ import employer_merge_helpers as emh
 import analysis_helpers as ah
 import wrds
 import re
+import requests
 
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
 code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
@@ -19,6 +20,26 @@ code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
 con = ddb.connect()
 
 # creating sql functions
+
+# CLEANING COUNTRIES
+import json 
+with open(f"{root}/data/crosswalks/country_dict.json", "r") as json_file:
+    country_cw_dict = json.load(json_file)
+
+def get_std_country(country, dict = country_cw_dict):
+    if country is None:
+        return None 
+    
+    if country in dict.keys():
+        return dict[country]
+    
+    if country in dict.values():
+        return country 
+    
+    return "No Country Match"
+
+con.create_function("get_std_country", lambda x: get_std_country(x), ['VARCHAR'], 'VARCHAR')
+
 con.create_function("get_fiscal_year", ah.get_fiscal_year_sql, ["VARCHAR"], "FLOAT")
 
 con.create_function("get_fiscal_year_foia", ah.get_fiscal_year_foia_sql, ["VARCHAR"], "FLOAT")
@@ -26,6 +47,8 @@ con.create_function("get_fiscal_year_foia", ah.get_fiscal_year_foia_sql, ["VARCH
 con.create_function("get_quarter", ah.get_quarter_sql, ["VARCHAR"], "FLOAT")
 
 con.create_function("get_quarter_foia", ah.get_quarter_foia_sql, ["VARCHAR"], "FLOAT")
+
+con.create_function("get_date_as_rev", ah.get_date_foia_sql, ["VARCHAR"], "VARCHAR")
 
 #####################
 # IMPORTING DATA
@@ -38,13 +61,13 @@ dup_rcids_unique = con.sql("SELECT rcid, main_rcid FROM dup_rcids GROUP BY rcid,
 rmerge = con.read_csv(f"{root}/data/int/good_match_ids_mar20.csv")
 
 ## raw FOIA bloomberg data
-foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all.csv")
+foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all_withids.csv")
 
 ## raw FOIA I129 data
 foia_i129_file = con.read_csv(f"{root}/data/raw/foia_i129/i129_allfys.csv")
 
 ## joining raw FOIA data with merged data to get foia_ids in raw foia data
-foia_with_ids = con.sql("SELECT ROW_NUMBER() OVER() AS bb_id, foia_id, BEN_COUNTRY_OF_BIRTH, ben_year_of_birth, BEN_SEX, JOB_TITLE, DOT_CODE, NAICS_CODE, S3Q1, PET_ZIP, WORKSITE_CITY, WORKSITE_STATE, BASIS_FOR_CLASSIFICATION,  state_name, worksite_state_name, REQUESTED_ACTION, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, BEN_COMP_PAID, valid_from, valid_to, employer_name, i129_employer_name, NUM_OF_EMP_IN_US, a.FEIN AS FEIN, status_type, ben_multi_reg_ind, rec_date, first_decision_date, FIRST_DECISION, a.lottery_year AS lottery_year FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
+foia_with_ids = con.sql("SELECT foia_unique_id, foia_id, BEN_COUNTRY_OF_BIRTH, country_of_birth, ben_year_of_birth, BEN_SEX, JOB_TITLE, DOT_CODE, NAICS_CODE, S3Q1, PET_ZIP, WORKSITE_CITY, BEN_CURRENT_CLASS, WORKSITE_STATE, BASIS_FOR_CLASSIFICATION,  state_name, worksite_state_name, REQUESTED_ACTION, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, BEN_COMP_PAID, valid_from, valid_to, employer_name, i129_employer_name, NUM_OF_EMP_IN_US, a.FEIN AS FEIN, status_type, ben_multi_reg_ind, rec_date, first_decision_date, FIRST_DECISION, a.lottery_year AS lottery_year FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
 
 id_merge = con.sql("""
 -- collapse matched IDs to be unique at the rcid x FEIN x lottery_year level
@@ -79,7 +102,7 @@ FROM i129_with_ids
 WHERE REC_DATE != 'NA'""")
 
 bb_for_merge = con.sql(
-f"""SELECT bb_id, lottery_year, foia_id, FEIN, DOT_CODE, BEN_EDUCATION_CODE, ben_year_of_birth, BASIS_FOR_CLASSIFICATION, BEN_SEX, BEN_PFIELD_OF_STUDY, REQUESTED_ACTION, WORKSITE_STATE, WORKSITE_CITY, BEN_COUNTRY_OF_BIRTH, FIRST_DECISION, S3Q1, JOB_TITLE, employer_name, i129_employer_name, state_name, worksite_state_name,
+f"""SELECT foia_unique_id, lottery_year, foia_id, FEIN, DOT_CODE, BEN_EDUCATION_CODE, country_of_birth, ben_year_of_birth, BASIS_FOR_CLASSIFICATION, BEN_SEX, BEN_PFIELD_OF_STUDY, REQUESTED_ACTION, WORKSITE_STATE, WORKSITE_CITY, BEN_COUNTRY_OF_BIRTH, FIRST_DECISION, S3Q1, JOB_TITLE, employer_name, i129_employer_name, state_name, worksite_state_name,
     CASE WHEN PET_ZIP = 'NA' THEN NULL ELSE SUBSTRING(PET_ZIP, 1, 5)::INT END AS PET_ZIP,
     CASE WHEN BEN_COMP_PAID = 'NA' THEN 0 ELSE BEN_COMP_PAID::FLOAT END AS BEN_COMP_PAID,
     CASE WHEN NAICS_CODE = 'NA' THEN NULL ELSE SUBSTRING(NAICS_CODE, 1, 6)::INT END AS NAICS_CODE,
@@ -100,7 +123,7 @@ WHERE rec_date != 'NA' AND lottery_year != '2024'
 """)
 
 con.sql(
-"""SELECT COUNT(*), COUNT(DISTINCT bb_id)
+"""SELECT COUNT(*), COUNT(DISTINCT foia_unique_id)
 FROM i129_for_merge AS a 
 JOIN bb_for_merge AS b 
 ON a.rec_yr = b.rec_yr 
@@ -123,7 +146,7 @@ AND a.act_day = b.act_day
 """)
 
 indiv_matched = con.sql(
-"""SELECT bb_id, i129_id, foia_id, FEIN, a.rec_yr, a.rec_mo, a.rec_day, a.DOT_CODE, b.BEN_SEX, a.BEN_EDUCATION_CODE, b.BEN_PFIELD_OF_STUDY, a.NAICS_CODE, a.BASIS_FOR_CLASSIFICATION, a.REQUESTED_ACTION, a.BEN_COUNTRY_OF_BIRTH, b.WORKSITE_CITY, b.WORKSITE_STATE, a.FIRST_DECISION, a.PET_ZIP, b.ben_year_of_birth, a.EMPLOYER_NAME, b.i129_employer_name, a.S3Q1, a.JOB_TITLE, b.employer_name, a.BEN_COMP_PAID AS i129_comp, b.BEN_COMP_PAID AS bb_comp, a.valid_from_yr AS i129vfy, b.valid_from_yr AS bbvfy, a.valid_from_mo AS i129vfm, b.valid_from_mo AS bbvfm, a.valid_from_day AS i129vfd, b.valid_from_day AS bbvfd, COUNT(i129_id) OVER(PARTITION BY bb_id) AS dupmatch_tobb, institution_txt, state_name, worksite_state_name
+"""SELECT foia_unique_id, i129_id, foia_id, FEIN, a.rec_yr, a.rec_mo, a.rec_day, a.DOT_CODE, b.BEN_SEX, a.BEN_EDUCATION_CODE, b.BEN_PFIELD_OF_STUDY, a.NAICS_CODE, a.BASIS_FOR_CLASSIFICATION, a.REQUESTED_ACTION, a.BEN_COUNTRY_OF_BIRTH, b.country_of_birth, b.WORKSITE_CITY, b.WORKSITE_STATE, a.FIRST_DECISION, a.PET_ZIP, b.ben_year_of_birth, a.EMPLOYER_NAME, b.i129_employer_name, a.S3Q1, a.JOB_TITLE, b.employer_name, a.BEN_COMP_PAID AS i129_comp, b.BEN_COMP_PAID AS bb_comp, a.valid_from_yr AS i129vfy, b.valid_from_yr AS bbvfy, a.valid_from_mo AS i129vfm, b.valid_from_mo AS bbvfm, a.valid_from_day AS i129vfd, b.valid_from_day AS bbvfd, COUNT(i129_id) OVER(PARTITION BY foia_unique_id) AS dupmatch_tobb, institution_txt, state_name, worksite_state_name
 FROM i129_for_merge AS a 
 JOIN bb_for_merge AS b 
 ON a.rec_yr = b.rec_yr 
@@ -308,9 +331,10 @@ rev_indiv = con.read_parquet(f"{root}/data/int/rev_merge_masters_i129_mar31.parq
 foia_indiv = indiv_matched_with_rcids
 
 ## STEP 0: CLEANING DATA
+# REVELIO RAW DATA: selecting relevant columns, cleaning degree and field and university name, subsetting to masters/doctors
 rev_indiv_for_merge_int = con.sql(
 """
-SELECT * FROM 
+SELECT *, COUNT(DISTINCT user_id) OVER(PARTITION BY rcid) AS n_emp FROM 
 (SELECT 
     ROW_NUMBER() OVER() AS unique_id,
     fullname,
@@ -348,15 +372,16 @@ FROM (
 """)
 con.sql("CREATE OR REPLACE TABLE rev_indiv_for_merge_out AS SELECT * FROM rev_indiv_for_merge_int")
 
+# FOIA DATA: cleaning field
 foia_indiv_for_merge_int = con.sql(
 """
 SELECT 
-    bb_id AS unique_id,
+    foia_unique_id,
     foia_id,
     rec_yr, rec_mo, rec_day,
     BEN_SEX AS sex,
     TRIM(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(strip_accents(lower(BEN_PFIELD_OF_STUDY)), '\\s*\\(.*\\)\\s*', ' ', 'g'), '[^a-z0-9\\s]', ' ', 'g'), '\\s+', ' ', 'g')) AS field_clean,
-    BEN_COUNTRY_OF_BIRTH AS pob, 
+    get_std_country(country_of_birth) AS pob, 
     WORKSITE_CITY AS city,
     worksite_state_name AS state,
     ben_year_of_birth AS yob,
@@ -370,25 +395,25 @@ FROM foia_indiv
 con.sql("CREATE OR REPLACE TABLE foia_indiv_for_merge_out AS SELECT * FROM foia_indiv_for_merge_int")
 
 # # step one: tokenization (field and university names)
-# emh.create_replace_table(con, "SELECT univ_raw_clean, ROW_NUMBER() OVER() AS unique_id FROM (SELECT univ_raw_clean FROM (SELECT unique_id, univ_raw_clean, 'rev' AS dataset FROM rev_indiv_for_merge_out UNION ALL SELECT unique_id, univ_raw_clean, 'foia' AS dataset FROM foia_indiv_for_merge_out) GROUP BY univ_raw_clean)", "univ_names_to_tokenize")
+emh.create_replace_table(con, "SELECT univ_raw_clean, ROW_NUMBER() OVER() AS unique_id FROM (SELECT univ_raw_clean FROM (SELECT univ_raw_clean, 'rev' AS dataset FROM rev_indiv_for_merge_out UNION ALL SELECT univ_raw_clean, 'foia' AS dataset FROM foia_indiv_for_merge_out) GROUP BY univ_raw_clean)", "univ_names_to_tokenize")
 
-# emh.tokenize(con, "univ_names_to_tokenize", "univ_names_tokenized", "univ_raw", "\\s+", show = True)
+emh.tokenize(con, "univ_names_to_tokenize", "univ_names_tokenized", "univ_raw", "\\s+", show = True)
 
-# emh.create_replace_table(con, "SELECT field_clean, ROW_NUMBER() OVER() AS unique_id FROM (SELECT field_clean FROM (SELECT field_clean, 'rev' AS dataset FROM rev_indiv_for_merge_out UNION ALL SELECT field_clean, 'foia' AS dataset FROM foia_indiv_for_merge_out) GROUP BY field_clean)", "fields_to_tokenize")
+emh.create_replace_table(con, "SELECT field_clean, ROW_NUMBER() OVER() AS unique_id FROM (SELECT field_clean FROM (SELECT field_clean, 'rev' AS dataset FROM rev_indiv_for_merge_out UNION ALL SELECT field_clean, 'foia' AS dataset FROM foia_indiv_for_merge_out) GROUP BY field_clean)", "fields_to_tokenize")
 
-# emh.tokenize(con, "fields_to_tokenize", "fields_tokenized", "field", "\\s+", show = True)
+emh.tokenize(con, "fields_to_tokenize", "fields_tokenized", "field", "\\s+", show = True)
 
-# need to collapse to user x educ level
+# Merging rev filtered with tokenized data
 rev_full_for_merge_with_tokens = con.sql(
 """
-SELECT fullname, user_id, est_yob, rcid, sex AS sex_rev, pos_id, state AS state_rev, metro_area AS metro_area_rev, title_raw AS title_raw_rev, pos_startdate, pos_enddate, 
+SELECT fullname, user_id, est_yob, rcid, sex AS sex_rev, pos_id, state AS state_rev, metro_area AS metro_area_rev, title_raw AS title_raw_rev, pos_startdate, pos_enddate, n_emp,
 SUBSTRING(pos_startdate, 1, 4)::INT AS pos_startyr,
 SUBSTRING(pos_enddate, 1, 4)::INT AS pos_endyr,
     education_number, 
     a.field_clean AS field_clean_rev, field_tokens AS field_tokens_rev, field_rarest_token AS field_rarest_token_rev, field_rarest_token2 AS field_rarest_token2_rev,
     degree_clean, 
     a.univ_raw_clean AS univ_raw_clean_rev, univ_tokens AS univ_tokens_rev, univ_rarest_token AS univ_rarest_token_rev, univ_rarest_token2 AS univ_rarest_token2_rev
-FROM rev_indiv_for_merge_int AS a 
+FROM rev_indiv_for_merge_out AS a 
 LEFT JOIN (
     SELECT rare_name_tokens_with_freq AS univ_tokens, rarest_token AS univ_rarest_token, second_rarest_token AS univ_rarest_token2, univ_raw_clean FROM univ_names_tokenized) AS b 
 ON a.univ_raw_clean = b.univ_raw_clean 
@@ -397,35 +422,36 @@ LEFT JOIN (
 ON a.field_clean = c.field_clean 
 """)
 
-rev_indiv_for_merge_with_tokens = con.sql(
-"""
-SELECT *, ROW_NUMBER() OVER() AS unique_id FROM(
-SELECT fullname, user_id, est_yob AS yob, rcid, sex,
-    MIN(SUBSTRING(pos_startdate, 1, 4)::INT) AS min_start_yr, 
-    MAX(CASE WHEN pos_enddate IS NULL THEN 2025 ELSE SUBSTRING(pos_enddate, 1, 4)::INT END) AS max_end_yr, 
-    education_number, 
-    a.field_clean, field_tokens, field_rarest_token, field_rarest_token2,
-    degree_clean, 
-    a.univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2 
-FROM rev_indiv_for_merge_int AS a 
-LEFT JOIN (
-    SELECT rare_name_tokens_with_freq AS univ_tokens, rarest_token AS univ_rarest_token, second_rarest_token AS univ_rarest_token2, univ_raw_clean FROM univ_names_tokenized) AS b 
-ON a.univ_raw_clean = b.univ_raw_clean 
-LEFT JOIN (
-    SELECT rare_name_tokens_with_freq AS field_tokens, rarest_token AS field_rarest_token, second_rarest_token AS field_rarest_token2, field_clean FROM fields_tokenized) AS c 
-ON a.field_clean = c.field_clean 
-GROUP BY fullname, user_id, est_yob, rcid, sex, education_number, a.field_clean, field_tokens, field_rarest_token, field_rarest_token2, degree_clean, a.univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2)
-""")
-rev_indiv_splink = con.sql("SELECT unique_id, yob, rcid, sex, min_start_yr, max_end_yr, field_tokens, field_rarest_token, field_rarest_token2, field_clean, univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2 FROM rev_indiv_for_merge_with_tokens")
+# # collapsing to user x education x rcid level
+# rev_indiv_for_merge_with_tokens = con.sql(
+# """
+# SELECT *, ROW_NUMBER() OVER() AS unique_id FROM(
+# SELECT fullname, user_id, est_yob AS yob, rcid, sex,
+#     MIN(SUBSTRING(pos_startdate, 1, 4)::INT) AS min_start_yr, 
+#     MAX(CASE WHEN pos_enddate IS NULL THEN 2025 ELSE SUBSTRING(pos_enddate, 1, 4)::INT END) AS max_end_yr, 
+#     education_number, 
+#     a.field_clean, field_tokens, field_rarest_token, field_rarest_token2,
+#     degree_clean, 
+#     a.univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2 
+# FROM rev_indiv_for_merge_int AS a 
+# LEFT JOIN (
+#     SELECT rare_name_tokens_with_freq AS univ_tokens, rarest_token AS univ_rarest_token, second_rarest_token AS univ_rarest_token2, univ_raw_clean FROM univ_names_tokenized) AS b 
+# ON a.univ_raw_clean = b.univ_raw_clean 
+# LEFT JOIN (
+#     SELECT rare_name_tokens_with_freq AS field_tokens, rarest_token AS field_rarest_token, second_rarest_token AS field_rarest_token2, field_clean FROM fields_tokenized) AS c 
+# ON a.field_clean = c.field_clean 
+# GROUP BY fullname, user_id, est_yob, rcid, sex, education_number, a.field_clean, field_tokens, field_rarest_token, field_rarest_token2, degree_clean, a.univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2)
+# """)
+# rev_indiv_splink = con.sql("SELECT unique_id, yob, rcid, sex, min_start_yr, max_end_yr, field_tokens, field_rarest_token, field_rarest_token2, field_clean, univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2 FROM rev_indiv_for_merge_with_tokens")
 
-
+# Merging foia cleaned with tokenized data
 foia_full_for_merge_with_tokens = con.sql(
 """SELECT 
-    state AS state_foia, city AS city_foia, pob, title_raw AS title_raw_foia, main_rcid AS rcid, sex AS sex_foia, unique_id, yob,
+    state AS state_foia, city AS city_foia, pob, title_raw AS title_raw_foia, main_rcid AS rcid, sex AS sex_foia, foia_unique_id, yob,
     bbvfy::INT AS start_yr,
     a.field_clean AS field_clean_foia, field_tokens AS field_tokens_foia, field_rarest_token AS field_rarest_token_foia, field_rarest_token2 AS field_rarest_token2_foia,
     a.univ_raw_clean AS univ_raw_clean_foia, univ_tokens AS univ_tokens_foia, univ_rarest_token AS univ_rarest_token_foia, univ_rarest_token2 AS univ_rarest_token2_foia
-FROM foia_indiv_for_merge_int AS a 
+FROM foia_indiv_for_merge_out AS a 
 LEFT JOIN (
     SELECT rare_name_tokens_with_freq AS univ_tokens, rarest_token AS univ_rarest_token, second_rarest_token AS univ_rarest_token2, univ_raw_clean  FROM univ_names_tokenized) AS b 
 ON a.univ_raw_clean = b.univ_raw_clean
@@ -433,45 +459,94 @@ LEFT JOIN (
     SELECT rare_name_tokens_with_freq AS field_tokens, rarest_token AS field_rarest_token, second_rarest_token AS field_rarest_token2, field_clean FROM fields_tokenized) AS c
 ON a.field_clean = c.field_clean
 """)
-foia_indiv_for_merge_with_tokens = con.sql(
-"""SELECT 
-    state, city, pob, title_raw, main_rcid AS rcid, sex, unique_id, yob, bbvfy::INT AS min_start_yr, bbvfy::INT AS max_end_yr,
-    a.field_clean, field_tokens, field_rarest_token, field_rarest_token2,
-    a.univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2 
-FROM foia_indiv_for_merge_int AS a 
-LEFT JOIN (
-    SELECT rare_name_tokens_with_freq AS univ_tokens, rarest_token AS univ_rarest_token, second_rarest_token AS univ_rarest_token2, univ_raw_clean  FROM univ_names_tokenized) AS b 
-ON a.univ_raw_clean = b.univ_raw_clean
-LEFT JOIN (
-    SELECT rare_name_tokens_with_freq AS field_tokens, rarest_token AS field_rarest_token, second_rarest_token AS field_rarest_token2, field_clean FROM fields_tokenized) AS c
-ON a.field_clean = c.field_clean
-""")
-foia_indiv_splink = con.sql("SELECT unique_id, yob, rcid, sex, min_start_yr, max_end_yr, field_tokens, field_rarest_token, field_rarest_token2, field_clean, univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2 FROM foia_indiv_for_merge_with_tokens")
+# # reformatting to match revelio user x ed x rcid level data
+# foia_indiv_for_merge_with_tokens = con.sql(
+# """SELECT 
+#     state, city, pob, title_raw, main_rcid AS rcid, sex, unique_id, yob, bbvfy::INT AS min_start_yr, bbvfy::INT AS max_end_yr,
+#     a.field_clean, field_tokens, field_rarest_token, field_rarest_token2,
+#     a.univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2 
+# FROM foia_indiv_for_merge_int AS a 
+# LEFT JOIN (
+#     SELECT rare_name_tokens_with_freq AS univ_tokens, rarest_token AS univ_rarest_token, second_rarest_token AS univ_rarest_token2, univ_raw_clean  FROM univ_names_tokenized) AS b 
+# ON a.univ_raw_clean = b.univ_raw_clean
+# LEFT JOIN (
+#     SELECT rare_name_tokens_with_freq AS field_tokens, rarest_token AS field_rarest_token, second_rarest_token AS field_rarest_token2, field_clean FROM fields_tokenized) AS c
+# ON a.field_clean = c.field_clean
+# """)
+# foia_indiv_splink = con.sql("SELECT unique_id, yob, rcid, sex, min_start_yr, max_end_yr, field_tokens, field_rarest_token, field_rarest_token2, field_clean, univ_raw_clean, univ_tokens, univ_rarest_token, univ_rarest_token2 FROM foia_indiv_for_merge_with_tokens")
 
-# step two: matching
-initial_indiv_merge = con.sql(
+
+# step 1.5: merging with imputed pob (revelio) and removing likely natives
+rev_users_nats = con.read_parquet(f"{root}/data/int/rev_user_nats_final_apr15.parquet")
+rev_full_no_us = con.sql("SELECT * FROM (rev_full_for_merge_with_tokens AS a LEFT JOIN rev_users_nats AS b ON a.user_id = b.user_id) WHERE NOT (top_nat = 'United States' AND univ_first_ed = 'United States')")
+
+# step two: matching on rcid, postition start date, univ token
+initial_indiv_merge_ids = con.sql(
 """
-SELECT * FROM (
+SELECT a.foia_unique_id AS foia_unique_id, user_id, pos_id, a.rcid, education_number FROM (
     foia_full_for_merge_with_tokens AS a 
     LEFT JOIN
-    rev_full_for_merge_with_tokens AS b
-    ON a.rcid = b.rcid AND (a.univ_rarest_token_foia = b.univ_rarest_token_rev OR POSITION(a.univ_raw_clean_foia IN b.univ_raw_clean_rev) > 0) AND a.start_yr between b.pos_startyr AND b.pos_endyr
+    rev_full_no_us AS b
+    ON a.rcid = b.rcid AND (a.univ_rarest_token_foia = b.univ_rarest_token_rev OR POSITION(a.univ_raw_clean_foia IN b.univ_raw_clean_rev) > 0) AND a.start_yr between b.pos_startyr - 1 AND b.pos_endyr + 1
 )
 """)
 
+con.sql(f"COPY initial_indiv_merge_ids TO '{root}/data/int/indiv_merge_apr15.parquet' (FORMAT parquet)")
+
+# step three: checking merges
+initial_indiv_merge_ids =  con.read_parquet(f"{root}/data/int/indiv_merge_apr15.parquet")
+
+initial_indiv_merge = con.sql("SELECT *, COUNT(DISTINCT a.user_id) OVER(PARTITION BY a.foia_unique_id) AS n FROM (initial_indiv_merge_ids AS a LEFT JOIN foia_full_for_merge_with_tokens AS b ON a.foia_unique_id = b.foia_unique_id LEFT JOIN rev_full_no_us AS c ON a.user_id = c.user_id AND a.pos_id = c.pos_id AND a.rcid = c.rcid AND a.education_number = c.education_number)")
+
+# merged_df_old = merged_df
 merged_df = initial_indiv_merge.df()
-merged_df['n'] = merged_df.groupby('unique_id')['user_id'].transform('nunique')
+
 merged_df['est_yob_diff'] = merged_df.apply(lambda x: -1 if pd.isnull(x['est_yob']) else np.abs(int(x['est_yob'])-int(x['yob'])), axis = 1)
-merged_df['fieldmatch'] = merged_df.apply(lambda x: -1 if pd.isnull(x['field_clean_foia']) or pd.isnull(x['field_clean_rev']) else x['field_clean_foia'] in x['field_clean_rev'], axis = 1)
+merged_df['fieldmatch'] = merged_df.apply(lambda x: -1 if pd.isnull(x['field_clean_foia']) or pd.isnull(x['field_clean_rev']) else (x['field_clean_foia'] in x['field_clean_rev']) or x['field_clean_rev'] in x['field_clean_foia'], axis = 1)
+merged_df['titlematch'] = merged_df.apply(lambda x: -1 if pd.isnull(x['title_raw_foia']) or pd.isnull(x['title_raw_rev']) else (x['title_raw_foia'].lower() in x['title_raw_rev'].lower()) or x['title_raw_rev'].lower() in x['title_raw_foia'].lower(), axis = 1)
+merged_df['namepobmatch']= merged_df.apply(lambda x: None if pd.isnull(x['main_nats']) == 1 else x['pob'] in x['main_nats'], axis = 1)
+merged_df['univpobmatch']= merged_df.apply(lambda x: None if pd.isnull(x['univ_first_ed']) == 1 else x['pob'] == x['univ_first_ed'], axis = 1)
+merged_df['pobmatch'] = merged_df.apply(lambda x: x['univpobmatch'] == 1 or x['namepobmatch'] == 1, axis = 1)
 
-match_df = merged_df.loc[(merged_df['user_id'].isnull() == 0)&(merged_df['est_yob_diff'] <= 4) & (merged_df['sex_rev'] == merged_df['sex_foia'])] 
-match_df.shape
-match_df.loc[match_df['state_foia']==match_df['state_rev']].shape
-match_df_exact = match_df.loc[(match_df['state_foia']==match_df['state_rev'])&(match_df['fieldmatch']==1)]
-match_df_exact['n2'] = match_df_exact.groupby('unique_id')['user_id'].transform('nunique')
-match_df_exact.sample(100).sort_values('unique_id')[['n2','unique_id','user_id','univ_raw_clean_rev','univ_raw_clean_foia','fullname','pob','state_rev','state_foia','title_raw_rev','title_raw_foia','sex_rev', 'sex_foia', 'est_yob', 'yob', 'field_clean_foia','field_clean_rev']]
+match_df = merged_df.loc[(merged_df['user_id'].isnull() == 0)&(merged_df['est_yob_diff'] <= 4) & (merged_df['pobmatch']==1)] 
+match_df['n2'] = match_df.groupby('foia_unique_id')['user_id'].transform('nunique')
 
-# y=x.merge(con.sql("SELECT * FROM foia_indiv_for_merge_int").df(), on = 'unique_id')
+# direct one-one matches
+onetoone = match_df.loc[(match_df['n2']==1)]
+print(onetoone.groupby('foia_unique_id').size().shape)
+
+onetoone_certain = onetoone.loc[(((onetoone['pob'] != 'India') & (onetoone['pob']!='China'))|(onetoone['titlematch']==1)|(onetoone['fieldmatch']==1))&((onetoone['sex_rev']==onetoone['sex_foia']) & (onetoone['state_rev']==onetoone['state_foia']))]
+print(onetoone_certain.groupby('foia_unique_id').size().shape)
+onetoone_certain[['foia_unique_id','user_id','rcid']].groupby(['foia_unique_id','user_id','rcid']).size().reset_index().to_parquet(f"{root}/data/int/indiv_unique_merge_apr15.parquet")
+
+onetoone_certain[['foia_unique_id','user_id','rcid']].groupby(['foia_unique_id','user_id','rcid']).size().reset_index().to_csv(f"{root}/data/int/indiv_unique_merge_apr15.csv")
+
+# # other matches
+# others = match_df.loc[(match_df['n2']>1)]
+
+
+# nonindchi = merged_df.loc[(merged_df['n']>=1)&(merged_df['pob'] != 'India')&(merged_df['pob']!='China')&(merged_df['pobmatch']==1)]
+# nonindchi['n2'] = nonindchi.groupby('unique_id')['user_id'].transform('nunique')
+
+# merged_df.sample(100).sort_values('foia_unique_id')[['n','n_emp','foia_unique_id','user_id','univ_raw_clean_rev','univ_raw_clean_foia','fullname','pob','main_nats','univ_first_ed','state_rev','state_foia','title_raw_rev','title_raw_foia','titlematch','sex_rev', 'sex_foia', 'est_yob', 'yob', 'field_clean_foia','field_clean_rev']]
+
+# merged_df.loc[(merged_df['unique_id'] == 67186)&(merged_df['est_yob_diff'] <= 4)][['n','n_emp','unique_id','user_id','univ_raw_clean_rev','univ_raw_clean_foia','fullname','pob','main_nats','univ_first_ed','state_rev','state_foia','title_raw_rev','title_raw_foia','sex_rev', 'sex_foia', 'est_yob', 'yob', 'field_clean_foia','field_clean_rev']]
+
+# match_df = merged_df.loc[(merged_df['user_id'].isnull() == 0)&(merged_df['est_yob_diff'] <= 4) & (merged_df['pobmatch']==1)] 
+# match_df.shape
+# match_df.loc[match_df['state_foia']==match_df['state_rev']].shape
+# match_df_exact = match_df.loc[(match_df['state_foia']==match_df['state_rev'])&(match_df['fieldmatch']==1)]
+# match_df_exact['n2'] = match_df_exact.groupby('unique_id')['user_id'].transform('nunique')
+# match_df_exact.sample(100).sort_values('unique_id')[['n2','unique_id','user_id','univ_raw_clean_rev','univ_raw_clean_foia','fullname','pob','main_nats','univ_first_ed','state_rev','state_foia','title_raw_rev','title_raw_foia','sex_rev', 'sex_foia', 'est_yob', 'yob', 'field_clean_foia','field_clean_rev']]
+
+# # y=x.merge(con.sql("SELECT * FROM foia_indiv_for_merge_int").df(), on = 'unique_id')
+
+
+# STEP FOUR: analysis
+matches = con.read_parquet(f"{root}/data/int/indiv_unique_merge_apr15.parquet")
+
+merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
+merged = con.sql("SELECT a.foia_unique_id, lottery_year, BEN_CURRENT_CLASS, get_date_as_rev(valid_from)::DATETIME AS visa_startdate, MIN(startdate)::DATETIME AS first_start_date, DATEDIFF('month', get_date_as_rev(valid_from)::DATETIME, MIN(startdate)::DATETIME) AS startdiff FROM matches AS a LEFT JOIN foia_with_ids AS b ON a.foia_unique_id = b.foia_unique_id LEFT JOIN merged_pos AS c ON a.user_id = c.user_id AND a.rcid = c.rcid GROUP BY a.foia_unique_id, lottery_year, valid_from, BEN_CURRENT_CLASS").df()
 
 # y.sort_values('unique_id')[['unique_id','univ_raw_clean_1','univ_raw_clean_y','fullname','pob','metro_area','city','state_x','state_y','title_raw_x','title_raw_y','field_clean_1','field_clean_y','est_yob','yob_x']]
 
@@ -668,3 +743,64 @@ match_df_exact.sample(100).sort_values('unique_id')[['n2','unique_id','user_id',
 
 # x= match_eval.df()
 # x[['fullname','match_probability','gamma_sex','yob_l','yob_r','min_start_yr_l', 'max_end_yr_l','field_clean','field_clean_1','univ_raw_clean','univ_raw_clean_1']]
+
+## TRYING TO GET COUNTRY OF BIRTH
+
+
+
+# univ_samp = con.sql("SELECT * FROM univ_names LIMIT 200").df()
+# univ_samp['gmaps_json'] = univ_samp['university_raw'].apply(lambda x: get_country_from_school_name(None if pd.isnull(x) else x + " school"))
+
+# univ_samp['gmaps_json_alt'] = univ_samp['university_raw'].apply(lambda x: get_country_from_school_name(None if pd.isnull(x) else x + " school"))
+
+# x = temp_clean_rev.df()
+# x.loc[(x['degree_clean']=='High School')&((x['university_country'].isnull()==1)|(x['university_country']!='United States'))]
+
+# import requests
+# names = m['fullname'].unique()[0:10]
+# names_out = [requests.get(f"https://api.nationalize.io/?name={name}").json() for name in names]
+# names_merge = pd.DataFrame(data = {'names': names, 'json' : [x['country'] if 'country' in x.keys() else [] for x in names_out]})
+
+# import torch.nn as nn
+# from name2nat import Name2nat
+# my_nanat = Name2nat()
+# print(my_nanat("Alejandro"))
+
+# # Step 1: Temporarily bypass the Flair GRU error by patching torch.load
+# import torch
+
+# _original_load = torch.load
+
+# def patched_load(*args, **kwargs):
+#     model = _original_load(*args, **kwargs)
+    
+#     # Patch GRU layers if found
+#     def patch_gru(module):
+#         for sub in module.modules():
+#             if isinstance(sub, nn.GRU) and not hasattr(sub, "_flat_weights_names"):
+#                 sub._flat_weights_names = []
+#     try:
+#         patch_gru(model)
+#     except Exception as e:
+#         print("Patch warning:", e)
+    
+#     return model
+
+# torch.load = patched_load
+
+# # Step 2: Now load name2nat (this will trigger our patched torch.load)
+# my_nanat = Name2nat()
+
+# # Optional: restore original torch.load to avoid side effects later
+# torch.load = _original_load
+
+# # Test it
+# print(my_nanat("Alejandro"))
+
+# from name2nat import Name2nat 
+# my_nanat = Name2nat()
+
+# print(my_nanat("Alejandro"))
+
+
+# x = my_nanat(dataout.sample(n=10)['fullname'], top_n=3)

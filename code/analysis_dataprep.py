@@ -10,7 +10,6 @@ import fiscalyear
 import seaborn as sns
 import employer_merge_helpers as emh
 import analysis_helpers as ah
-import wrds
 
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
 code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
@@ -43,7 +42,7 @@ foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all
 foia_i129_file = con.read_csv(f"{root}/data/raw/foia_i129/i129_allfys.csv")
 
 ## joining raw FOIA data with merged data to get foia_ids in raw foia data
-foia_with_ids = con.sql("SELECT ROW_NUMBER() OVER() AS bb_id, foia_id, BEN_COUNTRY_OF_BIRTH, BEN_SEX, JOB_TITLE, DOT_CODE, NAICS_CODE, S3Q1, PET_ZIP, WORKSITE_CITY, WORKSITE_STATE, BASIS_FOR_CLASSIFICATION, REQUESTED_ACTION, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, BEN_COMP_PAID, valid_from, valid_to, employer_name, i129_employer_name, NUM_OF_EMP_IN_US, a.FEIN AS FEIN, status_type, ben_multi_reg_ind, rec_date, first_decision_date, FIRST_DECISION, a.lottery_year AS lottery_year FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
+foia_with_ids = con.sql("SELECT ROW_NUMBER() OVER() AS bb_id, foia_id, BEN_COUNTRY_OF_BIRTH, BEN_SEX, JOB_TITLE, DOT_CODE, NAICS_CODE, S3Q1, PET_ZIP, WORKSITE_CITY, WORKSITE_STATE, BASIS_FOR_CLASSIFICATION, REQUESTED_ACTION, BEN_PFIELD_OF_STUDY, BEN_CURRENT_CLASS, BEN_EDUCATION_CODE, BEN_COMP_PAID, valid_from, valid_to, employer_name, i129_employer_name, NUM_OF_EMP_IN_US, a.FEIN AS FEIN, status_type, ben_multi_reg_ind, rec_date, first_decision_date, FIRST_DECISION, a.lottery_year AS lottery_year FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
 
 ## revelio data (pre-filtered to only companies in rmerge)
 merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
@@ -51,16 +50,18 @@ occ_cw = con.read_csv(f"{root}/data/crosswalks/rev_occ_to_foia_freq.csv")
 
 ## joining position data to dup_rcids to get main_rcid and preprocessing (getting fiscal year/quarter, ordering by startq within user x company)
 merged_pos_full = con.sql(
-    f"""SELECT ROW_NUMBER() OVER(PARTITION BY main_rcid, user_id ORDER BY get_quarter(startdate)) AS rank, weight,
+    f"""SELECT ROW_NUMBER() OVER(PARTITION BY main_rcid, user_id ORDER BY get_quarter(startdate)) AS rank, 
+    COUNT(position_id) OVER(PARTITION BY main_rcid, user_id) AS n_pos,
+    weight,
         get_quarter(startdate) AS startq,
         get_fiscal_year(startdate) AS startfy,
         CASE WHEN enddate IS NULL AND startdate IS NOT NULL THEN 2025.25 ELSE get_quarter(enddate) END AS endq,
         CASE WHEN enddate IS NULL AND startdate IS NOT NULL THEN 2025 ELSE get_fiscal_year(enddate) END AS endfy,
         country, main_rcid, user_id, 
         role_k1500, top3occ, top10occ, mean_n_100
-    FROM (SELECT startdate, enddate, user_id, country, weight, pos.role_k1500 AS role_k1500, top3occ, top10occ, mean_n_100,
+    FROM (SELECT startdate, enddate, user_id, country, weight, pos.role_k1500 AS role_k1500, top3occ, top10occ, mean_n_100, position_id,
             CASE WHEN main_rcid IS NULL THEN pos.rcid ELSE main_rcid END AS main_rcid
-        FROM (merged_pos AS pos
+        FROM ((SELECT * FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY position_id) AS n_rank FROM merged_pos) WHERE n_rank = 1) AS pos
         LEFT JOIN
             (SELECT role_k1500, top3occ, top10occ, mean_n_100 FROM occ_cw) AS occ_cw 
         ON pos.role_k1500 = occ_cw.role_k1500
@@ -88,7 +89,8 @@ SELECT foia_id, FIRST(employer_name) AS company_FOIA, lottery_year,
     COUNT(CASE WHEN ben_multi_reg_ind = 0 THEN 1 END) AS n_apps, 
     COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END) AS n_success_tot,
     COUNT(CASE WHEN status_type = 'SELECTED' AND ben_multi_reg_ind = 0 THEN 1 END) AS n_success,
-    COUNT(CASE WHEN status_type = 'SELECTED' AND ben_multi_reg_ind = 0 AND rec_date != 'NA' THEN 1 END) AS n_i129
+    COUNT(CASE WHEN status_type = 'SELECTED' AND ben_multi_reg_ind = 0 AND rec_date != 'NA' THEN 1 END) AS n_i129,
+    COUNT(CASE WHEN BEN_CURRENT_CLASS = 'UU' THEN 1 END) AS n_uu
 FROM foia_with_ids WHERE foia_id IS NOT NULL GROUP BY foia_id, lottery_year
 """)
 
@@ -101,6 +103,7 @@ SELECT main_rcid, startq AS t, FIRST(startfy) AS startfy,
     COUNT(CASE WHEN top10occ = 1 THEN 1 END) AS new_positions_top10,
     COUNT(CASE WHEN mean_n_100 = 1 THEN 1 END) AS new_positions_highn,
     COUNT(CASE WHEN rank = 1 THEN 1 END) AS new_hires,
+    COUNT(CASE WHEN rank != 1 THEN 1 END) AS promotions,
     SUM(CASE WHEN rank = 1 THEN weight ELSE 0 END) AS new_hires_weighted,
     COUNT(CASE WHEN rank = 1 AND top3occ = 1 THEN 1 END) AS new_hires_top3,
     COUNT(CASE WHEN rank = 1 AND top10occ = 1 THEN 1 END) AS new_hires_top10,
@@ -114,6 +117,17 @@ GROUP BY main_rcid, startq
 # STEP THREE POINT TWO: join revelio data with full range of quarters to get main_rcid x quarter level employee counts
 rev_for_merge_nq = con.sql(f"SELECT t, main_rcid, COUNT(*) AS n_emp, SUM(weight) AS n_emp_weighted, COUNT(CASE WHEN top3occ = 1 THEN 1 END) AS n_emp_top3, COUNT(CASE WHEN top10occ = 1 THEN 1 END) AS n_emp_top10, COUNT(CASE WHEN mean_n_100 = 1 THEN 1 END) AS n_emp_highn FROM (SELECT time.y AS t, main_rcid, user_id, weight, top3occ, top10occ, mean_n_100 FROM (SELECT generate_series/4 FROM generate_series(2000*4,2025*4)) AS time(y) LEFT OUTER JOIN merged_pos_full AS a ON time.y between startq AND endq GROUP BY time.y, main_rcid, user_id, weight, top3occ, top10occ, mean_n_100) GROUP BY t, main_rcid")
 
+# STEP THREE POINT THREE: get counts by quarter of end date
+rev_for_merge_endq = con.sql("""
+SELECT main_rcid, endq AS t, FIRST(endfy) AS endfy,
+    COUNT(*) AS leaves,
+    COUNT(CASE WHEN rank = n_pos THEN 1 END) AS quits
+FROM 
+    merged_pos_full
+WHERE country = 'United States'
+GROUP BY main_rcid, endq
+""")
+
 # STEP THREE: join both revelio collapsed datasets onto cross join of foia_ids and t to code missings as 0s
 rev_for_merge = con.sql(
 """
@@ -125,13 +139,16 @@ rev_for_merge = con.sql(
         LEFT JOIN 
         rev_for_merge_nq AS c
         ON a.main_rcid = c.main_rcid AND a.t = c.t
+        LEFT JOIN
+        rev_for_merge_endq AS d
+        ON a.main_rcid = d.main_rcid AND a.t = d.t
     )
 """)
 
 # STEP FOUR: merge all datasets
 merged_for_analysis = con.sql(
 """
-SELECT ids.lottery_year AS lottery_year, ids.main_rcid AS main_rcid, ids.foia_id AS foia_id, company_FOIA, n_us_employees, n_apps_tot, n_apps, n_success_tot, n_success, n_i129, t, new_positions, new_positions_weighted, new_positions_top3, new_positions_top10, new_positions_highn, new_hires, new_hires_weighted, new_hires_top3, new_hires_top10, new_hires_highn, n_emp, n_emp_weighted, n_emp_top3, n_emp_top10, n_emp_highn FROM (
+SELECT ids.lottery_year AS lottery_year, ids.main_rcid AS main_rcid, ids.foia_id AS foia_id, company_FOIA, n_us_employees, n_apps_tot, n_apps, n_success_tot, n_success, n_i129, n_uu, t, new_positions, promotions, leaves, quits, new_positions_weighted, new_positions_top3, new_positions_top10, new_positions_highn, new_hires, new_hires_weighted, new_hires_top3, new_hires_top10, new_hires_highn, n_emp, n_emp_weighted, n_emp_top3, n_emp_top10, n_emp_highn FROM (
     id_merge AS ids 
     JOIN 
     foia_for_merge AS foia
@@ -143,7 +160,7 @@ SELECT ids.lottery_year AS lottery_year, ids.main_rcid AS main_rcid, ids.foia_id
 WHERE t IS NOT NULL
 """)
 
-con.sql(f"COPY merged_for_analysis TO '{root}/data/int/merged_for_analysis_mar25.parquet'")
+con.sql(f"COPY merged_for_analysis TO '{root}/data/int/merged_for_analysis_apr11.parquet'")
 
 #####################################
 # 2. BALANCED PANEL OF FIRMS (BY FOIA APP)

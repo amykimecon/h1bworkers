@@ -58,7 +58,7 @@ FROM foia_with_ids WHERE foia_id IS NOT NULL GROUP BY foia_id, lottery_year
 merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
 
 ## pre-processed data
-merged_for_analysis = con.read_parquet(f"{root}/data/int/merged_for_analysis_mar31.parquet")
+merged_for_analysis = con.read_parquet(f"{root}/data/int/merged_for_analysis_apr11.parquet")
 balanced_full = con.read_parquet(f"{root}/data/int/balanced_full_mar25.parquet")
 
 
@@ -110,7 +110,6 @@ fs_plot
 #####################################
 # INITIAL ANALYSIS
 #####################################
-import statsmodels.formula.api as smf
 
 samp_to_foia_id = con.sql("SELECT * FROM ((SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS a JOIN (SELECT FEIN, lottery_year, foia_id FROM foia_with_ids GROUP BY FEIN, lottery_year, foia_id) AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year) WHERE foia_id IS NOT NULL")
 
@@ -123,6 +122,7 @@ out_joined = con.sql(
         t-ly+0.75 AS q_rel,
         n_apps_tot AS n_apps, 
         n_success_tot AS n_wins, 
+        n_uu,
         new_positions, 
         new_positions_weighted,
         new_positions_top3,
@@ -133,18 +133,21 @@ out_joined = con.sql(
         new_hires_top3,
         new_hires_top10,
         new_hires_highn,
+        promotions,
+        quits,
         n_emp, 
         n_emp_weighted,
         n_emp_top3,
         n_emp_top10,
         n_emp_highn,
         sampgroup,
+        balanced,
         MAX(CASE WHEN t > 2019 AND t < ly THEN n_emp ELSE 0 END) OVER(PARTITION BY a.foia_id) AS n_emp_max
     FROM (
         merged_for_analysis AS a 
         JOIN 
-        (SELECT foia_id, sampgroup FROM samp_to_foia_id) AS b 
-        ON a.foia_id = b.foia_id
+        (SELECT FEIN, foia_id, sampgroup FROM samp_to_foia_id) AS b 
+        ON a.foia_id = b.foia_id  LEFT JOIN (SELECT FEIN, 1 AS balanced FROM balanced_full GROUP BY FEIN) AS c ON b.FEIN = c.FEIN
     )""")
 
 # regressions
@@ -176,9 +179,72 @@ f"""SELECT ly, t_rel,
         MEAN(CASE WHEN new_positions_highn IS NULL THEN 0 ELSE new_positions_highn END) AS mean_new_positions_highn,
         MEAN(CASE WHEN n_emp_top3 IS NULL THEN 0 ELSE n_emp_top3 END) AS mean_n_emp_top3,
         MEAN(CASE WHEN n_emp_top10 IS NULL THEN 0 ELSE n_emp_top10 END) AS mean_n_emp_top10,
+        MEAN(CASE WHEN n_emp_highn IS NULL THEN 0 ELSE n_emp_highn END) AS mean_n_emp_highn,
+        MEAN(CASE WHEN promotions IS NULL THEN 0 ELSE promotions END) AS mean_promotions,
+        MEAN(CASE WHEN quits IS NULL THEN 0 ELSE quits END) AS mean_quits
+    FROM out_joined 
+    WHERE n_apps = 1 AND sampgroup = 'insamp' AND t < 2025 AND t > 2010 AND t_rel > - 8 AND n_emp_max > 10
+    GROUP BY n_wins, ly, t_rel
+""").df()
+
+
+out_collapsed_uu  = con.sql(
+f"""SELECT ly, t_rel, 
+        n_uu::VARCHAR AS n_uu, 
+        MEAN(CASE WHEN new_hires IS NULL THEN 0 ELSE new_hires END) AS mean_new_hires, 
+        MEAN(new_hires) AS mean_new_hires_nulls, 
+        MEAN(CASE WHEN new_positions IS NULL THEN 0 ELSE new_positions END) AS mean_new_positions, 
+        MEAN(new_positions) AS mean_new_positions_nulls, 
+        MEAN(CASE WHEN n_emp IS NULL THEN 0 ELSE n_emp END) AS mean_n_emp, 
+        MEAN(n_emp) AS mean_n_emp_nulls, 
+        MEAN(CASE WHEN new_hires_weighted IS NULL THEN 0 ELSE new_hires_weighted END) AS mean_new_hires_weighted, 
+        MEAN(new_hires_weighted) AS mean_new_hires_nulls_weighted, 
+        MEAN(CASE WHEN new_positions_weighted IS NULL THEN 0 ELSE new_positions_weighted END) AS mean_new_positions_weighted, 
+        MEAN(new_positions_weighted) AS mean_new_positions_nulls_weighted, 
+        MEAN(CASE WHEN n_emp_weighted IS NULL THEN 0 ELSE n_emp_weighted END) AS mean_n_emp_weighted, 
+        MEAN(n_emp_weighted) AS mean_n_emp_nulls_weighted,
+        MEAN(CASE WHEN new_hires_top3 IS NULL THEN 0 ELSE new_hires_top3 END) AS mean_new_hires_top3,
+        MEAN(CASE WHEN new_hires_top10 IS NULL THEN 0 ELSE new_hires_top10 END) AS mean_new_hires_top10,
+        MEAN(CASE WHEN new_hires_highn IS NULL THEN 0 ELSE new_hires_highn END) AS mean_new_hires_highn,
+        MEAN(CASE WHEN new_positions_top3 IS NULL THEN 0 ELSE new_positions_top3 END) AS mean_new_positions_top3,
+        MEAN(CASE WHEN new_positions_top10 IS NULL THEN 0 ELSE new_positions_top10 END) AS mean_new_positions_top10,
+        MEAN(CASE WHEN new_positions_highn IS NULL THEN 0 ELSE new_positions_highn END) AS mean_new_positions_highn,
+        MEAN(CASE WHEN n_emp_top3 IS NULL THEN 0 ELSE n_emp_top3 END) AS mean_n_emp_top3,
+        MEAN(CASE WHEN n_emp_top10 IS NULL THEN 0 ELSE n_emp_top10 END) AS mean_n_emp_top10,
+        MEAN(CASE WHEN n_emp_highn IS NULL THEN 0 ELSE n_emp_highn END) AS mean_n_emp_highn,
+        MEAN(CASE WHEN promotions IS NULL THEN 0 ELSE promotions END) AS mean_promotions,
+        MEAN(CASE WHEN quits IS NULL THEN 0 ELSE quits END) AS mean_quits
+    FROM out_joined 
+    WHERE n_apps = 1 AND (n_wins = 0 OR n_uu = 1) AND sampgroup = 'insamp' AND t < 2025 AND t > 2010 AND t_rel > - 8 AND n_emp_max > 10
+    GROUP BY n_uu, ly, t_rel
+""").df()
+
+out_collapsed_balanced  = con.sql(
+f"""SELECT ly, t_rel, 
+        n_wins::VARCHAR AS n_wins, 
+        MEAN(CASE WHEN new_hires IS NULL THEN 0 ELSE new_hires END) AS mean_new_hires, 
+        MEAN(new_hires) AS mean_new_hires_nulls, 
+        MEAN(CASE WHEN new_positions IS NULL THEN 0 ELSE new_positions END) AS mean_new_positions, 
+        MEAN(new_positions) AS mean_new_positions_nulls, 
+        MEAN(CASE WHEN n_emp IS NULL THEN 0 ELSE n_emp END) AS mean_n_emp, 
+        MEAN(n_emp) AS mean_n_emp_nulls, 
+        MEAN(CASE WHEN new_hires_weighted IS NULL THEN 0 ELSE new_hires_weighted END) AS mean_new_hires_weighted, 
+        MEAN(new_hires_weighted) AS mean_new_hires_nulls_weighted, 
+        MEAN(CASE WHEN new_positions_weighted IS NULL THEN 0 ELSE new_positions_weighted END) AS mean_new_positions_weighted, 
+        MEAN(new_positions_weighted) AS mean_new_positions_nulls_weighted, 
+        MEAN(CASE WHEN n_emp_weighted IS NULL THEN 0 ELSE n_emp_weighted END) AS mean_n_emp_weighted, 
+        MEAN(n_emp_weighted) AS mean_n_emp_nulls_weighted,
+        MEAN(CASE WHEN new_hires_top3 IS NULL THEN 0 ELSE new_hires_top3 END) AS mean_new_hires_top3,
+        MEAN(CASE WHEN new_hires_top10 IS NULL THEN 0 ELSE new_hires_top10 END) AS mean_new_hires_top10,
+        MEAN(CASE WHEN new_hires_highn IS NULL THEN 0 ELSE new_hires_highn END) AS mean_new_hires_highn,
+        MEAN(CASE WHEN new_positions_top3 IS NULL THEN 0 ELSE new_positions_top3 END) AS mean_new_positions_top3,
+        MEAN(CASE WHEN new_positions_top10 IS NULL THEN 0 ELSE new_positions_top10 END) AS mean_new_positions_top10,
+        MEAN(CASE WHEN new_positions_highn IS NULL THEN 0 ELSE new_positions_highn END) AS mean_new_positions_highn,
+        MEAN(CASE WHEN n_emp_top3 IS NULL THEN 0 ELSE n_emp_top3 END) AS mean_n_emp_top3,
+        MEAN(CASE WHEN n_emp_top10 IS NULL THEN 0 ELSE n_emp_top10 END) AS mean_n_emp_top10,
         MEAN(CASE WHEN n_emp_highn IS NULL THEN 0 ELSE n_emp_highn END) AS mean_n_emp_highn
     FROM out_joined 
-    WHERE n_apps = 2 AND sampgroup = 'insamp' AND t < 2025 AND t > 2010 AND t_rel > - 8 AND n_emp_max > 10
+    WHERE n_apps = 1 AND sampgroup = 'insamp' AND t < 2025 AND t > 2010 AND t_rel > - 8 AND n_emp_max > 10 AND balanced IS NOT NULL
     GROUP BY n_wins, ly, t_rel
 """).df()
 
@@ -188,9 +254,14 @@ print(con.sql(f"SELECT COUNT(DISTINCT foia_id) FROM out_joined WHERE n_apps = 1 
 print(con.sql(f"SELECT COUNT(*) FROM out_joined WHERE n_apps = 1 AND sampgroup = 'insamp' AND ly = {lotyear}"))
 # TODO: GET BALANCED SAMPLE?
 
-pivot_long = out_collapsed.pivot(index = ['t_rel','ly'], columns = ['n_wins'], values = ['mean_new_hires','mean_new_positions','mean_n_emp','mean_new_hires_nulls','mean_new_positions_nulls','mean_n_emp_nulls','mean_new_hires_weighted','mean_new_positions_weighted','mean_n_emp_weighted','mean_new_hires_nulls_weighted','mean_new_positions_nulls_weighted','mean_n_emp_nulls_weighted', 'mean_new_hires_top3', 'mean_new_hires_top10', 'mean_new_hires_highn', 'mean_new_positions_top3', 'mean_new_positions_top10', 'mean_new_positions_highn', 'mean_n_emp_top3', 'mean_n_emp_top10', 'mean_n_emp_highn'])
+pivot_long = out_collapsed.pivot(index = ['t_rel','ly'], columns = ['n_wins'], values = ['mean_new_hires','mean_new_positions','mean_n_emp','mean_new_hires_nulls','mean_new_positions_nulls','mean_n_emp_nulls','mean_new_hires_weighted','mean_new_positions_weighted','mean_n_emp_weighted','mean_new_hires_nulls_weighted','mean_new_positions_nulls_weighted','mean_n_emp_nulls_weighted', 'mean_new_hires_top3', 'mean_new_hires_top10', 'mean_new_hires_highn', 'mean_new_positions_top3', 'mean_new_positions_top10', 'mean_new_positions_highn', 'mean_n_emp_top3', 'mean_n_emp_top10', 'mean_n_emp_highn', 'mean_promotions', 'mean_quits'])
 
-oneapp = False
+pivot_long = out_collapsed_uu.pivot(index = ['t_rel','ly'], columns = ['n_uu'], values = ['mean_new_hires','mean_new_positions','mean_n_emp','mean_new_hires_nulls','mean_new_positions_nulls','mean_n_emp_nulls','mean_new_hires_weighted','mean_new_positions_weighted','mean_n_emp_weighted','mean_new_hires_nulls_weighted','mean_new_positions_nulls_weighted','mean_n_emp_nulls_weighted', 'mean_new_hires_top3', 'mean_new_hires_top10', 'mean_new_hires_highn', 'mean_new_positions_top3', 'mean_new_positions_top10', 'mean_new_positions_highn', 'mean_n_emp_top3', 'mean_n_emp_top10', 'mean_n_emp_highn', 'mean_promotions', 'mean_quits'])
+
+
+# pivot_long = out_collapsed_balanced.pivot(index = ['t_rel','ly'], columns = ['n_wins'], values = ['mean_new_hires','mean_new_positions','mean_n_emp','mean_new_hires_nulls','mean_new_positions_nulls','mean_n_emp_nulls','mean_new_hires_weighted','mean_new_positions_weighted','mean_n_emp_weighted','mean_new_hires_nulls_weighted','mean_new_positions_nulls_weighted','mean_n_emp_nulls_weighted', 'mean_new_hires_top3', 'mean_new_hires_top10', 'mean_new_hires_highn', 'mean_new_positions_top3', 'mean_new_positions_top10', 'mean_new_positions_highn', 'mean_n_emp_top3', 'mean_n_emp_top10', 'mean_n_emp_highn'])
+
+oneapp = True
 if oneapp:
     pivot_long = pivot_long.join(pivot_long.groupby(level = 0, axis = 1).diff().rename(columns={'1':'diff'}).loc(axis = 1)[:,'diff']).reset_index().melt(id_vars = [('t_rel',''),('ly','')])
 
@@ -206,11 +277,19 @@ else:
     rawvars = pivot_long
 
 
+g = sns.FacetGrid(data = rawvars.loc[(rawvars['var']=='mean_n_emp')&(rawvars['ly'] != 2024)], hue = 'treat', row = 'ly', height = 2, aspect = 4)
+g.map(sns.lineplot, 't_rel', 'value').add_legend()
+g.refline(x = 0)
+
+g = sns.FacetGrid(data = rawvars.loc[(rawvars['var']=='mean_promotions')&(rawvars['ly'] != 2024)], hue = 'treat', row = 'ly', height = 2, aspect = 4)
+g.map(sns.lineplot, 't_rel', 'value').add_legend()
+g.refline(x = 0)
+
 g = sns.FacetGrid(data = rawvars.loc[(rawvars['var']=='mean_new_positions')&(rawvars['ly'] != 2024)], hue = 'treat', row = 'ly', height = 2, aspect = 4)
 g.map(sns.lineplot, 't_rel', 'value').add_legend()
 g.refline(x = 0)
 
-g = sns.FacetGrid(data = diffs.loc[diffs['var']=='mean_new_hires_top3'], row = 'ly')
+g = sns.FacetGrid(data = diffs.loc[diffs['var']=='mean_promotions'], row = 'ly')
 g.map(sns.lineplot, 't_rel', 'value').add_legend()
 g.refline(x = 0)
 
