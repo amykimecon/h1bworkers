@@ -30,6 +30,11 @@ raw <- bind_rows(all_data_list)
 raw$state_name <- c(state.name, "Washington, D.C.")[match(raw$state, c(state.abb, "DC"))]
 raw$worksite_state_name <- state.name[match(raw$WORKSITE_STATE, state.abb)]
 
+write_csv(raw %>% ungroup() %>% mutate(foia_unique_id=row_number()) %>%
+            mutate(across(c(i129_employer_name, JOB_TITLE), function(.x) str_remove_all(.x, '\\"'))), 
+          glue("{root}/data/raw/foia_bloomberg/foia_bloomberg_all_withids.csv"))
+
+
 ## REVELIO EMPLOYERS ----
 revelio_raw <- read_csv(glue("{root}/data/int/revelio/companies_by_positions_locations.csv"))
 #print(glue("Failed Matches: {nrow(filter(revelio_emp, rcid...4 != rcid...5))}"))

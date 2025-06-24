@@ -6,3 +6,6 @@
 h1b.Rproj
 code/.tmp/
 code/__pycache__/
+code/misc/resources/loss.tsv
+code/misc/resources/best-model.pt
+code/misc/resources/final-model.pt
