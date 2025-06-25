@@ -1,10 +1,15 @@
 ## HELPERS FOR CLEANING INDIVIDUAL REVELIO DATA
 import json
 import numpy as np
+import re
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
 code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
 
 # SQL QUERIES
+# sql string to extract random list of n ids
+def random_ids_sql(id, tab, n = 10):
+    return f"SELECT {id} FROM {tab} ORDER BY RANDOM() LIMIT {n}"
+
 # returns sql string for tokenizing column 'col' with id column 'id' from table 'tab' and separator sep (default is space)
 def tokenize_sql(col, id, tab, sep = "' '", othercols = ""):
     str_out = f"""
@@ -133,7 +138,6 @@ def get_std_country(country, dict = country_cw_dict):
     return "No Country Match"
 
 # cleaning country from gmaps json
-
 def get_gmaps_country(adr, dict = country_cw_dict):
     if adr is None:
         return None 
@@ -154,5 +158,3 @@ def get_gmaps_country(adr, dict = country_cw_dict):
         return country_match.group(1)
     
     return "No valid country match found"
-
-con.create_function("get_gmaps_country", lambda x: get_gmaps_country(x), ['VARCHAR'], 'VARCHAR')
