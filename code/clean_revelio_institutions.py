@@ -424,7 +424,7 @@ exact_geomatches = con.sql("SELECT * FROM all_geomatches WHERE match_score >= 0.
 ################################
 univ_names_formatch = con.sql("SELECT a.univ_id, university_raw, univ_raw_clean_withparan, CASE WHEN b.exactmatch IS NOT NULL THEN 'exactmatch' WHEN c.citymatch IS NOT NULL THEN 'citymatch' ELSE 'nomatch' END AS matchind, CASE WHEN b.exactmatch IS NOT NULL THEN 'exactmatch' WHEN c.citymatch IS NOT NULL THEN 'citymatch' WHEN top_country_n_users >= 20 THEN 'nativematch' ELSE 'nomatch' END AS dedupind FROM univ_names AS a LEFT JOIN (SELECT univ_id, 1 AS exactmatch FROM exactmatches GROUP BY univ_id) AS b ON a.univ_id = b.univ_id LEFT JOIN (SELECT univ_id, 1 AS citymatch FROM exact_citymatches GROUP BY univ_id) AS c ON a.univ_id = c.univ_id")
 
-tokenmatch = False
+tokenmatch = True
 if tokenmatch: 
     con.sql("SELECT dedupind, COUNT(*) FROM univ_names_formatch GROUP BY dedupind")
 
@@ -703,15 +703,13 @@ SELECT matches.university_raw, matchname_raw, match_country, matchscore, matchty
     UNION ALL 
     SELECT a.left_university_raw, a.right_university_raw AS matchname_raw, b.match_country, 
         (log_token_freq/(MIN(log_token_freq) OVER()))*(jaro_sim)*(CASE WHEN namecontain = 1 THEN 1 ELSE 0.7 END) AS matchscore, 
-        'token' || token_n AS matchtype 
-    FROM (
-        SELECT * FROM dedup_filt AS a 
-        LEFT JOIN good_matches AS b 
-        ON a.right_university_raw = b.university_raw
-    )
+        'token' || token_n AS matchtype  
+    FROM dedup_filt AS a 
+    LEFT JOIN good_matches AS b 
+    ON a.right_university_raw = b.university_raw
     UNION ALL
     SELECT university_raw, token AS matchname_raw, countryname AS match_country, 
-        score + match_score AS matchscore, 'geomatch' AS matchtype
+        CASE WHEN match_score > 0.1 THEN score ELSE score*0.5 END AS matchscore, 'geomatch' AS matchtype
     FROM all_geomatches
     UNION ALL
     (SELECT b.university_raw, gmaps_name AS matchname_raw, univ_gmaps_country AS match_country, 
@@ -724,7 +722,16 @@ SELECT matches.university_raw, matchname_raw, match_country, matchscore, matchty
 """
 )
 
+# combining all matches
+## TODO: actually do something with the scores?
+final_matches = con.sql(
+"""
+    SELECT university_raw, match_country, 1 AS matchscore, 'exact' AS matchtype FROM good_matches 
+    UNION ALL
+    SELECT university_raw, match_country, matchscore, matchtype FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY university_raw, match_country ORDER BY matchscore DESC) AS rn FROM other_matches) WHERE rn = 1
+""")
 
+con.sql(f"COPY final_matches TO '{root}/data/int/rev_inst_countries_jun25.parquet'")
 
 # # combining all openalex matches
 # # TODO: finish -- i think we want to pivot long and join on tokens, for each potential match take the min frequency of matched tokens; average frequency; n matched tokens; jaro winkler; length of overlapping sequence
