@@ -188,4 +188,4 @@ def get_gmaps_country(adr, dict = country_cw_dict):
 my_nanat = Name2nat()
 
 def name2nat_fun(name, nanat = my_nanat):
-    return json.dumps(nanat(name, top_n = 1)[0][1])
+    return json.dumps(nanat(name, top_n = 10)[0][1])

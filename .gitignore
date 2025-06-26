@@ -11,3 +11,4 @@ code/misc/resources/best-model.pt
 code/misc/resources/final-model.pt
 code/10_misc/resources/best-model.pt
 *.pt
+*.pyc
