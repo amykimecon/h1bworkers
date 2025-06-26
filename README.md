@@ -19,14 +19,20 @@ Using H-1B visa data and Revelio LinkedIn data, merging to evaluate outcomes of 
        1.2. Merging Employer Data with Splink (employer_merge.py)
      
 2. Revelio Individual Data Clean (code/02_revelio_indiv_clean)
-    2.0. Importing Revelio Users on WRDS Cloud (../batch_queries/revmerge_users.py; ../batch_queries/revmerge_users.sh)
+    2.0.1. Importing Revelio User Info on WRDS Cloud (../batch_queries/revmerge_users.py; ../batch_queries/revmerge_users.sh)
       - input: good_match_ids_mar20.csv; dup_rcids_mar20.csv
-      - output: rev_user_merge{j}.parquet for j in 1:10
-    2.1. Institution Matching to Countries via OpenAlex, Geonames,  (clean_revelio_institutions.py; rev_indiv_clean_helpers.py)
+      - output: rev_user_merge{j}.parquet for j in 1:10 [user x education info]
+    2.0.1. Importing Revelio User Positions (get_rev_merged.py)
+      - input: good_match_ids_mar20.csv; dup_rcids_mar20.csv
+      - output: rev_merge_mar20.csv [user x position info]
+    2.1.1. Institution Matching to Countries via OpenAlex, Geonames, Gmaps (clean_revelio_institutions.py; rev_indiv_clean_helpers.py)
       - input: rev_user_merge{j}.parquet for j in 1:10; raw openalex, geonames, gmaps data
       - output: /data/int/rev_inst_countries_jun25.parquet
+    2.1.2. Getting Nationalities from Full Names using Name2Nat (rev_indiv_name2nat.py)
+      - input: rev_user_merge{j}.parquet for j in 1:10; name2nat function
+      - output: rev_names_withnat_jun26.parquet
     2.2. Final Clean (rev_users_clean.py)
-      - input: rev_user_merge{j}.parquet for j in 1:10; name2nat; rev_inst_countries
+      - input: rev_user_merge{j}.parquet for j in 1:10; rev_names_withnat; rev_inst_countries
       - output: rev_user_nats_final_apr15
 
 3. Individual Merge (code/03_indiv_merge)

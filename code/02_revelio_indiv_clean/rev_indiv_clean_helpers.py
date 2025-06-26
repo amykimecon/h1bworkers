@@ -2,6 +2,8 @@
 import json
 import numpy as np
 import re
+from name2nat import Name2nat 
+
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
 code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
 
@@ -115,6 +117,29 @@ def degree_clean_regex_sql():
     """
     return str_out
 
+# returns sql string for cleaned full name: removes everything after comma, removes anything 2-4 characters all caps as long as entire name not all caps (get rid of degrees or titles) [TODO: currently missing things like MSEd], then removes anything in parentheses at end, removes PhD specifically, removes plus specifically, then converts to title case (NOTE: title case function must be read into con)
+def fullname_clean_regex_sql(col):
+    str_out = f"""
+        REGEXP_REPLACE(
+        REGEXP_REPLACE(
+        title(TRIM(
+            REGEXP_REPLACE(
+                REGEXP_REPLACE(
+                    REGEXP_REPLACE(
+                    CASE WHEN {col} ~ '.*[a-z].*' THEN 
+                        REGEXP_REPLACE(
+                            REGEXP_REPLACE({col}, ',.*$', '', 'g'), 
+                            '\\s([A-Z]\\.?){{2,4}}$', '', 'g')
+                        ELSE REGEXP_REPLACE({col}, ',.*$', '', 'g') END, 
+                    '\\s?\\(.*\\)$', '', 'g'), 
+                'P\\.?h\\.?D\\.?', '', 'g'), 
+            ' +', ' ', 'g'), 
+        )),
+        '\\s+[A-Z]\\.?\\s?$', '', 'g'),
+        '\\s+[A-Z]\\.?\\s+', ' ', 'g')
+    """
+    return str_out 
+
 ## PYTHON FUNCTIONS
 # randomly sample groups
 def sample_groups(df, groupidcol, n):
@@ -158,3 +183,9 @@ def get_gmaps_country(adr, dict = country_cw_dict):
         return country_match.group(1)
     
     return "No valid country match found"
+
+# name2nat helper function
+my_nanat = Name2nat()
+
+def name2nat_fun(name, nanat = my_nanat):
+    return json.dumps(nanat(name, top_n = 1)[0][1])
