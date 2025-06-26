@@ -9,3 +9,5 @@ code/__pycache__/
 code/misc/resources/loss.tsv
 code/misc/resources/best-model.pt
 code/misc/resources/final-model.pt
+code/10_misc/resources/best-model.pt
+*.pt
