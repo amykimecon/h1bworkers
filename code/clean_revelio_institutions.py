@@ -46,10 +46,6 @@ admin2codes = pd.read_csv(f"{root}/data/crosswalks/geonames/admin2Codes.txt",
                             sep = "\t",
                             names = ['concatcodes', 'name', 'asciiname', 'geonameid'])
 
-# Country Dictionary
-with open(f"{root}/data/crosswalks/country_dict.json", "r") as json_file:
-    country_cw_dict = json.load(json_file)
-
 # Importing google maps data (matches from google maps)
 gmaps = con.sql(f"""SELECT * FROM read_parquet('{"')UNION ALL SELECT * FROM read_parquet('".join([f"{root}/data/int/gmaps_univ_locations/{f}" for f in os.listdir(f"{root}/data/int/gmaps_univ_locations/")])}')""")
 
@@ -252,7 +248,7 @@ allmatches = con.sql(
         ON a.univ_text_clean_corr = b.name_clean) AS c LEFT JOIN univ_names AS d ON c.univ_id = d.univ_id""")
 
 # matches to keep
-exactmatches = con.sql("SELECT univ_id, openalexid AS matchid, university_raw, name AS match_name_raw, top_country, top_country_n_users, country_clean AS match_country, univ_text_clean_corr AS jointext, name_clean AS match_jointext, n_users, 'openalex_exact' AS matchtype FROM allmatches WHERE ncountry = 1")
+exactmatches = con.sql("SELECT univ_id, openalexid AS matchid, university_raw, name AS matchname_raw, univ_text_clean_corr AS rev_clean, name_clean AS matchname_clean, country_clean AS match_country, 1 AS matchscore, 'exact_openalex' AS matchtype FROM allmatches WHERE ncountry = 1")
 
 
 ##########################################
@@ -399,7 +395,7 @@ FROM
 # pivoting back to univ_id x geonameid x token level and keeping max score across all geotypes
 con.sql("""
 CREATE OR REPLACE TABLE geomatch_wide AS
-    (SELECT univ_id, university_raw, token, match_score_max AS match_score, score, token_n, geoscore, tokens_from_end, countryname, MAX(match_score_max) OVER(PARTITION BY univ_id) AS match_score_max, LENGTH(token) AS token_length, * FROM (
+    (SELECT univ_id, university_raw, token, match_score_max AS match_score, score, token_n, geoscore, tokens_from_end, countryname, MAX(match_score_max) OVER(PARTITION BY univ_id) AS match_score_max, LENGTH(token) AS token_length FROM (
         SELECT *, ROW_NUMBER() OVER(PARTITION BY geonameid, univ_id ORDER BY match_score_max DESC) AS tokenrank FROM (
             PIVOT (
                 SELECT university_raw, univ_id, geonameid, token, geoname, geotype, geoscore, tokens_from_end, type, token_n, score, length_score, location_score,
@@ -412,14 +408,16 @@ WHERE tokenrank = 1)""")
 
 all_geomatches = con.sql(
 """
-SELECT *
-FROM (
-    SELECT *, ROW_NUMBER() OVER(PARTITION BY univ_id, countryname ORDER BY score DESC, tokens_from_end, token_length) AS match_rank
-    FROM geomatch_wide WHERE match_score_max = match_score
-) WHERE match_rank = 1 AND score >= 0.1
+SELECT *, COUNT(DISTINCT countryname) OVER(PARTITION BY univ_id) AS ncountry FROM (
+    SELECT *
+    FROM (
+        SELECT *, ROW_NUMBER() OVER(PARTITION BY univ_id, countryname ORDER BY score DESC, tokens_from_end, token_length) AS match_rank
+        FROM geomatch_wide WHERE match_score_max = match_score
+    ) WHERE match_rank = 1 AND score >= 0.1
+)
 """)
 
-exact_geomatches = con.sql("SELECT * FROM (SELECT *, COUNT(DISTINCT countryname) OVER(PARTITION BY univ_id) AS ncountry FROM all_geomatches WHERE match_score >= 0.5) WHERE ncountry = 1")
+exact_geomatches = con.sql("SELECT * FROM all_geomatches WHERE match_score >= 0.5 AND ncountry = 1")
 
 ################################
 ## MATCHING TO OPENALEX ON TOKENS ##
@@ -581,8 +579,43 @@ if tokenmatch:
     # next step: filtering out based on min_freq, max_jaro_sim, max_dl_sim, namecontain
     match_filt = con.sql("SELECT * FROM match_res WHERE (min_freq AND (max_jaro_sim OR max_dl_sim)) OR namecontain")
 
+
+    # same for dedup matches
+    dedup_res = con.sql(
+    f"""
+    SELECT *, 
+        CASE WHEN log_token_freq <= (MIN(log_token_freq) OVER(PARTITION BY left_univ_id)) + {freq_buffer} THEN 1 ELSE 0 END AS min_freq,
+        CASE WHEN jaro_sim >= (MAX(jaro_sim) OVER(PARTITION BY left_univ_id)) - {sim_buffer} THEN 1 ELSE 0 END AS max_jaro_sim,
+        CASE WHEN  dl_sim >= (MAX(dl_sim) OVER(PARTITION BY left_univ_id)) - {sim_buffer} THEN 1 ELSE 0 END AS max_dl_sim
+    FROM (
+        -- creating variables for number of token matches within a univ-univ pair and row number within that pair (taking token pair with largest number of words first, then as tie breaker taking the rarest token pair)
+        -- also creating a bunch of match measures
+        SELECT *, 
+            COUNT(*) OVER(PARTITION BY left_university_raw, right_university_raw) AS n_token_matches,
+            ROW_NUMBER() OVER(PARTITION BY left_university_raw, right_university_raw ORDER BY token_n DESC, log_token_freq) AS token_rank,
+            jaro_similarity(left_univ_raw_clean_withparan, right_univ_raw_clean_withparan) AS jaro_sim,
+            1 - damerau_levenshtein(left_univ_raw_clean_withparan, right_univ_raw_clean_withparan)/(CASE WHEN LENGTH(left_univ_raw_clean_withparan) > LENGTH(right_univ_raw_clean_withparan) THEN LENGTH(left_univ_raw_clean_withparan) ELSE LENGTH(right_univ_raw_clean_withparan) END) AS dl_sim,
+            CASE WHEN (left_univ_raw_clean_withparan LIKE '%' || right_univ_raw_clean_withparan || '%' OR right_univ_raw_clean_withparan LIKE '%' || left_univ_raw_clean_withparan || '%') THEN 1 ELSE 0 END AS namecontain
+        FROM (
+        -- creating variable equal to most common token between left and right
+            SELECT *, CASE WHEN left_token_freq > right_token_freq THEN LOG(left_token_freq) ELSE LOG(right_token_freq) END AS log_token_freq FROM (
+                (SELECT DISTINCT left_univ_id, right_univ_id, left_token, right_token, tokensim, left_university_raw, left_univ_raw_clean_withparan, right_university_raw, right_univ_raw_clean_withparan, token_n FROM all_dedup_matches) AS a 
+                LEFT JOIN (
+                    SELECT token AS left_token, token_rank AS left_token_rank, token_freq AS left_token_freq FROM all_token_freqs
+                ) AS b ON a.left_token = b.left_token
+                LEFT JOIN (
+                    SELECT token AS right_token, token_rank AS right_token_rank, token_freq AS right_token_freq FROM all_token_freqs
+                ) AS c ON a.right_token = c.right_token
+            )
+        )
+    ) WHERE token_rank = 1
+    """)
+
+    dedup_filt = con.sql("SELECT * FROM dedup_res WHERE (min_freq AND (max_jaro_sim OR max_dl_sim)) OR namecontain")
+
     con.sql(f"COPY match_filt TO '{root}/data/int/rev_openalex_match_filt_jun20.parquet'")
-    con.sql(f"COPY all_dedup_matches TO '{root}/data/int/rev_dedup_match_jun20.parquet'")
+    con.sql(f"COPY dedup_filt TO '{root}/data/int/rev_dedup_match_filt_jun25.parquet'")
+    con.sql(f"COPY all_token_freqs TO '{root}/data/int/rev_all_token_freqs_jun20.parquet'")
 
 ################################
 ## MATCHING TO LOCATION TOKENS ##
@@ -639,69 +672,143 @@ if tokenmatch:
 ################################
 ## COMBINING ALL MATCHES ##
 ################################
-# combining all openalex matches
-# TODO: finish -- i think we want to pivot long and join on tokens, for each potential match take the min frequency of matched tokens; average frequency; n matched tokens; jaro winkler; length of overlapping sequence
+# good matches (exact, geoexact, revelio with >= 20 n_top_country)
+good_matches = con.sql(
+"""
+SELECT university_raw, match_country FROM (
+    SELECT *, COUNT(DISTINCT match_country) OVER(PARTITION BY university_raw) AS n_countries FROM (
+        SELECT *, CASE WHEN priority = (MAX(priority) OVER(PARTITION BY university_raw)) THEN 1 ELSE 0 END AS keep FROM (
+            SELECT university_raw, match_country, 0 AS priority, matchtype FROM exactmatches WHERE match_country IS NOT NULL AND match_country != 'NA' GROUP BY university_raw, match_country, matchtype 
+            UNION ALL 
+            SELECT university_raw, get_std_country(countryname) AS match_country, CASE WHEN match_score = 1 THEN 1 ELSE 0 END AS priority, 'exact_geo' AS matchtype FROM exact_geomatches
+            UNION ALL 
+            SELECT university_raw, get_std_country(top_country) AS match_country, 0 AS priority, 'exact_revelio' AS matchtype FROM univ_names WHERE top_country IS NOT NULL AND top_country_n_users >= 20
+        ) 
+    ) WHERE keep = 1
+) GROUP BY university_raw, match_country
+"""
+)
+
+# other matches (token, dedup, geo, gmaps)
 match_filt = con.read_parquet(f'{root}/data/int/rev_openalex_match_filt_jun20.parquet')
+dedup_filt = con.read_parquet(f'{root}/data/int/rev_dedup_match_filt_jun25.parquet')
 
-openalex_matches_all = con.sql("SELECT univ_id, openalexid AS matchid, university_raw, name AS matchname_raw, univ_text_clean_corr AS rev_clean, name_clean AS matchname_clean, country_clean AS match_country, 1 AS matchscore, 'exact' AS matchtype FROM allmatches UNION ALL (SELECT univ_id, openalexid, university_raw, name, univ_raw_clean_withparan AS rev_clean, name_clean, country_clean AS match_country, (log_token_freq/(MIN(log_token_freq) OVER()))*(jaro_sim)*(CASE WHEN namecontain = 1 THEN 1 ELSE 0.7 END) AS matchscore, 'token' || token_n AS matchtype FROM match_filt)")
-
-
-# combining all geo matches
-geo_merge = con.read_parquet(f'{root}/data/int/rev_geonames_token_merge_jun20.parquet')
-
-# TODO: separate out by geography type (prioritize country, etc.)
-# TODO: improve score 
-geotokenmerge = con.sql(
+other_matches = con.sql(
 """
-SELECT geo_token, rev_token, token_match, idnum AS univ_id, university_raw, countryname, country_freq, token_freq, n_token_country, n_token FROM (
-    SELECT * FROM (
-        SELECT token AS rev_token, token_1 AS geo_token, CASE WHEN rev_token = geo_token THEN 1 ELSE 0 END AS token_match, MAX(CASE WHEN rev_token = geo_token THEN 1 ELSE 0 END) OVER(PARTITION BY token) AS max_tokenmatch
-        FROM geo_merge  
-    ) WHERE token_match = max_tokenmatch) AS g
-    LEFT JOIN geonames_tokens_bycountry AS geo 
-    ON g.geo_token = geo.token
-    LEFT JOIN rev_tokens_withparan AS rev
-    ON g.rev_token = rev.token
-"""
-)
-
-geo_matches_all = con.sql(
-"""
-SELECT univ_id, NULL AS matchid, university_raw, NULL AS matchname_raw, rev_token AS rev_clean, geo_token AS matchname_clean, countryname AS match_country, country_freq AS matchscore, 'geotoken' AS matchtype FROM geotokenmerge
-UNION ALL
-(SELECT univ_id, geonameid AS matchid, university_raw, NULL AS matchname_raw, token AS rev_clean, token AS matchname_clean, countryname, match_score_max AS matchscore, 'citymatch' AS matchtype FROM citymatch_final)
-"""
-)
-
-# all matches
-matches_combined = con.sql(
-"""
-    SELECT * FROM openalex_matches_all
+SELECT matches.university_raw, matchname_raw, match_country, matchscore, matchtype FROM (
+    (SELECT university_raw, name AS matchname_raw, country_clean AS match_country, 
+        (log_token_freq/(MIN(log_token_freq) OVER()))*(jaro_sim)*(CASE WHEN namecontain = 1 THEN 1 ELSE 0.7 END) AS matchscore, 
+        'token' || token_n AS matchtype 
+    FROM match_filt 
     UNION ALL 
-    SELECT * FROM geo_matches_all
+    SELECT a.left_university_raw, a.right_university_raw AS matchname_raw, b.match_country, 
+        (log_token_freq/(MIN(log_token_freq) OVER()))*(jaro_sim)*(CASE WHEN namecontain = 1 THEN 1 ELSE 0.7 END) AS matchscore, 
+        'token' || token_n AS matchtype 
+    FROM (
+        SELECT * FROM dedup_filt AS a 
+        LEFT JOIN good_matches AS b 
+        ON a.right_university_raw = b.university_raw
+    )
     UNION ALL
-    (SELECT univ_id, NULL AS matchid, a.university_raw, gmaps_name AS matchname_raw, a.university_raw AS rev_clean, gmaps_name AS matchname_clean, univ_gmaps_country AS match_country, NULL AS matchscore, 'gmaps' AS matchtype FROM gmaps_clean AS a LEFT JOIN univ_names AS b ON a.university_raw = b.university_raw)
+    SELECT university_raw, token AS matchname_raw, countryname AS match_country, 
+        score + match_score AS matchscore, 'geomatch' AS matchtype
+    FROM all_geomatches
     UNION ALL
-    (SELECT univ_id, NULL AS matchid, university_raw, NULL AS matchname_raw, university_raw AS rev_clean, NULL AS matchname_clean, top_country AS match_country, top_country_n_users/n_users AS matchscore, 'revelio' AS matchtype FROM univ_names WHERE top_country IS NOT NULL)
+    (SELECT b.university_raw, gmaps_name AS matchname_raw, univ_gmaps_country AS match_country, 
+        jaro_similarity(lower(b.university_raw), lower(gmaps_name)) AS matchscore, 'gmaps' AS matchtype 
+    FROM gmaps_clean AS a LEFT JOIN univ_names AS b ON a.university_raw = lower(b.university_raw) WHERE a.university_raw IS NOT NULL)) AS matches
+    LEFT JOIN
+    (SELECT university_raw, 1 AS goodmatchind FROM good_matches GROUP BY university_raw) AS univs
+    ON matches.university_raw = univs.university_raw 
+) WHERE goodmatchind IS NULL
 """
 )
 
-# random sample of ids
-ids = ','.join(con.sql(help.random_ids_sql('univ_id','matches_combined')).df()['univ_id'].astype(str))
-
-con.sql(f"SELECT university_raw, matchtype, matchname_clean, match_country, matchscore, * FROM matches_combined WHERE univ_id IN ({ids}) ORDER BY univ_id").df()
-
-# want something like -- for each category of match, 'strength' of match (within category) and match country
 
 
-matches_combined = con.sql(
-"""
-SELECT * FROM 
-    (SELECT univ_id, university_raw,  FROM allmatches)
-    UNION ALL
-    ()
-"""
-)
+# # combining all openalex matches
+# # TODO: finish -- i think we want to pivot long and join on tokens, for each potential match take the min frequency of matched tokens; average frequency; n matched tokens; jaro winkler; length of overlapping sequence
+# match_filt = con.read_parquet(f'{root}/data/int/rev_openalex_match_filt_jun20.parquet')
+
+# openalex_matches_all = con.sql("SELECT openalexid AS matchid, university_raw, name AS matchname_raw, univ_text_clean_corr AS rev_clean, name_clean AS matchname_clean, country_clean AS match_country, 1 AS matchscore, 'exact' AS matchtype FROM allmatches UNION ALL (SELECT openalexid, university_raw, name, univ_raw_clean_withparan AS rev_clean, name_clean, country_clean AS match_country, (log_token_freq/(MIN(log_token_freq) OVER()))*(jaro_sim)*(CASE WHEN namecontain = 1 THEN 1 ELSE 0.7 END) AS matchscore, 'token' || token_n AS matchtype FROM match_filt)")
+
+
+# # combining all geo matches -- FOR NOW, JUST USING all_geomatches (no fuzzy matching on geo)
+# # geo_merge = con.read_parquet(f'{root}/data/int/rev_geonames_token_merge_jun20.parquet')
+
+# # geotokenmerge = con.sql(
+# # """
+# # SELECT geo_token, rev_token, token_match, idnum AS univ_id, university_raw, countryname, country_freq, token_freq, n_token_country, n_token FROM (
+# #     SELECT * FROM (
+# #         SELECT token AS rev_token, token_1 AS geo_token, CASE WHEN rev_token = geo_token THEN 1 ELSE 0 END AS token_match, MAX(CASE WHEN rev_token = geo_token THEN 1 ELSE 0 END) OVER(PARTITION BY token) AS max_tokenmatch
+# #         FROM geo_merge  
+# #     ) WHERE token_match = max_tokenmatch) AS g
+# #     LEFT JOIN geonames_tokens_bycountry AS geo 
+# #     ON g.geo_token = geo.token
+# #     LEFT JOIN rev_tokens_withparan AS rev
+# #     ON g.rev_token = rev.token
+# # """
+# # )
+
+# # geo_matches_all = con.sql(
+# # """
+# # SELECT univ_id, NULL AS matchid, university_raw, NULL AS matchname_raw, rev_token AS rev_clean, geo_token AS matchname_clean, countryname AS match_country, country_freq AS matchscore, 'geotoken' AS matchtype FROM geotokenmerge
+# # UNION ALL
+# # (SELECT univ_id, geonameid AS matchid, university_raw, NULL AS matchname_raw, token AS rev_clean, token AS matchname_clean, countryname, match_score_max AS matchscore, 'citymatch' AS matchtype FROM citymatch_final)
+# # """
+# # )
+
+# # all matches
+# matches_combined = con.sql(
+# """
+# SELECT *, CASE WHEN matchtype = 'exact' OR matchtype = 'exact_geomatch' OR (matchtype = 'revelio' AND matchscore >= 20) THEN 1 ELSE 0 END AS goodmatchind, MAX(CASE WHEN matchtype = 'exact' OR matchtype = 'exact_geomatch' OR (matchtype = 'revelio' AND matchscore >= 20) THEN 1 ELSE 0 END) OVER(PARTITION BY university_raw) AS max_goodmatchind FROM (
+#     SELECT * FROM openalex_matches_all
+#     UNION ALL 
+#     SELECT univ_id, geonameid AS matchid, university_raw, NULL AS matchname_raw, token AS rev_clean, token AS matchname_clean, countryname AS match_country, 
+#         CASE WHEN match_score >= 0.5 AND ncountry = 1 THEN match_score 
+#             WHEN match_score > 0.1 THEN 1 + score
+#             ELSE score END AS match_score, 
+#         CASE WHEN match_score >= 0.5 AND ncountry = 1 THEN 'exact_geomatch' ELSE 'geomatch' END AS matchtype FROM all_geomatches
+#     UNION ALL
+#     (SELECT univ_id, NULL AS matchid, b.university_raw, gmaps_name AS matchname_raw, a.university_raw AS rev_clean, gmaps_name AS matchname_clean, univ_gmaps_country AS match_country, NULL AS matchscore, 'gmaps' AS matchtype FROM gmaps_clean AS a LEFT JOIN univ_names AS b ON a.university_raw = lower(b.university_raw) WHERE a.university_raw IS NOT NULL)
+#     UNION ALL
+#     (SELECT univ_id, NULL AS matchid, university_raw, NULL AS matchname_raw, university_raw AS rev_clean, NULL AS matchname_clean, top_country AS match_country, top_country_n_users AS matchscore, 'revelio' AS matchtype FROM univ_names WHERE top_country IS NOT NULL)
+# )
+# """
+# )
+
+# # good matches
+# matches_good = con.sql("SELECT * FROM matches_combined WHERE goodmatchind = 1")
+
+# # other matches, joining to dedup
+# dedup_raw = con.read_parquet(f'{root}/data/int/rev_dedup_match_jun20.parquet')
+# matches_with_dedup = con.sql(
+# """
+# SELECT * FROM (
+#     (SELECT university_raw FROM matches_combined WHERE max_goodmatchind = 0 GROUP BY university_raw) AS a
+#     LEFT JOIN dedup_raw AS b
+#     ON a.university_raw = b.left_university_raw
+#     LEFT JOIN (SELECT university_raw, match_country, MAX(CASE WHEN matchtype = 'exact' THEN 1 ELSE 0 END) AS exactind, MAX(CASE WHEN matchtype = 'exact_geomatch' THEN 1 ELSE 0 END) AS exactgeomatchind, MAX(CASE WHEN matchtype = 'revelio' THEN 1 ELSE 0 END) AS revelioind FROM matches_good GROUP BY university_raw, match_country) AS c
+#     ON b.right_university_raw = c.university_raw
+# )
+# """)
+
+# # random sample of ids
+# ids = "','".join(con.sql(help.random_ids_sql('university_raw','matches_combined')).df()['university_raw'].astype(str))
+
+# con.sql(f"""SELECT university_raw, matchtype, matchname_clean, match_country, matchscore, * FROM matches_combined WHERE university_raw IN ('{ids}') ORDER BY university_raw""").df()
+
+# # want something like -- for each category of match, 'strength' of match (within category) and match country
+
+
+# matches_combined = con.sql(
+# """
+# SELECT * FROM 
+#     (SELECT univ_id, university_raw,  FROM allmatches)
+#     UNION ALL
+#     ()
+# """
+# )
 
 
 # ## OLD!
