@@ -140,6 +140,19 @@ def fullname_clean_regex_sql(col):
     """
     return str_out 
 
+# cleaning output from nanat (returns sql code for new column where each row is unique name x [nat, prob])
+def nanats_to_long(col):
+    str_out = f"""REGEXP_SPLIT_TO_ARRAY(UNNEST(REGEXP_SPLIT_TO_ARRAY(REGEXP_REPLACE(REGEXP_REPLACE({col}, '(\\[\\[|\\]\\])', '', 'g'), '",?', '', 'g'), '\\], \\[')), ' ')"""
+
+    return str_out
+
+def get_est_yob():
+    str_out = """CASE WHEN (MAX(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id)) = 1 
+        THEN MAX(CASE WHEN degree_clean = 'High School' THEN SUBSTRING(ed_enddate, 1, 4)::INT - 18 ELSE NULL END) OVER(PARTITION BY user_id) 
+        ELSE MIN(CASE WHEN degree_clean = 'Non-Degree' OR degree_clean = 'Master' OR degree_clean = 'Doctor' OR degree_clean = 'MBA' THEN NULL ELSE SUBSTRING(ed_startdate, 1, 4)::INT - 18 END) OVER(PARTITION BY user_id) 
+        END"""
+    return str_out
+    
 ## PYTHON FUNCTIONS
 # randomly sample groups
 def sample_groups(df, groupidcol, n):
@@ -189,3 +202,33 @@ my_nanat = Name2nat()
 
 def name2nat_fun(name, nanat = my_nanat):
     return json.dumps(nanat(name, top_n = 10)[0][1])
+
+# cleaning name2nat output
+def get_all_nanats(str):
+    if str is None:
+        return []
+    items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
+    out = []
+    for s in items:
+        if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
+            print(s)
+        else:
+            nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
+            prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
+            out = out + [get_std_country(nat)]
+    return out
+    # return [[dict[re.search('^"([A-z]+)", ', s).group(1)], float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))] for s in items]
+
+def get_all_nanat_probs(str):
+    if str is None:
+        return []
+    items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
+    out = []
+    for s in items:
+        if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
+            print(s)
+        else:
+            nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
+            prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
+            out = out + [prob]
+    return out

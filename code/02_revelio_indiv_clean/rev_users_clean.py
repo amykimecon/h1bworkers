@@ -1,98 +1,53 @@
 # File Description: Cleaning and Merging User and Position Data from Reveliio
 # Author: Amy Kim
-# Date Created: Wed Apr 9
+# Date Created: Wed Apr 9 (Updated June 26 2025)
 
 # Imports and Paths
 import duckdb as ddb
-import pandas as pd
-import numpy as np
-import seaborn as sns
+# import pandas as pd
+# import numpy as np
+# import seaborn as sns
 import rev_indiv_clean_helpers as help
-import analysis_helpers as ah
-from name2nat import Name2nat
 import os
 import re
-import json
+# import json
 
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
 code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
 
 con = ddb.connect()
 
+## Creating DuckDB functions from python helpers
 #title case function
 con.create_function("title", lambda x: x.title(), ['VARCHAR'], 'VARCHAR')
 
-# name2nat
-my_nanat = Name2nat()
-def name2nat_fun(name, nanat = my_nanat):
-    return json.dumps(nanat(name, top_n = 5)[0][1])
+# country crosswalk function
+con.create_function("get_std_country", lambda x: help.get_std_country(x), ['VARCHAR'], 'VARCHAR')
 
-con.create_function("name2nat", lambda x: name2nat_fun(x), ['VARCHAR'], 'VARCHAR')
+# #getting countries (std) and probs from nanat output
+# con.create_function("get_all_nanats", lambda x: help.get_all_nanats(x), ['VARCHAR'], 'VARCHAR')
 
+# con.create_function("get_all_nanat_probs", lambda x: help.get_all_nanat_probs(x), ['VARCHAR'], 'VARCHAR')
 
-# CLEANING COUNTRIES
-import json 
-with open(f"{root}/data/crosswalks/country_dict.json", "r") as json_file:
-    country_cw_dict = json.load(json_file)
+# def get_top_nat(str):
+#     allnats = get_all_nats(str)
+#     if allnats is None or len(allnats) == 0:
+#         return ""
+#     return allnats[0][0]
 
-def get_gmaps_country(adr, dict = country_cw_dict):
-    if adr is None:
-        return None 
-    
-    #print(adr)
-    stub = re.search(', ([A-z\\s]+)[^,]*$', adr)
-    if stub is not None:
-        if stub.group(1) in dict.keys():
-            return dict[stub.group(1)]
-        elif stub.group(1) in dict.values():
-            return stub.group(1)
+# def get_main_nats(str):
+#     allnats = get_all_nats(str)
+#     if allnats is None:
+#         return []
+#     return [s[0] for s in allnats if s[1] > 0.01]
 
-    country_search = '(' + '|'.join(dict.values()) + ')'
-    country_match = re.search(country_search, adr)
+# con.create_function("get_all_nats", lambda x: get_all_nats(x), ['VARCHAR'], 'VARCHAR')
+# con.create_function("top_nat", lambda x: get_top_nat(x), ['VARCHAR'], 'VARCHAR')
+# con.create_function("get_main_nats", get_main_nats, ['VARCHAR'], 'VARCHAR')
 
-    if country_match is not None:
-        #print(f"indirect match: {country_match.group(1)}")
-        return country_match.group(1)
-    
-    return "No valid country match found"
-
-con.create_function("get_gmaps_country", lambda x: get_gmaps_country(x), ['VARCHAR'], 'VARCHAR')
-
-def get_all_nats(str, dict = country_cw_dict):
-    if str is None:
-        return []
-    items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
-    out = []
-    for s in items:
-        if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
-            print(s)
-        else:
-            nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
-            prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
-            if nat in dict.keys():
-                out = out + [[dict[nat], prob]]
-            else:
-                out = out + [[nat, prob]]
-    return out
-    # return [[dict[re.search('^"([A-z]+)", ', s).group(1)], float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))] for s in items]
-
-def get_top_nat(str):
-    allnats = get_all_nats(str)
-    if allnats is None or len(allnats) == 0:
-        return ""
-    return allnats[0][0]
-
-def get_main_nats(str):
-    allnats = get_all_nats(str)
-    if allnats is None:
-        return []
-    return [s[0] for s in allnats if s[1] > 0.01]
-
-con.create_function("get_all_nats", lambda x: get_all_nats(x), ['VARCHAR'], 'VARCHAR')
-con.create_function("top_nat", lambda x: get_top_nat(x), ['VARCHAR'], 'VARCHAR')
-con.create_function("get_main_nats", get_main_nats, ['VARCHAR'], 'VARCHAR')
-
-
+#####################################
+## IMPORTING DATA
+#####################################
 ## duplicate rcids (companies that appear more than once in linkedin data)
 dup_rcids = con.read_csv(f"{root}/data/int/dup_rcids_mar20.csv")
 
@@ -105,28 +60,22 @@ foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all
 ## joining raw FOIA data with merged data to get foia_ids in raw foia data
 foia_with_ids = con.sql("SELECT *, CASE WHEN matched IS NULL THEN 0 ELSE matched END AS matchind FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id, 1 AS matched FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
 
-## revelio data (pre-filtered to only companies in rmerge)
+# Importing User x Education-level Data (From WRDS Server)
+rev_raw = con.read_parquet(f"{root}/data/wrds/wrds_out/rev_user_merge0.parquet")
+
+for j in range(1,10):
+    rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{root}/data/wrds/wrds_out/rev_user_merge{j}.parquet'")
+    print(rev_raw.shape)
+
+# Importing Institution x Country Matches
+inst_country_cw = con.read_parquet(f"{root}/data/int/rev_inst_countries_jun30.parquet")
+
+# Importing Name x Country Matches
+nanats = con.read_parquet(f"{root}/data/int/name2nat_revelio/rev_names_withnat_jun26.parquet")
+
+# Importing User x Position-level Data
 merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
 #occ_cw = con.read_csv(f"{root}/data/crosswalks/rev_occ_to_foia_freq.csv")
-
-# merged_pos_full = con.sql(
-#     f"""SELECT ROW_NUMBER() OVER(PARTITION BY main_rcid, user_id ORDER BY get_quarter(startdate)) AS rank, weight,
-#         get_quarter(startdate) AS startq,
-#         get_fiscal_year(startdate) AS startfy,
-#         CASE WHEN enddate IS NULL AND startdate IS NOT NULL THEN 2025.25 ELSE get_quarter(enddate) END AS endq,
-#         CASE WHEN enddate IS NULL AND startdate IS NOT NULL THEN 2025 ELSE get_fiscal_year(enddate) END AS endfy,
-#         country, main_rcid, user_id, 
-#         role_k1500, top3occ, top10occ, mean_n_100
-#     FROM (SELECT startdate, enddate, user_id, country, weight, pos.role_k1500 AS role_k1500, top3occ, top10occ, mean_n_100,
-#             CASE WHEN main_rcid IS NULL THEN pos.rcid ELSE main_rcid END AS main_rcid
-#         FROM (merged_pos AS pos
-#         LEFT JOIN
-#             (SELECT role_k1500, top3occ, top10occ, mean_n_100 FROM occ_cw) AS occ_cw 
-#         ON pos.role_k1500 = occ_cw.role_k1500
-#         LEFT JOIN 
-#             dup_rcids_unique AS dup_cw
-#         ON pos.rcid = dup_cw.rcid))""")
-
 
 #####################################
 # DEFINING MAIN SAMPLE OF USERS (RCID IN MAIN SAMP AND START DATE AFTER 2015)
@@ -139,7 +88,7 @@ FROM rmerge
 GROUP BY foia_id, lottery_year, main_rcid
 """)
 
-# IDing outsourcing/staffing companies
+# IDing outsourcing/staffing companies (defining share of applications that are multiple registrations ['duplicates']; counting total number of apps)
 foia_main_samp_unfilt = con.sql("SELECT FEIN, lottery_year, COUNT(CASE WHEN ben_multi_reg_ind = 1 THEN 1 END)/COUNT(*) AS share_multireg, COUNT(*) AS n_apps_tot, COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END) AS n_success, COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END)/COUNT(*) AS win_rate FROM foia_with_ids GROUP BY FEIN, lottery_year")
 
 n = con.sql('SELECT COUNT(*) FROM foia_main_samp_unfilt').df().iloc[0,0]
@@ -148,167 +97,95 @@ print(f"Employer x Years with Fewer than 50 Apps: {con.sql("SELECT COUNT(*) FROM
 print(f"Employer x Years with Fewer than 50% Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg < 0.5").df().iloc[0,0]}")
 print(f"Employer x Years with No Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg = 0").df().iloc[0,0]}")
 
+# main sample (conservative): companies with fewer than 50 applications and no duplicate registrations TODO: declare these as constants at top
 foia_main_samp = con.sql("SELECT * FROM foia_main_samp_unfilt WHERE n_apps_tot < 50 AND share_multireg = 0")
 print(f"Preferred Sample: {foia_main_samp.df().shape[0]} ({round(100*foia_main_samp.df().shape[0]/n)}%)")
 
+# computing win rate by sample
 foia_main_samp_def = con.sql("SELECT *, CASE WHEN n_apps_tot < 50 AND share_multireg = 0 THEN 'insamp' ELSE 'outsamp' END AS sampgroup FROM foia_main_samp_unfilt")
 con.sql("SELECT sampgroup, SUM(n_success)/SUM(n_apps_tot) AS total_win_rate FROM foia_main_samp_def GROUP BY sampgroup")
 
+# creating crosswalk between foia id and rcid (joining list of FEINs in and out of sample with foia data with foia ids and joining that to id crosswalk)
 samp_to_rcid = con.sql("SELECT * FROM ((SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS a JOIN (SELECT FEIN, lottery_year, foia_id FROM foia_with_ids GROUP BY FEIN, lottery_year, foia_id) AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year JOIN (SELECT main_rcid, foia_id FROM id_merge) AS c ON b.foia_id = c.foia_id)")
 
+# writing company sample crosswalk to file
+con.sql(f"COPY samp_to_rcid TO '{root}/data/int/company_merge_sample_jun30.parquet'")
+
+# selecting user ids from list of positions based on whether company in sample and start date is after 2015 (conservative bandwidth) -- TODO: declare cutoff date as constant
 user_samp = con.sql("SELECT user_id FROM ((SELECT main_rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY main_rcid) AS a JOIN (SELECT user_id, startdate, rcid FROM merged_pos) AS b ON a.main_rcid = b.rcid) WHERE startdate >= '2015-01-01' GROUP BY user_id")
 
-######### USER-LEVEL DATA ###########
-# IMPORT USER DATA (FROM WRDS SERVER)
-rev_users = con.read_parquet(f"{root}/data/wrds/wrds_out/rev_user_merge0.parquet")
-
-for j in range(1,10):
-    rev_users = con.sql(f"SELECT * FROM rev_users UNION ALL SELECT * FROM '{root}/data/wrds/wrds_out/rev_user_merge{j}.parquet'")
-
-rev_users_filt = con.sql("SELECT * FROM ((SELECT user_id, fullname, university_raw, education_number, ed_startdate, ed_enddate, degree, field,  university_country, degree_raw, field_raw FROM rev_users GROUP BY user_id, fullname, university_raw, education_number, ed_startdate, ed_enddate, degree, field,  university_country, degree_raw, field_raw) AS a JOIN user_samp AS b ON a.user_id = b.user_id)")
-
-rev_users_test = con.sql("SELECT * FROM rev_users_filt LIMIT 10000")
-
-# IMPORT GMAPS DATA
-gmaps = con.sql(f"""SELECT * FROM read_parquet('{"')UNION ALL SELECT * FROM read_parquet('".join([f"{root}/data/int/gmaps_univ_locations/{f}" for f in os.listdir(f"{root}/data/int/gmaps_univ_locations/")])}')""")
-
-gmaps_clean = con.sql("SELECT top_country, top_country_n_users, university_raw, CASE WHEN gmaps_json IS NULL THEN top_country ELSE get_gmaps_country(gmaps_json.candidates[1].formatted_address) END AS univ_gmaps_country, gmaps_json FROM gmaps")
-
-# MERGE GMAPS DATA WITH USERS
-rev_users_with_gmaps = con.sql(
-"""SELECT user_id, top_country, top_country_n_users, lower(a.university_raw) AS university_raw, university_country AS univ_rev_country, fullname, education_number, univ_gmaps_country, DATEDIFF('year',ed_startdate::DATETIME,ed_enddate::DATETIME) AS ed_length, ROW_NUMBER() OVER(PARTITION BY user_id ORDER BY ed_startdate) AS ed_num,
-    CASE 
-        WHEN lower(a.university_raw) ~ '.*(high\\s?school).*' OR (degree = '<NA>' AND a.university_raw ~ '.*(HS| High| HIGH| high|H\\.S\\.|S\\.?S\\.?C|H\\.?S\\.?C\\.?)$') THEN 'High School' 
-        WHEN degree != '<NA>' THEN degree
-        WHEN lower(degree_raw) ~ '.*(cert|credential|course|semester|exchange|abroad|summer|internship|edx|cdl|coursera).*' OR lower(a.university_raw) ~ '.*(edx|course|credential|semester|exchange|abroad|summer|internship|certificat|coursera).*' OR lower(field_raw) ~ '.*(edx|course|credential|semester|exchange|abroad|summer|internship|certificat|coursera).*' THEN 'Non-Degree'
-        WHEN (lower(degree_raw) ~ '.*(undergrad).*') OR (degree_raw ~ '.*(B\\.?A\\.?|B\\.?S\\.?C\\.?E\\.?|B\\.?Sc\\.?|B\\.?A\\.?E\\.?|B\\.?Eng\\.?|A\\.?B\\.?|S\\.?B\\.?|B\\.?B\\.?M\\.?|B\\.?I\\.?S\\.?).*') OR degree_raw ~ '^B\\.?\\s?S\\.?.*' OR lower(field_raw) ~ '.*bachelor.*' OR lower(degree_raw) ~ '.*bachelor.*' THEN 'Bachelor'
-        WHEN lower(degree_raw) ~ '.*(master).*' OR degree_raw ~ '^M\\.?(Eng|Sc|A)\\.?.*' THEN 'Master'
-        WHEN degree_raw ~ '.*(M\\.?S\\.?C\\.?E\\.?|M\\.?P\\.?A\\.?|M\\.?Eng|M\\.?Sc|M\\.?A).*' OR lower(field_raw) ~ '.*master.*' OR lower(degree_raw) ~ '.*master.*' THEN 'Master'
-        WHEN lower(field_raw) ~ '.*(associate).*' OR degree_raw ~ 'A\\.?\\s?A\\.?.*' THEN 'Associate' 
-        WHEN degree_raw ~ '^B\\.?\\s?[A-Z].*' THEN 'Bachelor'
-        WHEN degree_raw ~ '^M\\.?\\s?[A-Z].*' THEN 'Master'
-        ELSE degree END AS degree_clean,
-    FROM rev_users_filt AS a LEFT JOIN gmaps_clean AS b ON lower(a.university_raw) = b.university_raw""")
-
-# GET IMPUTED NATS FROM CLEANED NAME
-full_names_clean = con.sql(
+#####################################
+### CLEANING AND MERGING REVELIO USERS TO COUNTRIES
+#####################################
+# Cleaning Revelio Data, removing duplicates
+rev_clean = con.sql(
+f"""
+SELECT * FROM
+    (SELECT 
+    fullname, degree, user_id,
+    {help.degree_clean_regex_sql()} AS degree_clean,
+    {help.inst_clean_regex_sql('university_raw')} AS univ_raw_clean,
+    CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
+    degree_raw, field_raw, university_raw, f_prob, education_number, ed_enddate, ed_startdate, ROW_NUMBER() OVER(PARTITION BY user_id, education_number) AS dup_num
+    FROM rev_raw)
+WHERE dup_num = 1
 """
-    SELECT user_id, univ_gmaps_country, univ_rev_country, university_raw, top_country, top_country_n_users, degree_clean, ed_num, ed_length, CASE WHEN univ_gmaps_country IS NULL THEN univ_rev_country ELSE univ_gmaps_country END AS univ_country,
-    title(TRIM(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE((CASE WHEN fullname ~ '.*[a-z].*' THEN 
-        REGEXP_REPLACE(REGEXP_REPLACE(fullname, ',.*$', '', 'g'), '\\s([A-Z]\\.?){2,4}$', '', 'g')
-        ELSE REGEXP_REPLACE(fullname, ',.*$', '', 'g') END), '\\s?\\(.*\\)$', '', 'g'), 'P\\.?h\\.?D\\.?', '', 'g'), ' +', ' ', 'g'))) AS fullname_clean
-    FROM rev_users_with_gmaps
-""")
+)
 
-con.sql(f"COPY full_names_clean TO '{root}/data/int/rev_user_gmaps_apr15.parquet' (FORMAT parquet)")
+# Filtering to only include users in the preferred sample
+rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a.user_id = b.user_id")
 
-# all_names_with_nats = con.sql("SELECT fullname_clean, name2nat(fullname_clean) AS pred_nats FROM full_names_clean GROUP BY fullname_clean")# WHERE top_country != 'United States' OR top_country IS NULL OR top_country_n_users < 10 OR univ_gmaps_country != 'United States' GROUP BY fullname_clean")
+# # temp for testing
+# ids = ",".join(con.sql(help.random_ids_sql('user_id','rev_clean', n = 100)).df()['user_id'].astype(str))
+# rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a.user_id = b.user_id WHERE a.user_id IN ({ids})")
 
-# MERGING DATASETS AND CLEANING
-# rev_users_merged = con.sql("SELECT * FROM full_names_clean as a LEFT JOIN all_names_with_nats AS b ON a.fullname_clean = b.fullname_clean")
+# Cleaning name matches (long on country)
+nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country({help.nanats_to_long('pred_nats_name')}[1]) AS nanat_country, {help.nanats_to_long('pred_nats_name')}[2]::FLOAT AS nanat_prob FROM nanats) WHERE nanat_prob > 0.02 GROUP BY fullname_clean, nanat_country")
+# # temp for testing
+# nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country({help.nanats_to_long('pred_nats_name')}[1]) AS nanat_country, {help.nanats_to_long('pred_nats_name')}[2]::FLOAT AS nanat_prob FROM (SELECT * FROM nanats AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean)) WHERE nanat_prob > 0.02 GROUP BY fullname_clean, nanat_country")
 
-# con.sql(f"COPY rev_users_merged TO '{root}/data/int/rev_user_merge_apr13.parquet' (FORMAT parquet)")
+# # Cleaning institution matches (wide on country)
+# inst_wide = con.sql("""SELECT university_raw,
+#         list_transform(
+#             list_zip(ARRAY_AGG(match_country ORDER BY matchscore DESC),
+#                     ARRAY_AGG(matchscore ORDER BY matchscore DESC),
+#                     ARRAY_AGG(matchtype ORDER BY matchscore DESC)),
+#             x -> struct_pack(country := x[1], score := x[2], type := x[3])
+#         ) AS univ_countries
+#     FROM inst_country_cw GROUP BY university_raw""")
 
-# nanat countries: collapsing to user level
-rev_users_merged = con.read_parquet(f"{root}/data/int/rev_user_merge_apr13.parquet")
-rev_users_unique = con.sql("SELECT user_id, fullname_clean, pred_nats FROM rev_users_merged GROUP BY user_id, fullname_clean, pred_nats")
-
-# for gmaps countries: collapsing to user level
-rev_users_gmaps = con.read_parquet(f"{root}/data/int/rev_user_gmaps_apr15.parquet")
-
-rev_users_gmaps_unique = con.sql(
-"""SELECT a.user_id AS user_id, gmaps_nats_all, univ_nats_all, gmaps_nats_bach, univ_nats_bach, gmaps_hs, univ_hs, gmaps_first_ed, univ_first_ed
-    FROM (
-        (SELECT user_id, ARRAY_AGG(univ_gmaps_country ORDER BY ed_num) AS gmaps_nats_all
-        FROM (
-            SELECT DISTINCT user_id, univ_gmaps_country, MIN(ed_num) AS ed_num FROM rev_users_gmaps WHERE univ_gmaps_country IS NOT NULL GROUP BY user_id, univ_gmaps_country
-        ) GROUP BY user_id) AS a
-        LEFT JOIN  
-        (SELECT user_id, ARRAY_AGG(univ_country ORDER BY ed_num) AS univ_nats_all
-        FROM (
-            SELECT DISTINCT user_id, univ_country, MIN(ed_num) AS ed_num FROM rev_users_gmaps WHERE univ_country IS NOT NULL GROUP BY user_id, univ_country
-        ) GROUP BY user_id) AS b
-        ON a.user_id = b.user_id
-        LEFT JOIN
-        (SELECT user_id, ARRAY_AGG(univ_gmaps_country ORDER BY ed_num) AS gmaps_nats_bach 
-        FROM (
-            SELECT DISTINCT user_id, univ_gmaps_country, MIN(ed_num) AS ed_num FROM rev_users_gmaps WHERE univ_gmaps_country IS NOT NULL AND degree_clean != 'Master' AND degree_clean != 'Doctor' AND ed_length >= 2 GROUP BY user_id, univ_gmaps_country
-        ) GROUP BY user_id) AS c
-        ON a.user_id = c.user_id
-        LEFT JOIN
-        (SELECT user_id, ARRAY_AGG(univ_country ORDER BY ed_num) AS univ_nats_bach 
-        FROM (
-            SELECT DISTINCT user_id, univ_country, MIN(ed_num) AS ed_num FROM rev_users_gmaps WHERE univ_country IS NOT NULL AND degree_clean != 'Master' AND degree_clean != 'Doctor' AND ed_length >= 2 GROUP BY user_id, univ_country
-        ) GROUP BY user_id) AS d
-        ON a.user_id = d.user_id
-        LEFT JOIN 
-        (SELECT user_id, univ_gmaps_country AS gmaps_hs, univ_country AS univ_hs
-        FROM (
-            SELECT *, ROW_NUMBER() OVER(PARTITION BY user_id ORDER BY ed_num) AS hs_rank 
-            FROM rev_users_gmaps 
-            WHERE degree_clean = 'High School' AND ed_length > 1 AND univ_country IS NOT NULL
-        ) WHERE hs_rank = 1) AS e
-        ON a.user_id = e.user_id
-        LEFT JOIN 
-        (SELECT user_id, univ_gmaps_country AS gmaps_first_ed, univ_country AS univ_first_ed
-        FROM (
-            SELECT *, ROW_NUMBER() OVER(PARTITION BY user_id ORDER BY ed_num) AS rank 
-            FROM rev_users_gmaps 
-            WHERE univ_country IS NOT NULL AND ed_length > 0
-        ) WHERE rank = 1) AS f
-        ON a.user_id = f.user_id
-    )""")
-
-rev_users_merged_nats = con.sql(
+# Merging with institution matches (long) and collapsing to user x country level
+inst_merge_long = con.sql(
 """
-    SELECT a.user_id, get_all_nats(pred_nats) AS all_nats, get_main_nats(pred_nats) AS main_nats, top_nat(pred_nats) AS top_nat, univ_nats_all, univ_nats_bach, univ_hs, univ_first_ed FROM rev_users_unique AS a FULL OUTER JOIN rev_users_gmaps_unique AS b ON a.user_id = b.user_id
-""")
+SELECT user_id, university_raw, match_country, CASE WHEN degree_clean = 'High School' THEN matchscore WHEN degree_clean = 'Bachelor' THEN matchscore*0.8 ELSE matchscore*0.5 END,matchscore, matchtype, education_number, MAX(matchscore) OVER(PARTITION BY user_id, match_country) AS max_matchscore FROM
+    (SELECT user_id, education_number, degree_clean, a.university_raw, match_country, matchscore, matchtype, ROW_NUMBER() OVER(PARTITION BY user_id, match_country ORDER BY education_number) AS educ_order FROM rev_users_filt AS a JOIN (SELECT * FROM inst_country_cw WHERE matchscore >= 0.2) AS b ON a.university_raw = b.university_raw
+    ) WHERE educ_order = 1 AND match_country != 'NA' AND degree_clean != 'Non-Degree'
+"""
+)
 
-con.sql(f"COPY rev_users_merged_nats TO '{root}/data/int/rev_user_nats_final_apr15.parquet' (FORMAT parquet)")
+# Merging with name matches (long)
+name_merge_long = con.sql(
+"""
+SELECT user_id, a.fullname_clean, nanat_country, nanat_prob FROM (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a JOIN nanats_long AS b ON a.fullname_clean = b.fullname_clean
+"""
+)
 
-rev_users_merged_nats = con.read_parquet(f"{root}/data/int/rev_user_nats_final_apr15.parquet")
+# combining institution and name matches (user x country level)
+all_merge_long = con.sql(
+"""SELECT 
+        CASE WHEN a.user_id IS NULL THEN b.user_id ELSE a.user_id END AS user_id, fullname_clean, university_raw,
+        CASE WHEN match_country IS NULL THEN nanat_country ELSE match_country END AS country, 
+        CASE WHEN match_country IS NULL THEN 0 ELSE matchscore END AS inst_score, 
+        CASE WHEN nanat_country IS NULL THEN 0 ELSE nanat_prob END AS nanat_score 
+    FROM inst_merge_long AS a 
+    FULL JOIN name_merge_long AS b 
+    ON a.user_id = b.user_id AND a.match_country = b.nanat_country""")
 
-# test version stored in rev_users_merged.df()
+#####################################
+### GETTING AND EXPORTING FINAL USER FILE
+#####################################
+final_user_merge = con.sql(f"SELECT a.user_id, est_yob, f_prob, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score FROM (SELECT * FROM (SELECT user_id, {help.get_est_yob()} AS est_yob, f_prob, fullname FROM rev_users_filt) GROUP BY user_id, est_yob, f_prob, fullname) AS a LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id")
 
-# all_names['pred_nat'] = all_names['fullname_clean'].apply(lambda x: my_nanat(x, top_n = 5))
+con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jun30.parquet'")
 
-# rev_clean = con.sql(
-# """
-#     SELECT 
-#     fullname, university_country, university_location, degree, user_id,
-#     CASE 
-#         WHEN lower(university_raw) ~ '.*(high\\s?school).*' OR (degree = '<NA>' AND university_raw ~ '.*(HS| High| HIGH| high|H\\.S\\.|S\\.?S\\.?C|H\\.?S\\.?C\\.?)$') THEN 'High School' 
-#         WHEN degree != '<NA>' THEN degree
-#         WHEN lower(degree_raw) ~ '.*(cert|credential|course|semester|exchange|abroad|summer|internship|edx|cdl|coursera).*' OR lower(university_raw) ~ '.*(edx|course|credential|semester|exchange|abroad|summer|internship|certificat|coursera).*' OR lower(field_raw) ~ '.*(edx|course|credential|semester|exchange|abroad|summer|internship|certificat|coursera).*' THEN 'Non-Degree'
-#         WHEN (lower(degree_raw) ~ '.*(undergrad).*') OR (degree_raw ~ '.*(B\\.?A\\.?|B\\.?S\\.?C\\.?E\\.?|B\\.?Sc\\.?|B\\.?A\\.?E\\.?|B\\.?Eng\\.?|A\\.?B\\.?|S\\.?B\\.?|B\\.?B\\.?M\\.?|B\\.?I\\.?S\\.?).*') OR degree_raw ~ '^B\\.?\\s?S\\.?.*' OR lower(field_raw) ~ '.*bachelor.*' OR lower(degree_raw) ~ '.*bachelor.*' THEN 'Bachelor'
-#         WHEN lower(degree_raw) ~ '.*(master).*' OR degree_raw ~ '^M\\.?(Eng|Sc|A)\\.?.*' THEN 'Master'
-#         WHEN degree_raw ~ '.*(M\\.?S\\.?C\\.?E\\.?|M\\.?P\\.?A\\.?|M\\.?Eng|M\\.?Sc|M\\.?A).*' OR lower(field_raw) ~ '.*master.*' OR lower(degree_raw) ~ '.*master.*' THEN 'Master'
-#         WHEN lower(field_raw) ~ '.*(associate).*' OR degree_raw ~ 'A\\.?\\s?A\\.?.*' THEN 'Associate' 
-#         WHEN degree_raw ~ '^B\\.?\\s?[A-Z].*' THEN 'Bachelor'
-#         WHEN degree_raw ~ '^M\\.?\\s?[A-Z].*' THEN 'Master'
-#         ELSE degree END AS degree_clean,
-#     TRIM(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(strip_accents(lower(university_raw)), '\\s*\\(.*\\)\\s*', ' ', 'g'), '[^a-z0-9\\s]', ' ', 'g'), '\\s+', ' ', 'g')) AS univ_raw_clean,
-#     degree_raw, field_raw, university_raw
-#     FROM rev_raw
-# """
-# )
-
-# # grouping by user x university (filtering out non-degree) x country, then by university x country, then by university (taking top non-null country)
-# univ_names = con.sql(
-# """SELECT university_raw, 
-#     (ARRAY_AGG(university_country ORDER BY n_users_univ_ctry DESC) FILTER (WHERE university_country IS NOT NULL))[1] AS top_country, 
-#     (ARRAY_AGG(n_users_univ_ctry ORDER BY n_users_univ_ctry DESC) FILTER (WHERE university_country IS NOT NULL))[1] AS top_country_n_users, 
-#     SUM(n_users_univ_ctry) AS n_users 
-# FROM (
-#     SELECT university_raw, university_country, COUNT(*) AS n_users_univ_ctry 
-#     FROM (
-#         SELECT lower(university_raw) AS university_raw, user_id, university_country 
-#         FROM rev_clean 
-#         WHERE degree_clean != 'Non-Degree'
-#         GROUP BY university_raw, university_country, user_id
-#     ) GROUP BY university_country, university_raw
-# ) GROUP BY university_raw ORDER BY n_users DESC
-# """).df()
-
-# univ_names_for_lookup = univ_names.loc[(univ_names['top_country'].isnull() == 1)|(univ_names['top_country_n_users'] < 10)]
-# print(f"Total universities to check: {univ_names_for_lookup.shape[0]}")
+# final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jun30.parquet')

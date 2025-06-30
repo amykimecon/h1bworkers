@@ -89,6 +89,15 @@ country_cw_dict['XKX'] = 'Kosovo'
 country_cw_dict['XKK'] = 'Kosovo'
 country_cw_dict['Kosovo'] = 'Kosovo'
 country_cw_dict['Turkey'] = 'Turkiye'
+country_cw_dict['Macedonia'] = 'North Macedonia'
+country_cw_dict['Congo - Democratic Rep'] = 'Democratic Republic of the Congo'
+country_cw_dict['Ivory Coast'] = "Cote d'Ivoire"
+country_cw_dict['Swaziland'] = 'Eswatini'
+country_cw_dict['Central African Republ'] = 'Central African Republic'
+country_cw_dict['Vatican City'] = 'Italy'
+country_cw_dict['Virgin Islands (UK)'] = 'British Virgin Islands'
+country_cw_dict['Svalbard'] = 'Norway'
+country_cw_dict['Congo - Republic of th'] = 'Democratic Republic of the Congo'
 
 # mapping nanat nationalities to country names
 def get_nanat_country(nat, dict = country_cw_dict):
