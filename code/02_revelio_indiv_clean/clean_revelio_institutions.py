@@ -50,7 +50,7 @@ admin2codes = pd.read_csv(f"{root}/data/crosswalks/geonames/admin2Codes.txt",
 # Importing google maps data (matches from google maps)
 gmaps = con.sql(f"""SELECT * FROM read_parquet('{"')UNION ALL SELECT * FROM read_parquet('".join([f"{root}/data/int/gmaps_univ_locations/{f}" for f in os.listdir(f"{root}/data/int/gmaps_univ_locations/")])}')""")
 
-gmaps_clean = con.sql("SELECT top_country, top_country_n_users, university_raw, CASE WHEN gmaps_json IS NULL THEN top_country ELSE get_gmaps_country(gmaps_json.candidates[1].formatted_address) END AS univ_gmaps_country, gmaps_json.candidates[1].name AS gmaps_name, gmaps_json FROM gmaps")
+gmaps_clean = con.sql("SELECT top_country, top_country_n_users, university_raw, CASE WHEN gmaps_json IS NULL THEN NULL ELSE get_gmaps_country(gmaps_json.candidates[1].formatted_address) END AS univ_gmaps_country, gmaps_json.candidates[1].name AS gmaps_name, gmaps_json FROM gmaps")
 
 ###################
 ## CLEANING DATA ##
@@ -706,7 +706,7 @@ SELECT matches.university_raw, matchname_raw, match_country, matchscore, matchty
             (log_token_freq/(MIN(log_token_freq) OVER()))*(jaro_sim)*(CASE WHEN namecontain = 1 THEN 1 ELSE 0.7 END) AS matchscore, 
             'dedup_token' || token_n AS matchtype  
         FROM dedup_filt AS a 
-        LEFT JOIN good_matches AS b 
+        JOIN good_matches AS b 
         ON a.right_university_raw = b.university_raw
         UNION ALL
         SELECT university_raw, token AS matchname_raw, countryname AS match_country, 
@@ -715,7 +715,9 @@ SELECT matches.university_raw, matchname_raw, match_country, matchscore, matchty
         UNION ALL
         (SELECT b.university_raw, gmaps_name AS matchname_raw, get_std_country(univ_gmaps_country) AS match_country, 
             jaro_similarity(lower(b.university_raw), lower(gmaps_name)) AS matchscore, 'gmaps' AS matchtype 
-        FROM gmaps_clean AS a LEFT JOIN univ_names AS b ON a.university_raw = lower(b.university_raw) WHERE a.university_raw IS NOT NULL AND univ_gmaps_country != 'No valid country match found')
+        FROM gmaps_clean AS a LEFT JOIN univ_names AS b ON a.university_raw = lower(b.university_raw) WHERE a.university_raw IS NOT NULL AND univ_gmaps_country != 'No valid country match found' AND univ_gmaps_country IS NOT NULL)
+        UNION ALL
+        (SELECT university_raw, university_raw AS matchname_raw, top_country AS match_country, 0 AS matchscore, 'revelio' AS matchtype FROM univ_names WHERE top_country IS NOT NULL AND top_country_n_users < 20)
     ) AS matches
     LEFT JOIN
     (SELECT university_raw, 1 AS goodmatchind FROM good_matches GROUP BY university_raw) AS univs
