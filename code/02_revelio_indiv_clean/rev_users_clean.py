@@ -24,27 +24,6 @@ con.create_function("title", lambda x: x.title(), ['VARCHAR'], 'VARCHAR')
 # country crosswalk function
 con.create_function("get_std_country", lambda x: help.get_std_country(x), ['VARCHAR'], 'VARCHAR')
 
-# #getting countries (std) and probs from nanat output
-# con.create_function("get_all_nanats", lambda x: help.get_all_nanats(x), ['VARCHAR'], 'VARCHAR')
-
-# con.create_function("get_all_nanat_probs", lambda x: help.get_all_nanat_probs(x), ['VARCHAR'], 'VARCHAR')
-
-# def get_top_nat(str):
-#     allnats = get_all_nats(str)
-#     if allnats is None or len(allnats) == 0:
-#         return ""
-#     return allnats[0][0]
-
-# def get_main_nats(str):
-#     allnats = get_all_nats(str)
-#     if allnats is None:
-#         return []
-#     return [s[0] for s in allnats if s[1] > 0.01]
-
-# con.create_function("get_all_nats", lambda x: get_all_nats(x), ['VARCHAR'], 'VARCHAR')
-# con.create_function("top_nat", lambda x: get_top_nat(x), ['VARCHAR'], 'VARCHAR')
-# con.create_function("get_main_nats", get_main_nats, ['VARCHAR'], 'VARCHAR')
-
 #####################################
 ## IMPORTING DATA
 #####################################
@@ -105,14 +84,14 @@ print(f"Preferred Sample: {foia_main_samp.df().shape[0]} ({round(100*foia_main_s
 foia_main_samp_def = con.sql("SELECT *, CASE WHEN n_apps_tot < 50 AND share_multireg = 0 THEN 'insamp' ELSE 'outsamp' END AS sampgroup FROM foia_main_samp_unfilt")
 con.sql("SELECT sampgroup, SUM(n_success)/SUM(n_apps_tot) AS total_win_rate FROM foia_main_samp_def GROUP BY sampgroup")
 
-# creating crosswalk between foia id and rcid (joining list of FEINs in and out of sample with foia data with foia ids and joining that to id crosswalk)
-samp_to_rcid = con.sql("SELECT * FROM ((SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS a JOIN (SELECT FEIN, lottery_year, foia_id FROM foia_with_ids GROUP BY FEIN, lottery_year, foia_id) AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year JOIN (SELECT main_rcid, foia_id FROM id_merge) AS c ON b.foia_id = c.foia_id)")
+# creating crosswalk between foia id and rcid (joining list of FEINs in and out of sample with foia data with foia ids and joining that to id crosswalk, then joining to dup_rcids)
+samp_to_rcid = con.sql("SELECT a.FEIN, a.lottery_year, sampgroup, b.foia_id, c.main_rcid, CASE WHEN rcid IS NULL THEN c.main_rcid ELSE d.rcid END AS rcid FROM ((SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS a JOIN (SELECT FEIN, lottery_year, foia_id FROM foia_with_ids GROUP BY FEIN, lottery_year, foia_id) AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year JOIN (SELECT main_rcid, foia_id FROM id_merge) AS c ON b.foia_id = c.foia_id) LEFT JOIN (SELECT main_rcid, rcid FROM dup_rcids) AS d ON c.main_rcid = d.main_rcid")
 
 # writing company sample crosswalk to file
 con.sql(f"COPY samp_to_rcid TO '{root}/data/int/company_merge_sample_jun30.parquet'")
 
-# selecting user ids from list of positions based on whether company in sample and start date is after 2015 (conservative bandwidth) -- TODO: declare cutoff date as constant
-user_samp = con.sql("SELECT user_id FROM ((SELECT main_rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY main_rcid) AS a JOIN (SELECT user_id, startdate, rcid FROM merged_pos) AS b ON a.main_rcid = b.rcid) WHERE startdate >= '2015-01-01' GROUP BY user_id")
+# selecting user ids from list of positions based on whether company in sample and start date is after 2015 (conservative bandwidth) -- TODO: declare cutoff date as constant; TODO: move startdate filter into merged_pos query, avoid pulling people who got promoted after 2015 but started working before 2015
+user_samp = con.sql("SELECT user_id FROM ((SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a JOIN (SELECT user_id, startdate, rcid FROM merged_pos) AS b ON a.rcid = b.rcid) WHERE startdate >= '2015-01-01' GROUP BY user_id")
 
 #####################################
 ### CLEANING AND MERGING REVELIO USERS TO COUNTRIES
@@ -188,4 +167,4 @@ final_user_merge = con.sql(f"SELECT a.user_id, est_yob, f_prob, fullname, univer
 
 con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jun30.parquet'")
 
-# final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jun30.parquet')
+final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jun30.parquet')

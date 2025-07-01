@@ -3,7 +3,7 @@
 ## Description and Inputs
 Using H-1B visa data and Revelio LinkedIn data, merging to evaluate outcomes of H-1B lottery winners and losers.
 
-## File Structure (updated 6/26/25)
+## File Structure (updated 6/30/25)
 1. Company Merge (code/01_employer_merge)
   - V1: R (currently using)
     - 1.0. Importing Revelio Employers (revelio_explore.R)
@@ -31,12 +31,14 @@ Using H-1B visa data and Revelio LinkedIn data, merging to evaluate outcomes of 
   - 2.1.2. Getting Nationalities from Full Names using Name2Nat (rev_indiv_name2nat.py)
       - input: rev_user_merge{j}.parquet for j in 1:10; name2nat function
       - output: rev_names_withnat_jun26.parquet
-  - 2.2. Final Clean (rev_users_clean.py)
-      - input: rev_user_merge{j}.parquet for j in 1:10; rev_names_withnat; rev_inst_countries
-      - output: rev_user_nats_final_apr15
+  - 2.2. Final Clean (rev_users_clean.py) + Final Company Sample
+      - input: rev_user_merge{j}.parquet for j in 1:10; rev_names_withnat; rev_inst_countries; merged_pos (to restrict user sample)
+      - output: /data/int/company_merge_sample_jun30.parquet; /data/int/rev_users_clean_jun30.parquet
 
 3. Individual Merge (code/03_indiv_merge)
-  - 3.1. Merging (indiv_merge_test.py)
+  - 3.1. Merging (indiv_merge.py; indiv_merge_test.py for Master's subsample not updated)
+      - input: rev_users_clean; foia raw data; company_merge_sample; merged_pos (for start and end dates)
+      - 
 
 4. Analysis
 
