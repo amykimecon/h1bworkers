@@ -12,9 +12,16 @@ import os
 import re
 # import json
 
-root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
+# local
+if os.environ.get('USER') == 'amykim':
+    root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
+    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+# malloy
+elif os.environ.get('USER') == 'yk0581':
+    root = "/home/yk0581"
+    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+    
 wrds_out = f"{root}/data/wrds/wrds_out/jun26"
-code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
 
 con = ddb.connect()
 

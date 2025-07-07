@@ -3,9 +3,16 @@ import json
 import numpy as np
 import re
 from name2nat import Name2nat 
+import os
 
-root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
-code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+# local
+if os.environ.get('USER') == 'amykim':
+    root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
+    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+# malloy
+elif os.environ.get('USER') == 'yk0581':
+    root = "/home/yk0581"
+    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
 
 # SQL QUERIES
 # sql string to extract random list of n ids
