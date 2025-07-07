@@ -113,6 +113,7 @@ def degree_clean_regex_sql():
             WHEN lower(field_raw) ~ '.*(associate).*' OR degree_raw ~ 'A\\.?\\s?A\\.?.*' THEN 'Associate' 
             WHEN degree_raw ~ '^B\\.?\\s?[A-Z].*' THEN 'Bachelor'
             WHEN degree_raw ~ '^M\\.?\\s?[A-Z].*' THEN 'Master'
+            WHEN degree IS NULL THEN 'Missing'
             ELSE degree END
     """
     return str_out
@@ -149,7 +150,7 @@ def nanats_to_long(col):
 def get_est_yob():
     str_out = """CASE WHEN (MAX(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id)) = 1 
         THEN MAX(CASE WHEN degree_clean = 'High School' THEN SUBSTRING(ed_enddate, 1, 4)::INT - 18 ELSE NULL END) OVER(PARTITION BY user_id) 
-        ELSE MIN(CASE WHEN degree_clean = 'Non-Degree' OR degree_clean = 'Master' OR degree_clean = 'Doctor' OR degree_clean = 'MBA' THEN NULL ELSE SUBSTRING(ed_startdate, 1, 4)::INT - 18 END) OVER(PARTITION BY user_id) 
+        ELSE MIN(CASE WHEN degree_clean = 'Non-Degree' OR degree_clean = 'Master' OR degree_clean = 'Doctor' OR degree_clean = 'MBA' THEN NULL WHEN ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT - 18 WHEN ed_enddate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT - 23 END) OVER(PARTITION BY user_id) 
         END"""
     return str_out
     

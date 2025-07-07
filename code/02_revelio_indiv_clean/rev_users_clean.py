@@ -13,6 +13,7 @@ import re
 # import json
 
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
+wrds_out = f"{root}/data/wrds/wrds_out/jun26"
 code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
 
 con = ddb.connect()
@@ -40,10 +41,10 @@ foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all
 foia_with_ids = con.sql("SELECT *, CASE WHEN matched IS NULL THEN 0 ELSE matched END AS matchind FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id, 1 AS matched FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
 
 # Importing User x Education-level Data (From WRDS Server)
-rev_raw = con.read_parquet(f"{root}/data/wrds/wrds_out/rev_user_merge0.parquet")
+rev_raw = con.read_parquet(f"{wrds_out}/rev_user_merge0.parquet")
 
 for j in range(1,10):
-    rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{root}/data/wrds/wrds_out/rev_user_merge{j}.parquet'")
+    rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{wrds_out}/rev_user_merge{j}.parquet'")
     print(rev_raw.shape)
 
 # Importing Institution x Country Matches
@@ -123,22 +124,47 @@ nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS
 # # temp for testing
 # nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country({help.nanats_to_long('pred_nats_name')}[1]) AS nanat_country, {help.nanats_to_long('pred_nats_name')}[2]::FLOAT AS nanat_prob FROM (SELECT * FROM nanats AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean)) WHERE nanat_prob > 0.02 GROUP BY fullname_clean, nanat_country")
 
-# # Cleaning institution matches (wide on country)
-# inst_wide = con.sql("""SELECT university_raw,
-#         list_transform(
-#             list_zip(ARRAY_AGG(match_country ORDER BY matchscore DESC),
-#                     ARRAY_AGG(matchscore ORDER BY matchscore DESC),
-#                     ARRAY_AGG(matchtype ORDER BY matchscore DESC)),
-#             x -> struct_pack(country := x[1], score := x[2], type := x[3])
-#         ) AS univ_countries
-#     FROM inst_country_cw GROUP BY university_raw""")
+# Cleaning institution matches 
+inst_match_clean = con.sql(
+"""
+    SELECT *, 
+        COUNT(*) OVER(PARTITION BY university_raw) AS n_country_match 
+    FROM inst_country_cw
+    WHERE lower(REGEXP_REPLACE(university_raw, '[^A-z]', '', 'g')) NOT IN ('highschool', 'ged', 'unknown', 'invalid')
+""")
 
-# Merging with institution matches (long) and collapsing to user x country level
+# Merging with institution matches (long) and collapsing to user x country level, filtering out 
 inst_merge_long = con.sql(
 """
-SELECT user_id, university_raw, match_country, CASE WHEN degree_clean = 'High School' THEN matchscore WHEN degree_clean = 'Bachelor' THEN matchscore*0.8 ELSE matchscore*0.5 END,matchscore, matchtype, education_number, MAX(matchscore) OVER(PARTITION BY user_id, match_country) AS max_matchscore FROM
-    (SELECT user_id, education_number, degree_clean, a.university_raw, match_country, matchscore, matchtype, ROW_NUMBER() OVER(PARTITION BY user_id, match_country ORDER BY education_number) AS educ_order FROM rev_users_filt AS a JOIN (SELECT * FROM inst_country_cw WHERE matchscore >= 0.2) AS b ON a.university_raw = b.university_raw
-    ) WHERE educ_order = 1 AND match_country != 'NA' AND degree_clean != 'Non-Degree'
+SELECT user_id, university_raw, match_country, 
+    us_hs_exact, us_educ,
+    CASE WHEN degree_clean = 'High School' OR hs_share > 0.9 THEN matchscore WHEN degree_clean = 'Bachelor' THEN matchscore*0.8 ELSE matchscore*0.5 END AS matchscore_corr, 
+    matchscore, matchtype, education_number, 
+    MAX(matchscore) OVER(PARTITION BY user_id, match_country) AS max_matchscore,
+    COUNT(*) OVER(PARTITION BY user_id, match_country) AS n_match
+FROM
+    (SELECT user_id, education_number, degree_clean, 
+        a.university_raw, match_country, matchscore, matchtype, hs_share,
+    -- trying to get earliest education for each country
+        ROW_NUMBER() OVER(PARTITION BY user_id, match_country ORDER BY education_number) AS educ_order,
+    -- ID-ing if US high school (only exact matches)
+        MAX(CASE WHEN 
+            (degree_clean = 'High School' OR hs_share >= 0.5) AND 
+            match_country = 'United States' AND 
+            (matchtype = 'exact' OR (n_country_match = 1)) 
+            THEN 1 ELSE 0 END) 
+        OVER(PARTITION BY user_id) AS us_hs_exact,
+    -- ID-ing if any US education
+        MAX(CASE WHEN degree_clean != 'Non-Degree' AND match_country = 'United States' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS us_educ
+    FROM 
+        (SELECT *,
+        -- Getting share of given institution labelled as high school
+            (SUM(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY university_raw))/(SUM(CASE WHEN degree_clean != 'Missing' THEN 1 ELSE 0 END) OVER(PARTITION BY university_raw)) AS hs_share,
+        FROM rev_users_filt) AS a 
+    JOIN inst_match_clean AS b 
+    ON a.university_raw = b.university_raw
+    ) 
+WHERE educ_order = 1 AND match_country != 'NA'
 """
 )
 
@@ -154,8 +180,9 @@ all_merge_long = con.sql(
 """SELECT 
         CASE WHEN a.user_id IS NULL THEN b.user_id ELSE a.user_id END AS user_id, fullname_clean, university_raw,
         CASE WHEN match_country IS NULL THEN nanat_country ELSE match_country END AS country, 
-        CASE WHEN match_country IS NULL THEN 0 ELSE matchscore END AS inst_score, 
-        CASE WHEN nanat_country IS NULL THEN 0 ELSE nanat_prob END AS nanat_score 
+        CASE WHEN match_country IS NULL THEN 0 ELSE matchscore_corr END AS inst_score, 
+        CASE WHEN nanat_country IS NULL THEN 0 ELSE nanat_prob END AS nanat_score,
+        us_hs_exact, us_educ
     FROM inst_merge_long AS a 
     FULL JOIN name_merge_long AS b 
     ON a.user_id = b.user_id AND a.match_country = b.nanat_country""")
@@ -163,7 +190,7 @@ all_merge_long = con.sql(
 #####################################
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
-final_user_merge = con.sql(f"SELECT a.user_id, est_yob, f_prob, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score FROM (SELECT * FROM (SELECT user_id, {help.get_est_yob()} AS est_yob, f_prob, fullname FROM rev_users_filt) GROUP BY user_id, est_yob, f_prob, fullname) AS a LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id")
+final_user_merge = con.sql(f"SELECT a.user_id, est_yob, f_prob, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ FROM (SELECT * FROM (SELECT user_id, {help.get_est_yob()} AS est_yob, f_prob, fullname FROM rev_users_filt) GROUP BY user_id, est_yob, f_prob, fullname) AS a LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id")
 
 con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jun30.parquet'")
 
