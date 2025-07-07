@@ -80,12 +80,12 @@ foia_main_samp_unfilt = con.sql("SELECT FEIN, lottery_year, COUNT(CASE WHEN ben_
 
 n = con.sql('SELECT COUNT(*) FROM foia_main_samp_unfilt').df().iloc[0,0]
 print(f"Total Employer x Years: {n}")
-print(f"Employer x Years with Fewer than 50 Apps: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE n_apps_tot < 50").df().iloc[0,0]}")
-print(f"Employer x Years with Fewer than 50% Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg < 0.5").df().iloc[0,0]}")
-print(f"Employer x Years with No Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg = 0").df().iloc[0,0]}")
+print(f'Employer x Years with Fewer than 50 Apps: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE n_apps_tot < 50").df().iloc[0,0]}')
+print(f'Employer x Years with Fewer than 50% Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg < 0.5").df().iloc[0,0]}')
+print(f'Employer x Years with No Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg = 0").df().iloc[0,0]}')
 
 # main sample (conservative): companies with fewer than 50 applications and no duplicate registrations TODO: declare these as constants at top
-foia_main_samp = con.sql("SELECT * FROM foia_main_samp_unfilt WHERE n_apps_tot < 50 AND share_multireg = 0")
+foia_main_samp = con.sql('SELECT * FROM foia_main_samp_unfilt WHERE n_apps_tot < 50 AND share_multireg = 0')
 print(f"Preferred Sample: {foia_main_samp.df().shape[0]} ({round(100*foia_main_samp.df().shape[0]/n)}%)")
 
 # computing win rate by sample
@@ -197,7 +197,7 @@ all_merge_long = con.sql(
 #####################################
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
-final_user_merge = con.sql(f"SELECT a.user_id, est_yob, f_prob, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ FROM (SELECT * FROM (SELECT user_id, {help.get_est_yob()} AS est_yob, f_prob, fullname FROM rev_users_filt) GROUP BY user_id, est_yob, f_prob, fullname) AS a LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id")
+final_user_merge = con.sql(f'SELECT a.user_id, est_yob, f_prob, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ FROM (SELECT * FROM (SELECT user_id, {help.get_est_yob()} AS est_yob, f_prob, fullname FROM rev_users_filt) GROUP BY user_id, est_yob, f_prob, fullname) AS a LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id')
 
 con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jun30.parquet'")
 
