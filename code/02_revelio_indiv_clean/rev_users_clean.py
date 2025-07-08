@@ -4,24 +4,14 @@
 
 # Imports and Paths
 import duckdb as ddb
-# import pandas as pd
-# import numpy as np
-# import seaborn as sns
-import rev_indiv_clean_helpers as help
-import os
-import re
-# import json
+import sys 
 
-# local
-if os.environ.get('USER') == 'amykim':
-    root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
-    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
-# malloy
-elif os.environ.get('USER') == 'yk0581':
-    root = "/home/yk0581"
-    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
-    
-wrds_out = f"{root}/data/wrds/wrds_out/jun26"
+sys.path.append('../')
+from config import * 
+
+# helper functions
+sys.path.append('02_revelio_indiv_clean/')
+import rev_indiv_clean_helpers as help
 
 con = ddb.connect()
 
@@ -197,7 +187,21 @@ all_merge_long = con.sql(
 #####################################
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
-final_user_merge = con.sql(f'SELECT a.user_id, est_yob, f_prob, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ FROM (SELECT * FROM (SELECT user_id, {help.get_est_yob()} AS est_yob, f_prob, fullname FROM rev_users_filt) GROUP BY user_id, est_yob, f_prob, fullname) AS a LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id')
+final_user_merge = con.sql(
+f"""SELECT a.user_id, est_yob, hs_ind, valid_postsec, f_prob, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 
+        MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, 
+        MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ 
+    FROM (
+        SELECT * FROM (
+            SELECT user_id, 
+                {help.get_est_yob()} AS est_yob, 
+                MAX(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS hs_ind,
+                MAX(CASE WHEN degree_clean NOT IN ('Non-Degree', 'Master', 'Doctor', 'MBA') AND (ed_enddate IS NOT NULL OR ed_startdate IS NOT NULL) THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS valid_postsec,
+                f_prob, fullname FROM rev_users_filt
+        ) GROUP BY user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec
+    ) AS a 
+LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id
+""")
 
 con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jun30.parquet'")
 

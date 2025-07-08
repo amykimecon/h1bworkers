@@ -5,14 +5,17 @@
 # Imports and Paths
 import duckdb as ddb
 import pandas as pd
-import numpy as np
-import json
 import time
-import rev_indiv_clean_helpers as help
 import os
+import sys
 
-root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
-code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+sys.path.append('../')
+from config import * 
+
+# helper functions
+sys.path.append('02_revelio_indiv_clean/')
+import rev_indiv_clean_helpers as help
+
 con = ddb.connect()
 
 # import country crosswalk function to sql
@@ -24,10 +27,10 @@ con.create_function("get_gmaps_country", lambda x: help.get_gmaps_country(x), ['
 ## IMPORTING DATA ##
 ####################
 # Importing Data (From WRDS Server)
-rev_raw = con.read_parquet(f"{root}/data/wrds/wrds_out/rev_user_merge0.parquet")
+rev_raw = con.read_parquet(f"{wrds_out}/rev_user_merge0.parquet")
 
 for j in range(1,10):
-    rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{root}/data/wrds/wrds_out/rev_user_merge{j}.parquet'")
+    rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{wrds_out}/rev_user_merge{j}.parquet'")
     print(rev_raw.shape)
 
 # Importing institutions data

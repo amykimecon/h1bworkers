@@ -5,11 +5,11 @@
 # Imports and Paths
 import wrds
 import duckdb as ddb
-import time
 import pandas as pd
-import random
-import fiscalyear
-import employer_merge_helpers as emh
+import sys
+
+sys.path.append('../')
+from config import * 
 
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
 code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
@@ -35,9 +35,6 @@ db = wrds.Connection(wrds_username='amykimecon')
 # QUERYING WRDS
 #####################
 rcids = list(con.sql("SELECT rcid FROM rmerge_w_dups, GROUP BY rcid").df()['rcid'])
-
-# # GETTING INDIVIDUAL POSITIONS OF MATCHED RCIDS
-# merged_pos = db.raw_sql(f"SELECT * FROM (SELECT * FROM revelio.individual_positions AS a JOIN (SELECT * FROM revelio.company_mapping WHERE rcid IN ({','.join([str(i) for i in rcids])})) AS b ON a.rcid = b.rcid)")
 
 merged = []
 i = 0
