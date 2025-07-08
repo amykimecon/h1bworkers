@@ -22,7 +22,7 @@ else:
     out_path = "/scratch/princeton/amykimecon"
 
 # Toggle for testing
-test = False
+test = True
 
 # Importing company crosswalk
 company_cw = con.read_parquet(f"{in_path}/company_merge_sample_jun30.parquet")
@@ -47,7 +47,7 @@ f"""
 
 t0 = time.time()
 i = 0
-d = 10000 
+d = 100000
 merged = []
 
 while d*i < len(userids):
@@ -59,11 +59,14 @@ while d*i < len(userids):
     f"""
     SELECT user_id, 
         ARRAY_AGG(title_raw ORDER BY position_number) AS positions,
-        ARRAY_AGG(rcid ORDER BY position_number) AS rcids,
+        ARRAY_AGG(rcid::TEXT ORDER BY position_number) AS rcids,
+        ARRAY_AGG(country ORDER BY position_number) AS countries,
+        ARRAY_AGG(EXTRACT(DAY FROM enddate::timestamp - startdate::timestamp)::TEXT ORDER BY position_number) AS lengths_days,
+        ARRAY_AGG(role_k1500 ORDER BY position_number) AS roles,
         MIN(CASE WHEN position_number > max_intern_position THEN startdate ELSE NULL END) AS min_startdate,
         MIN(CASE WHEN position_number > max_intern_position AND country = 'United States' THEN startdate ELSE NULL END) AS min_startdate_us
     FROM (
-        SELECT a.user_id, title_raw, position_number, rcid, country, startdate, enddate,
+        SELECT a.user_id, title_raw, position_number, rcid, country, startdate, enddate, role_k1500,
             CASE WHEN 
                 (lower(title_raw) ~ '(^|\\s)(intern)($|\\s)' AND 
                     EXTRACT(YEAR FROM AGE(enddate, startdate)) < 1) 
