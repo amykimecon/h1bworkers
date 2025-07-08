@@ -6,12 +6,17 @@
 import duckdb as ddb
 import pandas as pd
 import numpy as np
-import fiscalyear
 import json
+import os
 
-
-root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
-code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+# local
+if os.environ.get('USER') == 'amykim':
+    root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
+    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+# malloy
+elif os.environ.get('USER') == 'yk0581':
+    root = "/home/yk0581"
+    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
 
 con = ddb.connect()
 
@@ -56,7 +61,7 @@ rev_positionhist = con.read_parquet(f'{root}/data/wrds/wrds_out/rev_user_positio
 # CLEANING INDIV DATA
 #####################
 # cleaning FOIA data (application level)
-foia_indiv = con.sql("SELECT a.FEIN, a.lottery_year, country, female_ind, yob, status_type, ben_multi_reg_ind, employer_name, n_apps, foia_temp_id, main_rcid, rcid FROM (SELECT FEIN, lottery_year, get_std_country(country_of_birth) AS country, CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, COUNT(*) OVER(PARTITION BY FEIN, lottery_year) AS n_apps, ROW_NUMBER() OVER() AS foia_temp_id FROM foia_raw_file) AS a JOIN company_cw AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year WHERE sampgroup = 'insamp'")
+foia_indiv = con.sql("SELECT a.FEIN, a.lottery_year, country, female_ind, yob, status_type, ben_multi_reg_ind, employer_name, n_apps, n_unique_country, foia_temp_id, main_rcid, rcid FROM (SELECT FEIN, lottery_year, get_std_country(country_of_birth) AS country, CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, COUNT(*) OVER(PARTITION BY FEIN, lottery_year) AS n_apps, COUNT(DISTINCT country_of_birth) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_country, ROW_NUMBER() OVER() AS foia_temp_id FROM foia_raw_file) AS a JOIN company_cw AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year WHERE sampgroup = 'insamp'")
 
 # cleaning revelio data (collapsing to user x company level)
 rev_indiv = con.sql(
@@ -95,18 +100,25 @@ SELECT
 FROM merge_raw 
 WHERE  ABS(female_ind - f_prob) < 0.8 AND 
     (ABS(yob::INTEGER - est_yob) <= 3 OR (est_yob IS NULL AND yob::INTEGER <= max_yob))
-    AND startdatediff <= -12
+    AND startdatediff <= -5
     AND startdatediff >= -48
     AND enddatediff >= -12 
     AND months_work_in_us >= -48
 """)
 
 
+con.sql("SELECT * FROM merge_filt WHERE n_apps < 5 AND n_apps > 1 AND n_unique_country > 1 AND country != 'India' AND country != 'China' ORDER BY RANDOM()").df()
 
-con.sql("SELECT * FROM merge_filt ORDER BY RANDOM() LIMIT 100").df()
+con.sql("SELECT * FROM foia_indiv WHERE FEIN = '824340234' ORDER BY lottery_year").df()
+
+con.sql("SELECT foia_temp_id, lottery_year, status_type, employer_name, female_ind, f_prob, yob, est_yob, country, fullname, total_score, inst_score, nanat_score, university_raw, first_startdate, last_enddate, user_id, hs_ind, valid_postsec, positions FROM merge_filt WHERE FEIN = '824340234' ORDER BY foia_temp_id").df()
+
 
 con.sql("SELECT lottery_year, status_type, employer_name, female_ind, f_prob, yob, est_yob, country, fullname, total_score, inst_score, nanat_score, university_raw, first_startdate, last_enddate FROM merge_filt WHERE foia_temp_id = 935115 ORDER BY total_score DESC").df()
 
 con.sql("SELECT lottery_year, employer_name, status_type, country_of_birth, gender, ben_year_of_birth FROM foia_raw_file WHERE FEIN = '411958972'").df()
 
 con.sql("SELECT lottery_year, status_type, employer_name, female_ind, f_prob, yob, est_yob, country, fullname, total_score, inst_score, nanat_score, university_raw, first_startdate, last_enddate FROM merge_filt WHERE FEIN = '411958972' ORDER BY total_score DESC").df()
+
+#foia_temp_id 364920
+#FEIN 201067637, lottery year 2023

@@ -49,6 +49,7 @@ inst_country_cw = con.read_parquet(f"{root}/data/int/rev_inst_countries_jun30.pa
 
 # Importing Name x Country Matches
 nanats = con.read_parquet(f"{root}/data/int/name2nat_revelio/rev_names_withnat_jun26.parquet")
+nts = con.read_parquet(f'{root}/data/int/rev_names_nametrace_jul8.parquet')
 
 # Importing User x Position-level Data
 merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
@@ -168,7 +169,8 @@ WHERE educ_order = 1 AND match_country != 'NA'
 # Merging with name matches (long)
 name_merge_long = con.sql(
 """
-SELECT user_id, a.fullname_clean, nanat_country, nanat_prob FROM (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a JOIN nanats_long AS b ON a.fullname_clean = b.fullname_clean
+SELECT user_id, a.fullname_clean, nanat_country, nanat_prob, f_prob_nt FROM (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a JOIN nanats_long AS b ON a.fullname_clean = b.fullname_clean 
+JOIN (SELECT fullname_clean, f_prob_nt FROM nts) AS c ON a.fullname_clean = c.fullname_clean
 """
 )
 
@@ -179,7 +181,7 @@ all_merge_long = con.sql(
         CASE WHEN match_country IS NULL THEN nanat_country ELSE match_country END AS country, 
         CASE WHEN match_country IS NULL THEN 0 ELSE matchscore_corr END AS inst_score, 
         CASE WHEN nanat_country IS NULL THEN 0 ELSE nanat_prob END AS nanat_score,
-        us_hs_exact, us_educ
+        us_hs_exact, us_educ, f_prob_nt
     FROM inst_merge_long AS a 
     FULL JOIN name_merge_long AS b 
     ON a.user_id = b.user_id AND a.match_country = b.nanat_country""")
@@ -188,7 +190,7 @@ all_merge_long = con.sql(
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
 final_user_merge = con.sql(
-f"""SELECT a.user_id, est_yob, hs_ind, valid_postsec, f_prob, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 
+f"""SELECT a.user_id, est_yob, hs_ind, valid_postsec, f_prob, f_prob_nt, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 
         MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, 
         MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ 
     FROM (
