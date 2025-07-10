@@ -46,13 +46,13 @@ con.create_function("get_std_country", lambda x: get_std_country(x), ['VARCHAR']
 foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all_withids.csv")
 
 ## company crosswalk
-company_cw = con.read_parquet(f"{root}/data/int/company_merge_sample_jun30.parquet")
+company_cw = con.read_parquet(f"{root}/data/int/company_merge_sample_jul10.parquet")
 
 ## revelio user x Position-level Data
-merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
+merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_jul9.parquet")
 
 ## revelio individual user x country cleaned data
-rev_users = con.read_parquet(f'{root}/data/int/rev_users_clean_jun30.parquet')
+rev_users = con.read_parquet(f'{root}/data/int/rev_users_clean_jul8.parquet')
 
 ## revelio user x position history data
 rev_positionhist = con.read_parquet(f'{root}/data/wrds/wrds_out/rev_user_positionhist_jul2.parquet')
@@ -70,13 +70,13 @@ SELECT * FROM (
     (SELECT user_id, 
         MIN(startdate)::DATETIME AS first_startdate, 
         MAX(CASE WHEN enddate IS NULL THEN '2025-03-01' ELSE enddate END)::DATETIME AS last_enddate, rcid 
-    FROM merged_pos GROUP BY user_id, rcid) AS a 
+    FROM merged_pos WHERE country = 'United States' AND startdate >= '2015-01-01' GROUP BY user_id, rcid) AS a 
     JOIN 
     (SELECT rcid FROM company_cw WHERE sampgroup = 'insamp' GROUP BY rcid) AS b 
     ON a.rcid = b.rcid
 ) AS pos 
 JOIN 
-(SELECT * FROM rev_users WHERE (us_hs_exact IS NULL OR us_hs_exact = 0) AND (us_educ IS NULL OR us_educ = 1)) AS users 
+(SELECT * FROM rev_users WHERE (us_hs_exact IS NULL OR us_hs_exact = 0) AND (us_educ IS NULL OR us_educ = 1) AND (stem_ind IS NULL OR stem_ind = 1)) AS users 
 ON pos.user_id = users.user_id
 LEFT JOIN
 rev_positionhist AS poshist

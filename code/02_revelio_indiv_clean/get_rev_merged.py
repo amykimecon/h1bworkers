@@ -6,13 +6,14 @@
 import wrds
 import duckdb as ddb
 import pandas as pd
+import time
+import os
 import sys
 
-sys.path.append('../')
-from config import * 
 
-root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
-code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+from config import * 
 
 con = ddb.connect()
 
@@ -36,15 +37,22 @@ db = wrds.Connection(wrds_username='amykimecon')
 #####################
 rcids = list(con.sql("SELECT rcid FROM rmerge_w_dups, GROUP BY rcid").df()['rcid'])
 
+t0_0 = time.time()
+
 merged = []
 i = 0
 d = 1000
 
 while d*(i+1) < len(rcids):
-    print(i*d)
+    t0 = time.time()
     merged = merged + [db.raw_sql(f"SELECT * FROM revelio.individual_positions WHERE rcid IN ({','.join([str(i) for i in rcids[d*i:d*(i+1)]])})")]
+    t1 = time.time()
+    print(f"iteration #{i*d}: {round((t1-t0)/60, 2)} min")
     i += 1    
 merged = merged + [db.raw_sql(f"SELECT * FROM revelio.individual_positions WHERE rcid IN ({','.join([str(i) for i in rcids[d*i:]])})")]
 
 merged_all = pd.concat(merged)
-merged_all.to_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
+merged_all.to_parquet(f"{root}/data/int/rev_merge_jul9.parquet")
+
+t1_0 = time.time()
+print(f"Done! Total time: {round((t1_0-t0_0)/60, 2)} min")

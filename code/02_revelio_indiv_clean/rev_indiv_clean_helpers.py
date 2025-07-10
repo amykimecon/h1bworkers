@@ -2,7 +2,7 @@
 import json
 import numpy as np
 import re
-from name2nat import Name2nat 
+# from name2nat import Name2nat 
 import os
 
 # local
@@ -125,6 +125,27 @@ def degree_clean_regex_sql():
     """
     return str_out
 
+# indicator for whether major is STEM or not
+# logic: NOT if hs/nondegree, JD/MD?
+#       YES if engineering
+#       UNSURE if architecture, business, education, finance, medicine, accounting
+#       cases to exclude: criminal justice, communication, human resources,
+#           advertising, theater/television, history, design, government, humanities, journalism, english, administration, general? 
+#       cases to include: information ? , pharmacy, psychology, geography, math, chemistry, biology, enivronment
+def stem_ind_regex_sql():
+    str_out = f"""
+        CASE 
+            WHEN field IN ('Engineering', 'Biology', 'Statistics', 'Chemistry', 'Medicine', 'Mathematics', 'Physics', 'Information Technology') THEN 1
+            WHEN lower(field_raw) ~ '.*(engineer|information|math|chem|bio|pharm|psych|geography|environment|animation|cyber|comput|intelligence|data|aero|technol|software|web.*dev|energy|astronomy|robotics|hardware|machine learning|deep learning|nuclear|materials|earth|bsee|msee|game.*design|electr).*' THEN 1
+            WHEN lower(degree_raw) ~ '.*(engineer|information|math|chem|bio|pharm|psych|geography|environment|animation|cyber|comput|intelligence|data|aero|technol|software|web.*dev|energy|astronomy|robotics|hardware|machine learning|deep learning|nuclear|materials|earth|bsee|msee|game.*design|electr).*' THEN 1
+            WHEN lower(field_raw) ~ '.*science.*' AND NOT (lower(field_raw) ~ '.*(political|social|exercise|arts and|nursing|police) science.*') THEN 1
+            WHEN field IN ('Nursing', 'Marketing', 'Law', 'Economics', 'Finance', 'Accounting', 'Business', 'Education', 'Architecture') THEN 0
+            WHEN lower(field_raw) ~ '.*(studies|design|government|humanities|journalism|english|language|administration|history|advertising|education|marketing|nursing|law|economics|finance|accounting|architecture|linguistics|communication|theater|theatre|fashion|philosophy|politic|international|public|global|photography|sociology|religion|theology|dance|music|drama|writing|therapy|linguistics|media|administration|art|exercise|business|commerce|film|liberal|esthetic|anthropology|criminal|social|sales|health).*' THEN 0
+            ELSE NULL
+        END
+    """
+    return str_out 
+
 # returns sql string for cleaned full name: removes everything after comma, removes anything 2-4 characters all caps as long as entire name not all caps (get rid of degrees or titles) [TODO: currently missing things like MSEd], then removes anything in parentheses at end, removes PhD specifically, removes plus specifically, then converts to title case (NOTE: title case function must be read into con)
 def fullname_clean_regex_sql(col):
     str_out = f"""
@@ -155,9 +176,34 @@ def nanats_to_long(col):
     return str_out
 
 def get_est_yob():
-    str_out = """CASE WHEN (MAX(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id)) = 1 
-        THEN MAX(CASE WHEN degree_clean = 'High School' THEN SUBSTRING(ed_enddate, 1, 4)::INT - 18 ELSE NULL END) OVER(PARTITION BY user_id) 
-        ELSE MIN(CASE WHEN degree_clean = 'Non-Degree' OR degree_clean = 'Master' OR degree_clean = 'Doctor' OR degree_clean = 'MBA' THEN NULL WHEN ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT - 18 WHEN ed_enddate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT - 23 END) OVER(PARTITION BY user_id) 
+    str_out = """
+    CASE 
+        -- if high school available
+        WHEN (MAX(
+            CASE 
+                WHEN degree_clean = 'High School' 
+                    THEN 1 ELSE 0 END
+            ) OVER(PARTITION BY user_id)) = 1 
+            THEN MAX(
+                CASE 
+                    WHEN degree_clean = 'High School' 
+                        THEN SUBSTRING(ed_enddate, 1, 4)::INT - 18 
+                    ELSE NULL 
+                    END
+                ) OVER(PARTITION BY user_id) 
+        -- otherwise take bach/associate/missing 
+        ELSE MIN(
+            CASE 
+                WHEN degree_clean = 'Non-Degree' OR degree_clean = 'Master' OR degree_clean = 'Doctor' OR degree_clean = 'MBA' 
+                    THEN NULL 
+                WHEN ed_startdate IS NOT NULL 
+                    THEN SUBSTRING(ed_startdate, 1, 4)::INT - 18 
+                WHEN ed_enddate IS NOT NULL AND NOT degree_clean = 'Associate' 
+                    THEN SUBSTRING(ed_enddate, 1, 4)::INT - 23 
+                WHEN ed_enddate IS NOT NULL 
+                    THEN SUBSTRING(ed_enddate, 1, 4)::INT - 21 
+                END
+            ) OVER(PARTITION BY user_id) 
         END"""
     return str_out
     
@@ -205,38 +251,38 @@ def get_gmaps_country(adr, dict = country_cw_dict):
     
     return "No valid country match found"
 
-# name2nat helper function
-my_nanat = Name2nat()
+# # name2nat helper function
+# my_nanat = Name2nat()
 
-def name2nat_fun(name, nanat = my_nanat):
-    return json.dumps(nanat(name, top_n = 10)[0][1])
+# def name2nat_fun(name, nanat = my_nanat):
+#     return json.dumps(nanat(name, top_n = 10)[0][1])
 
-# cleaning name2nat output
-def get_all_nanats(str):
-    if str is None:
-        return []
-    items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
-    out = []
-    for s in items:
-        if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
-            print(s)
-        else:
-            nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
-            prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
-            out = out + [get_std_country(nat)]
-    return out
-    # return [[dict[re.search('^"([A-z]+)", ', s).group(1)], float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))] for s in items]
+# # cleaning name2nat output
+# def get_all_nanats(str):
+#     if str is None:
+#         return []
+#     items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
+#     out = []
+#     for s in items:
+#         if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
+#             print(s)
+#         else:
+#             nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
+#             prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
+#             out = out + [get_std_country(nat)]
+#     return out
+#     # return [[dict[re.search('^"([A-z]+)", ', s).group(1)], float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))] for s in items]
 
-def get_all_nanat_probs(str):
-    if str is None:
-        return []
-    items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
-    out = []
-    for s in items:
-        if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
-            print(s)
-        else:
-            nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
-            prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
-            out = out + [prob]
-    return out
+# def get_all_nanat_probs(str):
+#     if str is None:
+#         return []
+#     items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
+#     out = []
+#     for s in items:
+#         if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
+#             print(s)
+#         else:
+#             nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
+#             prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
+#             out = out + [prob]
+#     return out

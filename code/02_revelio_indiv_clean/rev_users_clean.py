@@ -9,6 +9,10 @@ import sys
 sys.path.append('../')
 from config import * 
 
+# CONSTANTS
+CUTOFF_SHARE_MULTIREG=0
+CUTOFF_N_APPS_TOT=10
+
 # helper functions
 sys.path.append('02_revelio_indiv_clean/')
 import rev_indiv_clean_helpers as help
@@ -52,8 +56,7 @@ nanats = con.read_parquet(f"{root}/data/int/name2nat_revelio/rev_names_withnat_j
 nts = con.read_parquet(f'{root}/data/int/rev_names_nametrace_jul8.parquet')
 
 # Importing User x Position-level Data
-merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_mar20.parquet")
-#occ_cw = con.read_csv(f"{root}/data/crosswalks/rev_occ_to_foia_freq.csv")
+merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_jul9.parquet")
 
 #####################################
 # DEFINING MAIN SAMPLE OF USERS (RCID IN MAIN SAMP AND START DATE AFTER 2015)
@@ -76,21 +79,22 @@ print(f'Employer x Years with Fewer than 50% Duplicates: {con.sql("SELECT COUNT(
 print(f'Employer x Years with No Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg = 0").df().iloc[0,0]}')
 
 # main sample (conservative): companies with fewer than 50 applications and no duplicate registrations TODO: declare these as constants at top
-foia_main_samp = con.sql('SELECT * FROM foia_main_samp_unfilt WHERE n_apps_tot < 50 AND share_multireg = 0')
+foia_main_samp = con.sql(f'SELECT * FROM foia_main_samp_unfilt WHERE n_apps_tot <= {CUTOFF_N_APPS_TOT} AND share_multireg <= {CUTOFF_SHARE_MULTIREG}')
 print(f"Preferred Sample: {foia_main_samp.df().shape[0]} ({round(100*foia_main_samp.df().shape[0]/n)}%)")
 
 # computing win rate by sample
-foia_main_samp_def = con.sql("SELECT *, CASE WHEN n_apps_tot < 50 AND share_multireg = 0 THEN 'insamp' ELSE 'outsamp' END AS sampgroup FROM foia_main_samp_unfilt")
+foia_main_samp_def = con.sql(f"SELECT *, CASE WHEN n_apps_tot <= {CUTOFF_N_APPS_TOT} AND share_multireg <= {CUTOFF_SHARE_MULTIREG} THEN 'insamp' ELSE 'outsamp' END AS sampgroup FROM foia_main_samp_unfilt")
 con.sql("SELECT sampgroup, SUM(n_success)/SUM(n_apps_tot) AS total_win_rate FROM foia_main_samp_def GROUP BY sampgroup")
 
 # creating crosswalk between foia id and rcid (joining list of FEINs in and out of sample with foia data with foia ids and joining that to id crosswalk, then joining to dup_rcids)
 samp_to_rcid = con.sql("SELECT a.FEIN, a.lottery_year, sampgroup, b.foia_id, c.main_rcid, CASE WHEN rcid IS NULL THEN c.main_rcid ELSE d.rcid END AS rcid FROM ((SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS a JOIN (SELECT FEIN, lottery_year, foia_id FROM foia_with_ids GROUP BY FEIN, lottery_year, foia_id) AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year JOIN (SELECT main_rcid, foia_id FROM id_merge) AS c ON b.foia_id = c.foia_id) LEFT JOIN (SELECT main_rcid, rcid FROM dup_rcids) AS d ON c.main_rcid = d.main_rcid")
 
 # writing company sample crosswalk to file
-con.sql(f"COPY samp_to_rcid TO '{root}/data/int/company_merge_sample_jun30.parquet'")
+con.sql(f"COPY samp_to_rcid TO '{root}/data/int/company_merge_sample_jul10.parquet'")
 
 # selecting user ids from list of positions based on whether company in sample and start date is after 2015 (conservative bandwidth) -- TODO: declare cutoff date as constant; TODO: move startdate filter into merged_pos query, avoid pulling people who got promoted after 2015 but started working before 2015
-user_samp = con.sql("SELECT user_id FROM ((SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a JOIN (SELECT user_id, startdate, rcid FROM merged_pos) AS b ON a.rcid = b.rcid) WHERE startdate >= '2015-01-01' GROUP BY user_id")
+user_samp = con.sql("SELECT user_id FROM ((SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a JOIN (SELECT user_id, rcid FROM merged_pos WHERE country = 'United States' AND startdate >= '2015-01-01') AS b ON a.rcid = b.rcid) GROUP BY user_id")
+# user_samp = con.sql("SELECT user_id FROM ((SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a JOIN (SELECT user_id, startdate, rcid FROM merged_pos WHERE country = 'United States') AS b ON a.rcid = b.rcid) WHERE startdate >= '2015-01-01' GROUP BY user_id")
 
 #####################################
 ### CLEANING AND MERGING REVELIO USERS TO COUNTRIES
@@ -100,11 +104,12 @@ rev_clean = con.sql(
 f"""
 SELECT * FROM
     (SELECT 
-    fullname, degree, user_id,
+    fullname, degree, user_id, rcid,
     {help.degree_clean_regex_sql()} AS degree_clean,
     {help.inst_clean_regex_sql('university_raw')} AS univ_raw_clean,
+    {help.stem_ind_regex_sql()} AS stem_ind,
     CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
-    degree_raw, field_raw, university_raw, f_prob, education_number, ed_enddate, ed_startdate, ROW_NUMBER() OVER(PARTITION BY user_id, education_number) AS dup_num
+    university_raw, f_prob, education_number, ed_enddate, ed_startdate, ROW_NUMBER() OVER(PARTITION BY user_id, education_number) AS dup_num
     FROM rev_raw)
 WHERE dup_num = 1
 """
@@ -190,12 +195,12 @@ all_merge_long = con.sql(
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
 final_user_merge = con.sql(
-f"""SELECT a.user_id, est_yob, hs_ind, valid_postsec, f_prob, f_prob_nt, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 
+f"""SELECT a.user_id, est_yob, hs_ind, valid_postsec, f_prob, stem_ind, f_prob_nt, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 
         MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, 
         MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ 
     FROM (
-        SELECT * FROM (
-            SELECT user_id, 
+        SELECT user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, MAX(stem_ind_postsec) AS stem_ind FROM (
+            SELECT user_id, CASE WHEN degree_clean IN ('Non-Degree', 'High School', 'Associate') THEN 0 ELSE stem_ind END AS stem_ind_postsec,
                 {help.get_est_yob()} AS est_yob, 
                 MAX(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS hs_ind,
                 MAX(CASE WHEN degree_clean NOT IN ('Non-Degree', 'Master', 'Doctor', 'MBA') AND (ed_enddate IS NOT NULL OR ed_startdate IS NOT NULL) THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS valid_postsec,
@@ -205,6 +210,6 @@ f"""SELECT a.user_id, est_yob, hs_ind, valid_postsec, f_prob, f_prob_nt, fullnam
 LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id
 """)
 
-con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jun30.parquet'")
+con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jul8.parquet'")
 
-final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jun30.parquet')
+final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jul8.parquet')
