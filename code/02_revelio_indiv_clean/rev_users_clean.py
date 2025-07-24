@@ -109,7 +109,7 @@ SELECT * FROM
     {help.inst_clean_regex_sql('university_raw')} AS univ_raw_clean,
     {help.stem_ind_regex_sql()} AS stem_ind,
     CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
-    university_raw, f_prob, education_number, ed_enddate, ed_startdate, ROW_NUMBER() OVER(PARTITION BY user_id, education_number) AS dup_num
+    university_raw, f_prob, education_number, ed_enddate, ed_startdate, ROW_NUMBER() OVER(PARTITION BY user_id, education_number) AS dup_num, updated_dt
     FROM rev_raw)
 WHERE dup_num = 1
 """
@@ -195,19 +195,24 @@ all_merge_long = con.sql(
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
 final_user_merge = con.sql(
-f"""SELECT a.user_id, est_yob, hs_ind, valid_postsec, f_prob, stem_ind, f_prob_nt, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 
+f"""SELECT * FROM (SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt, f_prob, stem_ind, ade_ind, ade_year, f_prob_nt, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 
         MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, 
-        MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ 
+        MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ,
+        MAX(0.5*inst_score + 0.5*nanat_score) OVER(PARTITION BY a.user_id) AS max_total_score,
+        MAX(CASE WHEN country = 'United States' THEN 0 ELSE 0.5*inst_score + 0.5*nanat_score END) OVER(PARTITION BY a.user_id) AS max_total_score_nonus
     FROM (
-        SELECT user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, MAX(stem_ind_postsec) AS stem_ind FROM (
+        SELECT user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt, MAX(stem_ind_postsec) AS stem_ind, MAX(ade_ind) AS ade_ind, MIN(ade_year) AS ade_year FROM (
             SELECT user_id, CASE WHEN degree_clean IN ('Non-Degree', 'High School', 'Associate') THEN 0 ELSE stem_ind END AS stem_ind_postsec,
                 {help.get_est_yob()} AS est_yob, 
+                CASE WHEN degree_clean IN ('Master', 'Doctor', 'MBA') THEN 1 ELSE 0 END AS ade_ind,
+                CASE WHEN degree_clean IN ('Master', 'MBA') THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 1 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) WHEN degree_clean = 'Doctor' THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 4 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) END AS ade_year,
                 MAX(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS hs_ind,
-                MAX(CASE WHEN degree_clean NOT IN ('Non-Degree', 'Master', 'Doctor', 'MBA') AND (ed_enddate IS NOT NULL OR ed_startdate IS NOT NULL) THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS valid_postsec,
+                MAX(CASE WHEN degree_clean NOT IN ('Non-Degree', 'Master', 'Doctor', 'MBA') AND (ed_enddate IS NOT NULL OR ed_startdate IS NOT NULL) THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS valid_postsec, updated_dt,
                 f_prob, fullname FROM rev_users_filt
-        ) GROUP BY user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec
+        ) GROUP BY user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt
     ) AS a 
-LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id
+LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id)
+WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (total_score >= 0.1*max_total_score_nonus)
 """)
 
 con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jul8.parquet'")

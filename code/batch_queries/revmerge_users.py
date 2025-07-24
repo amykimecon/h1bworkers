@@ -6,18 +6,35 @@
 import wrds
 import duckdb as ddb
 import pandas as pd
+import os 
+import time
+import sys
 
 con = ddb.connect()
+
+# If on WRDS cloud:
+if os.environ.get('USER') == 'amykimecon':
+    in_path = "/home/princeton/amykimecon/data"
+    out_path = "/scratch/princeton/amykimecon"
+
+else:
+    sys.path.append('../')
+    from config import * 
+    in_path = f'{root}/data/wrds/wrds_in'
+    out_path = f'{root}/data/int'
+
+# Toggle for testing
+test = True
 
 #####################
 # IMPORTING DATA
 #####################
 ## duplicate rcids
-dup_rcids = con.read_csv("/home/princeton/amykimecon/data/dup_rcids_mar20.csv")
+dup_rcids = con.read_csv(f"{in_path}/dup_rcids_mar20.csv")
 con.sql("CREATE OR REPLACE TABLE dup_rcids AS SELECT main_rcid, rcid FROM dup_rcids, GROUP BY main_rcid, rcid")
 
 ## Importing R Matched data
-rmerge = con.read_csv("/home/princeton/amykimecon/data/good_match_ids_mar20.csv")
+rmerge = con.read_csv(f"{in_path}/good_match_ids_mar20.csv")
 # merging with dup rcids to get full list of matched rcids
 con.sql("CREATE OR REPLACE TABLE rmerge_w_dups AS SELECT a.main_rcid AS main_rcid, CASE WHEN b.rcid IS NULL THEN a.rcid ELSE b.rcid END AS rcid, FEIN FROM (rmerge AS a LEFT JOIN dup_rcids AS b ON a.main_rcid = b.main_rcid)")
 
@@ -27,10 +44,18 @@ db = wrds.Connection(wrds_username='amykimecon')
 #####################
 # QUERYING WRDS
 #####################
-for j in range(10):
+t00 = time.time()
+
+jtot = 10
+for j in range(jtot):
+    t0 = time.time()
+    print(f"Chunking for storage limit: Chunk {j+1} of {jtot}")
     rcids = list(con.sql("SELECT rcid FROM rmerge_w_dups GROUP BY rcid").df()['rcid'])
-    rcidsubset = [r for r in rcids if r % 10 == j] #subsetting by last digit of rcid
-    print(len(rcidsubset))
+
+    rcidsubset = [r for r in rcids if r % jtot == j] #subsetting by last digit of rcid
+
+    if test:
+        rcidsubset = rcidsubset[:10]
 
     # # GETTING INDIVIDUAL POSITIONS OF MATCHED RCIDS
     def getmergequery(rcidlist):
@@ -52,12 +77,24 @@ for j in range(10):
     i = 0
     d = 20
 
+    print("Iterating...")
+
     while d*(i+1) < len(rcidsubset):
-        print(i*d)
+        #print(f"Iteration {i+1} of {int((len(rcidsubset)-1)/d) + 1}")
         merged = merged + [db.raw_sql(getmergequery(rcidsubset[d*i:d*(i+1)]))]
         i += 1
+
+    print("Iteration done! Merging...")
 
     merged = merged + [db.raw_sql(getmergequery(rcidsubset[d*i:]))]
     merged_all = pd.concat(merged)
 
-    merged_all.to_parquet(f"/scratch/princeton/amykimecon/rev_user_merge{j}.parquet")
+    print("Merging done! Saving...")
+
+    merged_all.to_parquet(f"{out_path}/rev_user_merge{j}.parquet")
+
+    t1 = time.time()
+    print(f"Chunk {j+1} Completed! Time Elapsed: {round((t1-t0)/60,2)} minutes")
+
+t11 = time.time()
+print(f"All Chunks Completed! Total Time Elapsed: {round((t11-t00)/3600,2)} hours")
