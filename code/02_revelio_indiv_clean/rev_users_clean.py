@@ -140,7 +140,7 @@ inst_match_clean = con.sql(
 inst_merge_long = con.sql(
 """
 SELECT user_id, university_raw, match_country, 
-    us_hs_exact, us_educ,
+    us_hs_exact, us_educ, ade_ind, ade_year, 
     CASE WHEN degree_clean = 'High School' OR hs_share > 0.9 THEN matchscore WHEN degree_clean = 'Bachelor' THEN matchscore*0.8 ELSE matchscore*0.5 END AS matchscore_corr, 
     matchscore, matchtype, education_number, 
     MAX(matchscore) OVER(PARTITION BY user_id, match_country) AS max_matchscore,
@@ -158,7 +158,15 @@ FROM
             THEN 1 ELSE 0 END) 
         OVER(PARTITION BY user_id) AS us_hs_exact,
     -- ID-ing if any US education
-        MAX(CASE WHEN degree_clean != 'Non-Degree' AND match_country = 'United States' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS us_educ
+        MAX(CASE WHEN degree_clean != 'Non-Degree' AND match_country = 'United States' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS us_educ,
+    -- ADE status 
+        MAX(CASE WHEN degree_clean IN ('Master', 'Doctor', 'MBA') AND match_country = 'United States' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS ade_ind,
+    -- ADE year
+        MAX(CASE WHEN degree_clean IN ('Master', 'MBA') AND match_country = 'United States' 
+                THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 1 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) 
+            WHEN degree_clean = 'Doctor' AND match_country = 'United States' 
+                THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 4 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) 
+            END) OVER(PARTITION BY user_id) AS ade_year
     FROM 
         (SELECT *,
         -- Getting share of given institution labelled as high school
@@ -186,7 +194,7 @@ all_merge_long = con.sql(
         CASE WHEN match_country IS NULL THEN nanat_country ELSE match_country END AS country, 
         CASE WHEN match_country IS NULL THEN 0 ELSE matchscore_corr END AS inst_score, 
         CASE WHEN nanat_country IS NULL THEN 0 ELSE nanat_prob END AS nanat_score,
-        us_hs_exact, us_educ, f_prob_nt
+        us_hs_exact, us_educ, f_prob_nt, ade_ind, ade_year
     FROM inst_merge_long AS a 
     FULL JOIN name_merge_long AS b 
     ON a.user_id = b.user_id AND a.match_country = b.nanat_country""")
@@ -198,14 +206,14 @@ final_user_merge = con.sql(
 f"""SELECT * FROM (SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt, f_prob, stem_ind, ade_ind, ade_year, f_prob_nt, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 
         MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, 
         MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ,
+        MAX(ade_ind) OVER(PARTITION BY a.user_id) AS ade_ind,
+        MIN(ade_year) OVER(PARTITION BY a.user_id) AS ade_year,
         MAX(0.5*inst_score + 0.5*nanat_score) OVER(PARTITION BY a.user_id) AS max_total_score,
         MAX(CASE WHEN country = 'United States' THEN 0 ELSE 0.5*inst_score + 0.5*nanat_score END) OVER(PARTITION BY a.user_id) AS max_total_score_nonus
     FROM (
-        SELECT user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt, MAX(stem_ind_postsec) AS stem_ind, MAX(ade_ind) AS ade_ind, MIN(ade_year) AS ade_year FROM (
+        SELECT user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt, MAX(stem_ind_postsec) AS stem_ind FROM (
             SELECT user_id, CASE WHEN degree_clean IN ('Non-Degree', 'High School', 'Associate') THEN 0 ELSE stem_ind END AS stem_ind_postsec,
                 {help.get_est_yob()} AS est_yob, 
-                CASE WHEN degree_clean IN ('Master', 'Doctor', 'MBA') THEN 1 ELSE 0 END AS ade_ind,
-                CASE WHEN degree_clean IN ('Master', 'MBA') THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 1 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) WHEN degree_clean = 'Doctor' THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 4 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) END AS ade_year,
                 MAX(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS hs_ind,
                 MAX(CASE WHEN degree_clean NOT IN ('Non-Degree', 'Master', 'Doctor', 'MBA') AND (ed_enddate IS NOT NULL OR ed_startdate IS NOT NULL) THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS valid_postsec, updated_dt,
                 f_prob, fullname FROM rev_users_filt

@@ -87,16 +87,18 @@ con.sql("""CREATE OR REPLACE TABLE merge_raw AS
             DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, last_enddate) AS enddatediff, 
             DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, min_startdate_us::DATETIME) AS months_work_in_us,
             SUBSTRING(min_startdate, 1, 4)::INTEGER - 16 AS max_yob,
-            DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, updated_dt::DATETIME) AS updatediff
+            DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, updated_dt::DATETIME) AS updatediff,
+            (f_prob + f_prob_nt)/2 AS f_prob_avg
         FROM foia_indiv AS a LEFT JOIN rev_indiv AS b ON a.rcid = b.rcid AND a.country = b.country""")
 
-con.sql("""CREATE OR REPLACE TABLE merge_raw_alt2 AS 
+con.sql("""CREATE OR REPLACE TABLE merge_raw_prefilt AS 
         SELECT *, COUNT(*) OVER(PARTITION BY foia_temp_id, a.rcid) AS n_match_raw,
             DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, first_startdate) AS startdatediff, 
             DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, last_enddate) AS enddatediff, 
             DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, min_startdate_us::DATETIME) AS months_work_in_us,
             SUBSTRING(min_startdate, 1, 4)::INTEGER - 16 AS max_yob,
-            DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, updated_dt::DATETIME) AS updatediff
+            DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, updated_dt::DATETIME) AS updatediff,
+            (f_prob + f_prob_nt)/2 AS f_prob_avg
         FROM (SELECT * FROM foia_indiv WHERE country != 'China' AND country != 'India' AND country != 'Taiwan' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'Nepal' AND country != 'Pakistan') AS a LEFT JOIN rev_indiv AS b ON a.rcid = b.rcid AND a.country = b.country""")
 
 # FILTERS
@@ -107,7 +109,8 @@ def merge_filt_func(merge_raw_tab, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFF
         COUNT(DISTINCT user_id) OVER(PARTITION BY FEIN, lottery_year) AS n_rev_users,
         (COUNT(*) OVER(PARTITION BY FEIN, lottery_year))/(COUNT(DISTINCT foia_temp_id) OVER(PARTITION BY FEIN, lottery_year)) AS match_mult,
         (COUNT(*) OVER(PARTITION BY FEIN, lottery_year))/(COUNT(DISTINCT user_id) OVER(PARTITION BY FEIN, lottery_year)) AS rev_mult,
-        COUNT(DISTINCT foia_temp_id) OVER(PARTITION BY FEIN, lottery_year) AS n_apps_matched
+        COUNT(DISTINCT foia_temp_id) OVER(PARTITION BY FEIN, lottery_year) AS n_apps_matched,
+        COUNT(DISTINCT status_type) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_wintype
         FROM {merge_raw_tab}
         WHERE  ABS(female_ind - (f_prob + f_prob_nt)/2) < {F_PROB_BUFFER} AND 
             (ABS(yob::INTEGER - est_yob) <= {YOB_BUFFER} OR (est_yob IS NULL AND yob::INTEGER <= max_yob))
@@ -118,15 +121,23 @@ def merge_filt_func(merge_raw_tab, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFF
 
 merge_filt_base = con.sql(merge_filt_func('merge_raw'))
 
-MATCH_MULT_CUTOFF = 3
+merge_filt_prefilt = con.sql(merge_filt_func('merge_raw_prefilt'))
+
+MATCH_MULT_CUTOFF = 4
 REV_MULT_COEFF = 1
-merge_filt_alt1 = con.sql(f'SELECT * FROM ({merge_filt_func('merge_raw')}) WHERE n_apps > 1 AND share_apps_matched = 1 AND match_mult <= {MATCH_MULT_CUTOFF} AND rev_mult < {REV_MULT_COEFF}*n_apps_matched ')
+# version 1: filtering on avg match_mult at the firm x year level
+merge_filt_postfilt = con.sql(f'SELECT * FROM ({merge_filt_func('merge_raw')}) WHERE share_apps_matched = 1 AND match_mult <= {MATCH_MULT_CUTOFF} AND rev_mult < {REV_MULT_COEFF}*n_apps_matched  AND n_unique_wintype > 1')
+#print(merge_filt_postfilt.shape)
 
-merge_filt_alt2 = con.sql(merge_filt_func('merge_raw_alt2'))
+# version 2: filtering on match_mult at the foia app level, then filtering on firm stuff (more restrictive)
+merge_filt_postfilt2 = con.sql(f'SELECT * FROM (SELECT *, (COUNT(DISTINCT foia_temp_id) OVER(PARTITION BY FEIN, lottery_year))/n_apps AS share_apps_matched, (COUNT(*) OVER(PARTITION BY FEIN, lottery_year))/(COUNT(DISTINCT user_id) OVER(PARTITION BY FEIN, lottery_year)) AS rev_mult, COUNT(DISTINCT foia_temp_id) OVER(PARTITION BY FEIN, lottery_year) AS n_apps_matched,COUNT(DISTINCT status_type) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_wintype FROM ({merge_filt_func('merge_raw')}) WHERE n_match_filt <= {MATCH_MULT_CUTOFF}) WHERE share_apps_matched = 1 AND rev_mult < {REV_MULT_COEFF}*n_apps_matched  AND n_unique_wintype > 1')
+#print(merge_filt_postfilt2.shape)
 
+
+con.sql(f"COPY foia_indiv TO '{root}/data/int/foia_merge_samp_jul23.parquet'")
 con.sql(f"COPY merge_filt_base TO '{root}/data/int/merge_filt_base_jul23.parquet'")
-con.sql(f"COPY merge_filt_alt1 TO '{root}/data/int/merge_filt_postfilt_jul23.parquet'")
-con.sql(f"COPY merge_filt_alt2 TO '{root}/data/int/merge_filt_prefilt_jul23.parquet'")
+con.sql(f"COPY merge_filt_postfilt2 TO '{root}/data/int/merge_filt_postfilt_jul23.parquet'")
+con.sql(f"COPY merge_filt_prefilt TO '{root}/data/int/merge_filt_prefilt_jul23.parquet'")
 
 
 
