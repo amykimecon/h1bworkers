@@ -4,16 +4,14 @@
 
 # Imports and Paths
 import pandas as pd
-from name2nat import Name2nat
 import json
+import sys
+import os
 import re
 from unidecode import unidecode
 
-root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
-code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
-
-# name2nat
-my_nanat = Name2nat()
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from config import * 
 
 ## HARMONIZING COUNTRIES
 # reading in crosswalk of country codes
@@ -98,6 +96,9 @@ country_cw_dict['Vatican City'] = 'Italy'
 country_cw_dict['Virgin Islands (UK)'] = 'British Virgin Islands'
 country_cw_dict['Svalbard'] = 'Norway'
 country_cw_dict['Congo - Republic of th'] = 'Democratic Republic of the Congo'
+country_cw_dict['Burkinab\u00e9'] = 'Burkina Faso'
+country_cw_dict['Basque'] = 'Spain'
+country_cw_dict['Syriac'] = 'Syria'
 
 # mapping nanat nationalities to country names
 def get_nanat_country(nat, dict = country_cw_dict):

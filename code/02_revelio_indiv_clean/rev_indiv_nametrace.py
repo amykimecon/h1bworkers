@@ -8,8 +8,9 @@ from nametrace import NameTracer
 import time
 import sys
 import pandas as pd 
+import os
 
-sys.path.append('../')
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
 
 # helper functions
@@ -101,5 +102,8 @@ df_exp_notnull = df_exp.loc[df_exp['region_probs'].isna() == False]
 df_exp_notnull['region'] = df_exp_notnull['region_probs'].apply(lambda x: x[0])
 df_exp_notnull['prob'] = df_exp_notnull['region_probs'].apply(lambda x: x[1])
 
-# merging back to main and saving
+# merging back to main and saving (pivoting)
 pd.merge(df_out_all_concat[['fullname_clean','f_prob_nt']], df_exp_notnull.pivot(columns = 'region', values = 'prob'),how = 'left', left_index = True, right_index = True).to_parquet(f'{root}/data/int/rev_names_nametrace_jul8.parquet')
+
+# merging back to main and saving (unpivoted)
+pd.merge(df_out_all_concat[['fullname_clean','f_prob_nt']], df_exp_notnull[['region','prob']], how = 'left', left_index = True, right_index = True).to_parquet(f'{root}/data/int/rev_names_nametrace_long_jul8.parquet')

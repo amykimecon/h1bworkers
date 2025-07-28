@@ -7,9 +7,11 @@
 import duckdb as ddb
 import pandas as pd
 import wrds
+import sys 
+import os 
 
-root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
-code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from config import * 
 
 con = ddb.connect()
 db = wrds.Connection()
@@ -17,7 +19,7 @@ db = wrds.Connection()
 #####################
 # IMPORTING DATA
 #####################
-## raw FOIA bloomberg data
+## raw FOIA bloomberg data (getting shares of reported dot_codes)
 foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all.csv")
 foia_dot_codes = con.sql("SELECT COUNT(*) AS n, DOT_CODE FROM foia_raw_file WHERE DOT_CODE != 'NA' GROUP BY DOT_CODE").df()
 foia_dot_codes['share'] = foia_dot_codes['n']/foia_dot_codes.sum()['n']
@@ -32,13 +34,16 @@ rev_occ_cw = db.raw_sql("SELECT * FROM revelio.individual_role_lookup")
 #####################
 # MERGING
 #####################
+# getting 3-digit dot code
 dot_onet_cw['dot3_code'] = dot_onet_cw['dot_code'].apply(lambda x: x[0:3])
 
+# merging revelio occupations with dot-onet crosswalk (on onet codes), then merging with foia dot codes
 occ_cw = rev_occ_cw.merge(dot_onet_cw.groupby(['dot3_code','onet_code'])['onet_title'].agg('count').reset_index(), how = "left", on = "onet_code").merge(foia_dot_codes, how = 'left', left_on = 'dot3_code', right_on = 'DOT_CODE')
 
 occ_cw[['n_foia','share_foia']] = occ_cw[['n','share']].fillna(0)
 occ_cw['rank_foia'] = occ_cw['rank'].fillna(1000)
 
+# grouping by revelio k1500 job category
 occ_cw_grouped = occ_cw.groupby(['role_k1500', 'role_k300', 'job_category', 'onet_code', 'onet_title_x']).agg(mean_n_foia = pd.NamedAgg(column = 'n_foia', aggfunc = 'mean'), max_share_foia = pd.NamedAgg(column = "share_foia", aggfunc = 'max'), min_rank = pd.NamedAgg(column = 'rank_foia', aggfunc = 'min')).reset_index().sort_values('min_rank')
 occ_cw_grouped['top3occ'] = occ_cw_grouped['min_rank'] <= 3
 occ_cw_grouped['top10occ'] = occ_cw_grouped['min_rank'] <= 10

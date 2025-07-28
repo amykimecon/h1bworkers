@@ -5,8 +5,9 @@
 # Imports and Paths
 import duckdb as ddb
 import sys 
+import os 
 
-sys.path.append('../')
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
 
 # CONSTANTS
@@ -25,6 +26,9 @@ con.create_function("title", lambda x: x.title(), ['VARCHAR'], 'VARCHAR')
 
 # country crosswalk function
 con.create_function("get_std_country", lambda x: help.get_std_country(x), ['VARCHAR'], 'VARCHAR')
+
+# region crosswalk function
+con.create_function("get_country_subregion", lambda x: help.get_country_subregion(x), ['VARCHAR'], 'VARCHAR')
 
 #####################################
 ## IMPORTING DATA
@@ -54,9 +58,13 @@ inst_country_cw = con.read_parquet(f"{root}/data/int/rev_inst_countries_jun30.pa
 # Importing Name x Country Matches
 nanats = con.read_parquet(f"{root}/data/int/name2nat_revelio/rev_names_withnat_jun26.parquet")
 nts = con.read_parquet(f'{root}/data/int/rev_names_nametrace_jul8.parquet')
+nts_long = con.read_parquet(f'{root}/data/int/rev_names_nametrace_long_jul8.parquet')
 
 # Importing User x Position-level Data
 merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_jul9.parquet")
+
+# Occupation crosswalk
+occ_cw = con.read_csv(f"{root}/data/crosswalks/rev_occ_to_foia_freq.csv")
 
 #####################################
 # DEFINING MAIN SAMPLE OF USERS (RCID IN MAIN SAMP AND START DATE AFTER 2015)
@@ -123,9 +131,11 @@ rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a
 # rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a.user_id = b.user_id WHERE a.user_id IN ({ids})")
 
 # Cleaning name matches (long on country)
-nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country({help.nanats_to_long('pred_nats_name')}[1]) AS nanat_country, {help.nanats_to_long('pred_nats_name')}[2]::FLOAT AS nanat_prob FROM nanats) WHERE nanat_prob > 0.02 GROUP BY fullname_clean, nanat_country")
-# # temp for testing
+nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country({help.nanats_to_long('pred_nats_name')}[1]) AS nanat_country, {help.nanats_to_long('pred_nats_name')}[2]::FLOAT AS nanat_prob FROM nanats) GROUP BY fullname_clean, nanat_country")
+
+# # # temp for testing
 # nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country({help.nanats_to_long('pred_nats_name')}[1]) AS nanat_country, {help.nanats_to_long('pred_nats_name')}[2]::FLOAT AS nanat_prob FROM (SELECT * FROM nanats AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean)) WHERE nanat_prob > 0.02 GROUP BY fullname_clean, nanat_country")
+# nts_long = con.sql("SELECT * FROM nts_long AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean")
 
 # Cleaning institution matches 
 inst_match_clean = con.sql(
@@ -136,7 +146,7 @@ inst_match_clean = con.sql(
     WHERE lower(REGEXP_REPLACE(university_raw, '[^A-z]', '', 'g')) NOT IN ('highschool', 'ged', 'unknown', 'invalid')
 """)
 
-# Merging with institution matches (long) and collapsing to user x country level, filtering out 
+# Merging users with institution matches (long) and collapsing to user x country level, filtering out 
 inst_merge_long = con.sql(
 """
 SELECT user_id, university_raw, match_country, 
@@ -179,37 +189,67 @@ WHERE educ_order = 1 AND match_country != 'NA'
 """
 )
 
-# Merging with name matches (long)
+# Merging users with name2nat matches (long on user x country)
 name_merge_long = con.sql(
 """
-SELECT user_id, a.fullname_clean, nanat_country, nanat_prob, f_prob_nt FROM (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a JOIN nanats_long AS b ON a.fullname_clean = b.fullname_clean 
-JOIN (SELECT fullname_clean, f_prob_nt FROM nts) AS c ON a.fullname_clean = c.fullname_clean
+SELECT user_id, a.fullname_clean, nanat_country, nanat_prob FROM 
+    (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a 
+    JOIN 
+    nanats_long AS b 
+    ON a.fullname_clean = b.fullname_clean 
 """
 )
 
-# combining institution and name matches (user x country level)
-all_merge_long = con.sql(
-"""SELECT 
+# Merging users with nametrace matches (long on user x subregion)
+nt_merge_long = con.sql("""SELECT user_id, a.fullname_clean, region, prob, f_prob_nt FROM (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a 
+    JOIN 
+    nts_long AS b 
+    ON a.fullname_clean = b.fullname_clean """)
+
+# combining institution and name matches (user x country level) then combining with nametrace (name x subregion)
+country_merge_long = con.sql(
+"""
+SELECT user_id, fullname_clean, country, subregion, nanat_score, inst_score, MAX(f_prob_nt) OVER(PARTITION BY user_id) AS f_prob_nt, SUM(nanat_score) OVER(PARTITION BY user_id, subregion) AS nanat_subregion_score, nt_subregion_score, university_raw, inst_score, us_hs_exact, us_educ, ade_ind, ade_year
+FROM (
+SELECT  
+    CASE WHEN countries.user_id IS NULL THEN nt.user_id ELSE countries.user_id END AS user_id,
+    CASE WHEN countries.fullname_clean IS NULL THEN nt.fullname_clean ELSE countries.fullname_clean END AS fullname_clean,
+    country,
+    CASE WHEN countries.subregion IS NULL THEN nt.region ELSE countries.subregion END AS subregion,
+    CASE WHEN countries.nanat_score IS NULL THEN 0 ELSE nanat_score END AS nanat_score,
+    f_prob_nt, prob AS nt_subregion_score, university_raw, 
+    CASE WHEN countries.inst_score IS NULL THEN 0 ELSE inst_score END AS inst_score, us_hs_exact, us_educ, ade_ind, ade_year
+FROM (
+    SELECT 
         CASE WHEN a.user_id IS NULL THEN b.user_id ELSE a.user_id END AS user_id, fullname_clean, university_raw,
-        CASE WHEN match_country IS NULL THEN nanat_country ELSE match_country END AS country, 
+        CASE WHEN match_country IS NULL THEN nanat_country ELSE match_country END AS country,
+        CASE WHEN match_country IS NULL THEN get_country_subregion(nanat_country) ELSE get_country_subregion(match_country) END AS subregion, 
         CASE WHEN match_country IS NULL THEN 0 ELSE matchscore_corr END AS inst_score, 
         CASE WHEN nanat_country IS NULL THEN 0 ELSE nanat_prob END AS nanat_score,
-        us_hs_exact, us_educ, f_prob_nt, ade_ind, ade_year
+        us_hs_exact, us_educ, ade_ind, ade_year
     FROM inst_merge_long AS a 
     FULL JOIN name_merge_long AS b 
-    ON a.user_id = b.user_id AND a.match_country = b.nanat_country""")
+    ON a.user_id = b.user_id AND a.match_country = b.nanat_country
+) AS countries 
+FULL JOIN nt_merge_long AS nt
+ON countries.user_id = nt.user_id AND countries.subregion = nt.region)
+""")
 
 #####################################
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
+# User-level indicator for H-1B occupation
+merged_pos_cw = con.sql("SELECT user_id, MAX(foia_occ_ind) AS foia_occ_ind, MIN(min_rank) AS min_h1b_occ_rank FROM (SELECT *, CASE WHEN max_share_foia > 0 THEN 1 ELSE 0 END AS foia_occ_ind FROM merged_pos LEFT JOIN occ_cw ON merged_pos.role_k1500 = occ_cw.role_k1500) GROUP BY user_id")
+
 final_user_merge = con.sql(
-f"""SELECT * FROM (SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt, f_prob, stem_ind, ade_ind, ade_year, f_prob_nt, fullname, university_raw, country, inst_score, nanat_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 
+f"""SELECT * FROM (SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt, f_prob, stem_ind, f_prob_nt, fullname, university_raw, country, subregion, inst_score, nanat_score, nanat_subregion_score, nt_subregion_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 0.5*inst_score + 0.25*nanat_subregion_score + 0.25*nt_subregion_score AS total_subregion_score,
         MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, 
         MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ,
-        MAX(ade_ind) OVER(PARTITION BY a.user_id) AS ade_ind,
+        MAX(CASE WHEN ade_ind IS NULL THEN 0 ELSE ade_ind END) OVER(PARTITION BY a.user_id) AS ade_ind,
         MIN(ade_year) OVER(PARTITION BY a.user_id) AS ade_year,
         MAX(0.5*inst_score + 0.5*nanat_score) OVER(PARTITION BY a.user_id) AS max_total_score,
-        MAX(CASE WHEN country = 'United States' THEN 0 ELSE 0.5*inst_score + 0.5*nanat_score END) OVER(PARTITION BY a.user_id) AS max_total_score_nonus
+        MAX(CASE WHEN country = 'United States' THEN 0 ELSE 0.5*inst_score + 0.5*nanat_score END) OVER(PARTITION BY a.user_id) AS max_total_score_nonus,
+        foia_occ_ind, min_h1b_occ_rank
     FROM (
         SELECT user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt, MAX(stem_ind_postsec) AS stem_ind FROM (
             SELECT user_id, CASE WHEN degree_clean IN ('Non-Degree', 'High School', 'Associate') THEN 0 ELSE stem_ind END AS stem_ind_postsec,
@@ -219,10 +259,11 @@ f"""SELECT * FROM (SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt,
                 f_prob, fullname FROM rev_users_filt
         ) GROUP BY user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt
     ) AS a 
-LEFT JOIN all_merge_long AS b ON a.user_id = b.user_id)
+LEFT JOIN country_merge_long AS b ON a.user_id = b.user_id
+LEFT JOIN merged_pos_cw AS c ON a.user_id = c.user_id)
 WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (total_score >= 0.1*max_total_score_nonus)
 """)
 
-con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jul8.parquet'")
+con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jul28.parquet'")
 
-final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jul8.parquet')
+final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jul28.parquet')

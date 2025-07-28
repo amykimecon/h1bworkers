@@ -2,6 +2,7 @@
 import json
 import numpy as np
 import re
+import pandas as pd
 # from name2nat import Name2nat 
 import os
 
@@ -227,7 +228,7 @@ def get_std_country(country, dict = country_cw_dict):
     if country in dict.values():
         return country 
     
-    return "No Country Match"
+    return "Invalid Country"
 
 # cleaning country from gmaps json
 def get_gmaps_country(adr, dict = country_cw_dict):
@@ -250,6 +251,24 @@ def get_gmaps_country(adr, dict = country_cw_dict):
         return country_match.group(1)
     
     return "No valid country match found"
+
+# getting subregion from country
+regioncw = pd.read_csv(f"{root}/data/crosswalks/iso_country_codes.csv")
+regioncw['region_clean'] = np.where(pd.isnull(regioncw['intermediate-region']), regioncw['sub-region'], regioncw['intermediate-region'])
+regioncw['country_clean'] = regioncw['name'].apply(get_std_country)
+regioncw_dict = regioncw[['country_clean','region_clean']].set_index('country_clean').T.to_dict('records')[0]
+
+def get_country_subregion(country, regioncw_dict = regioncw_dict):
+    country_clean = get_std_country(country)
+
+    if country_clean is None or country_clean == "Invalid Country":
+        return "Invalid Country"
+    
+    if country_clean == 'Taiwan':
+        return 'Eastern Asia'
+    
+    return regioncw_dict[country_clean]
+
 
 # # name2nat helper function
 # my_nanat = Name2nat()
