@@ -50,7 +50,7 @@ f"""
     {help.inst_clean_regex_sql('university_raw')} AS univ_raw_clean,
     CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
     degree_raw, field_raw, university_raw
-    FROM rev_raw LIMIT {testn}
+    FROM rev_raw -- LIMIT {testn}
 """
 )
 
@@ -90,7 +90,7 @@ t1 = time.time()
 print(f"Done! Time to complete: {round((t1-t0)/60,5)} min")
 
 # saving entire df concatenated
-pd.concat(df_out_all).to_parquet(f'{root}/data/int/name2nat_revelio/rev_names_withnat_jun26.parquet')
+pd.concat(df_out_all).to_parquet(f'{root}/data/int/name2nat_revelio/rev_names_withnat_jul30.parquet')
 
 # # no parallelization in duckdb:
 # t0 = time.time()

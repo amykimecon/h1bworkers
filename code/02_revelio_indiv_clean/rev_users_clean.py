@@ -33,6 +33,7 @@ con.create_function("get_country_subregion", lambda x: help.get_country_subregio
 #####################################
 ## IMPORTING DATA
 #####################################
+print('Loading all data sources...')
 ## duplicate rcids (companies that appear more than once in linkedin data)
 dup_rcids = con.read_csv(f"{root}/data/int/dup_rcids_mar20.csv")
 
@@ -50,7 +51,6 @@ rev_raw = con.read_parquet(f"{wrds_out}/rev_user_merge0.parquet")
 
 for j in range(1,10):
     rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{wrds_out}/rev_user_merge{j}.parquet'")
-    print(rev_raw.shape)
 
 # Importing Institution x Country Matches
 inst_country_cw = con.read_parquet(f"{root}/data/int/rev_inst_countries_jun30.parquet")
@@ -60,15 +60,21 @@ nanats = con.read_parquet(f"{root}/data/int/name2nat_revelio/rev_names_withnat_j
 nts = con.read_parquet(f'{root}/data/int/rev_names_nametrace_jul8.parquet')
 nts_long = con.read_parquet(f'{root}/data/int/rev_names_nametrace_long_jul8.parquet')
 
-# Importing User x Position-level Data
+# Importing User x Position-level Data (for rcids in samp)
 merged_pos = con.read_parquet(f"{root}/data/int/rev_merge_jul9.parquet")
+
+# revelio user x position history data (at user level)
+rev_positionhist = con.read_parquet(f'{root}/data/wrds/wrds_out/rev_user_positionhist_jul2.parquet')
 
 # Occupation crosswalk
 occ_cw = con.read_csv(f"{root}/data/crosswalks/rev_occ_to_foia_freq.csv")
 
+print('Done!')
+
 #####################################
 # DEFINING MAIN SAMPLE OF USERS (RCID IN MAIN SAMP AND START DATE AFTER 2015)
 #####################################
+print('Defining Main Sample of H-1B Companies...')
 # id crosswalk between revelio and h1b companies
 id_merge = con.sql("""
 -- collapse matched IDs to be unique at the rcid x FEIN x lottery_year level
@@ -102,11 +108,29 @@ con.sql(f"COPY samp_to_rcid TO '{root}/data/int/company_merge_sample_jul10.parqu
 
 # selecting user ids from list of positions based on whether company in sample and start date is after 2015 (conservative bandwidth) -- TODO: declare cutoff date as constant; TODO: move startdate filter into merged_pos query, avoid pulling people who got promoted after 2015 but started working before 2015
 user_samp = con.sql("SELECT user_id FROM ((SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a JOIN (SELECT user_id, rcid FROM merged_pos WHERE country = 'United States' AND startdate >= '2015-01-01') AS b ON a.rcid = b.rcid) GROUP BY user_id")
-# user_samp = con.sql("SELECT user_id FROM ((SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a JOIN (SELECT user_id, startdate, rcid FROM merged_pos WHERE country = 'United States') AS b ON a.rcid = b.rcid) WHERE startdate >= '2015-01-01' GROUP BY user_id")
+print('Done!')
+
+#####################################
+### CLEANING AND SAVING FOIA INDIVIDUAL DATA
+#####################################
+print('Cleaning and Saving Individual-level H-1B Data...')
+foia_indiv = con.sql(
+"""SELECT a.FEIN, a.lottery_year, country, 
+        get_country_subregion(country) AS subregion, female_ind, yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, JOB_TITLE, BEN_CURRENT_CLASS, n_apps, n_unique_country, foia_indiv_id, main_rcid, rcid 
+    FROM (
+        SELECT FEIN, lottery_year, get_std_country(country_of_nationality) AS country, 
+            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, JOB_TITLE, BEN_CURRENT_CLASS, COUNT(*) OVER(PARTITION BY FEIN, lottery_year) AS n_apps, COUNT(DISTINCT country_of_birth) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id 
+        FROM foia_raw_file
+    ) AS a JOIN samp_to_rcid AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year WHERE sampgroup = 'insamp'""")
+
+con.sql(f"COPY foia_indiv TO '{root}/data/clean/foia_indiv.parquet'")
+print('Done!')
 
 #####################################
 ### CLEANING AND MERGING REVELIO USERS TO COUNTRIES
 #####################################
+print('Cleaning and Saving Individual-level Revelio User Data...')
+
 # Cleaning Revelio Data, removing duplicates
 rev_clean = con.sql(
 f"""
@@ -264,6 +288,31 @@ LEFT JOIN merged_pos_cw AS c ON a.user_id = c.user_id)
 WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (total_score >= 0.01 OR nanat_subregion_score + nt_subregion_score >= 0.05)
 """)
 
-con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jul28.parquet'")
+# # saving intermediate version
+# con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jul28.parquet'")
 
-final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jul28.parquet')
+# final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jul28.parquet')
+
+## FURTHER COLLAPSING
+# cleaning revelio data (collapsing to user x company x country level)
+rev_indiv = con.sql(
+"""
+SELECT * FROM (
+    (SELECT user_id, 
+        MIN(startdate)::DATETIME AS first_startdate, 
+        MAX(CASE WHEN enddate IS NULL THEN '2025-03-01' ELSE enddate END)::DATETIME AS last_enddate, rcid 
+    FROM merged_pos WHERE country = 'United States' AND startdate >= '2015-01-01' GROUP BY user_id, rcid) AS a 
+    JOIN 
+    (SELECT rcid FROM samp_to_rcid GROUP BY rcid) AS b 
+    ON a.rcid = b.rcid
+) AS pos 
+JOIN 
+(SELECT * FROM final_user_merge WHERE (us_hs_exact IS NULL OR us_hs_exact = 0) AND (us_educ IS NULL OR us_educ = 1)) AS users 
+ON pos.user_id = users.user_id
+LEFT JOIN
+rev_positionhist AS poshist
+ON pos.user_id = poshist.user_id
+""")
+
+con.sql(f"COPY rev_indiv TO '{root}/data/clean/rev_indiv.parquet'")
+print('Done!')

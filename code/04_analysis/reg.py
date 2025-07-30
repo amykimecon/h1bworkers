@@ -6,7 +6,6 @@
 import duckdb as ddb
 import pandas as pd
 import numpy as np
-import json
 import sys
 from linearmodels.panel import PanelOLS
 import statsmodels.formula.api as smf
@@ -14,44 +13,21 @@ from statsmodels.iolib.summary2 import summary_col
 import seaborn as sns
 from linearmodels.panel import compare
 
-sys.path.append('../')
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
 
 con = ddb.connect()
 
-# Importing Country Codes Crosswalk
-with open(f"{root}/data/crosswalks/country_dict.json", "r") as json_file:
-    country_cw_dict = json.load(json_file)
-
-# helper function to get standardized country name
-def get_std_country(country, dict = country_cw_dict):
-    if country is None:
-        return None 
-    
-    if country in dict.keys():
-        return dict[country]
-    
-    if country in dict.values():
-        return country 
-    
-    return "No Country Match"
-
-con.create_function("get_std_country", lambda x: get_std_country(x), ['VARCHAR'], 'VARCHAR')
-
 #####################
 # IMPORTING DATA
 #####################
-## raw FOIA bloomberg data for balance test comparison
-foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all_withids.csv")
-foia_raw = con.sql("SELECT FEIN, lottery_year, get_std_country(country_of_nationality) AS country, CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, COUNT(*) OVER(PARTITION BY FEIN, lottery_year) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_country FROM foia_raw_file WHERE FEIN != '(b)(3) (b)(6) (b)(7)(c)'").df()
-
 ## foia samp for balance test comparison
-foia_indiv = con.read_parquet(f'{root}/data/int/foia_merge_samp_jul23.parquet').df().reset_index()
+foia_indiv = con.read_parquet(f'{root}/data/clean/foia_indiv.parquet').df().reset_index()
 
 ## merged & filtered data
-merge_filt_base = con.read_parquet(f'{root}/data/int/merge_filt_base_jul23.parquet').df().reset_index()
-merge_filt_postfilt = con.read_parquet(f'{root}/data/int/merge_filt_postfilt_jul23.parquet').df().reset_index()
-merge_filt_prefilt = con.read_parquet(f'{root}/data/int/merge_filt_prefilt_jul23.parquet').df().reset_index()
+merge_filt_base = con.read_parquet(f'{root}/data/int/merge_filt_base_jul30.parquet').df().reset_index()
+merge_filt_postfilt = con.read_parquet(f'{root}/data/int/merge_filt_postfilt_jul30.parquet').df().reset_index()
+merge_filt_prefilt = con.read_parquet(f'{root}/data/int/merge_filt_prefilt_jul30.parquet').df().reset_index()
 
 all_merge_filts = [merge_filt_base, merge_filt_prefilt, merge_filt_postfilt]
 
@@ -78,7 +54,7 @@ def merge_filt_clean(merge_filt, index = 'firm + year'):
 
     ## COLLAPSING TO APPLICATION LEVEL
     outcomes = ['enddatediff', 'work_1yr', 'work_2yr', 'work_3yr', 'updatediff', 'update_0yr', 'update_1yr', 'update_2yr', 'ade', 'est_yob', 'f_prob_avg']
-    df = merge_filt.groupby(['foia_temp_id', 'FEIN', 'female_ind', 'yob', 'lottery_year', 'country', 'winner', 'n_apps', 'n_unique_country']).agg(
+    df = merge_filt.groupby(['foia_indiv_id', 'FEIN', 'female_ind', 'yob', 'lottery_year', 'foia_country', 'winner', 'n_apps', 'n_unique_country']).agg(
         **{var: (var, lambda x, var = var: np.average(x, weights = merge_filt.loc[x.index, 'total_score'])) for var in outcomes}
     ).reset_index()
 
@@ -94,7 +70,7 @@ def merge_filt_clean(merge_filt, index = 'firm + year'):
         return df.set_index(['emp_id', 'year'])
     
     elif index == 'firm x year':
-        return df.set_index(['firm_year_fe', 'foia_temp_id'])
+        return df.set_index(['firm_year_fe', 'foia_indiv_id'])
 
     else:
         return df
@@ -109,8 +85,8 @@ all_df2s = [merge_filt_clean(m, 'firm x year') for m in all_merge_filts]
 foia_dfs = [foia_indiv.assign(dfname = '0. Apps in Samp').assign(winner = np.where(foia_indiv['status_type'] == 'SELECTED', 1, 0)), all_dfs[0].assign(dfname = '1. Baseline'), all_dfs[1].assign(dfname = '2. Pre-Filtered'), all_dfs[2].assign(dfname = '3. Post-Filtered')]
 
 foia_dfs_concat = pd.concat(foia_dfs)
-foia_dfs_concat['india'] = np.where(foia_dfs_concat['country'] == 'India', 1, 0)
-foia_dfs_concat['china'] = np.where(foia_dfs_concat['country'] == 'China', 1, 0)
+foia_dfs_concat['india'] = np.where(foia_dfs_concat['foia_country'] == 'India', 1, 0)
+foia_dfs_concat['china'] = np.where(foia_dfs_concat['foia_country'] == 'China', 1, 0)
 foia_dfs_concat['age'] = foia_dfs_concat['lottery_year'].astype('int') - foia_dfs_concat['yob'].astype('int')
 
 print(foia_dfs_concat.groupby('dfname')[['winner','female_ind', 'age', 'india', 'china', 'ade']].agg(lambda x: round(x.mean(), 2)).join(foia_dfs_concat.groupby(['dfname','FEIN', 'lottery_year'])[['n_apps','n_unique_country']].agg('mean').reset_index().groupby('dfname')[['n_apps','n_unique_country']].agg(lambda x: round(x.mean(), 2))).join(foia_dfs_concat.groupby('dfname').size().rename('n')).T)
@@ -118,7 +94,7 @@ print(foia_dfs_concat.groupby('dfname')[['winner','female_ind', 'age', 'india', 
 #####################
 # REGRESSIONS
 #####################
-yvar = 'update_2yr'
+yvar = 'work_1yr'
 
 m0_0s = []
 m0_1s = []

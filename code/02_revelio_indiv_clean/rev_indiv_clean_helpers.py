@@ -5,15 +5,11 @@ import re
 import pandas as pd
 from name2nat import Name2nat 
 import os
+import sys
 
 # local
-if os.environ.get('USER') == 'amykim':
-    root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
-    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
-# malloy
-elif os.environ.get('USER') == 'yk0581':
-    root = "/home/yk0581"
-    code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from config import * 
 
 # SQL QUERIES
 # sql string to extract random list of n ids
