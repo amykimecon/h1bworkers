@@ -3,7 +3,7 @@ import json
 import numpy as np
 import re
 import pandas as pd
-# from name2nat import Name2nat 
+from name2nat import Name2nat 
 import os
 
 # local
@@ -267,41 +267,46 @@ def get_country_subregion(country, regioncw_dict = regioncw_dict):
     if country_clean == 'Taiwan':
         return 'Eastern Asia'
     
-    return regioncw_dict[country_clean]
+    if country_clean == 'Kosovo':
+        return 'Eastern Europe'
+    
+    if country in regioncw_dict.keys():
+        return regioncw_dict[country]
+    
+    return 'Invalid Country'
 
+# name2nat helper function
+my_nanat = Name2nat()
 
-# # name2nat helper function
-# my_nanat = Name2nat()
+def name2nat_fun(name, nanat = my_nanat):
+    return json.dumps(nanat(name, top_n = 10)[0][1])
 
-# def name2nat_fun(name, nanat = my_nanat):
-#     return json.dumps(nanat(name, top_n = 10)[0][1])
+# cleaning name2nat output
+def get_all_nanats(str):
+    if str is None:
+        return []
+    items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
+    out = []
+    for s in items:
+        if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
+            print(s)
+        else:
+            nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
+            prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
+            out = out + [get_std_country(nat)]
+    return out
+    # return [[dict[re.search('^"([A-z]+)", ', s).group(1)], float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))] for s in items]
 
-# # cleaning name2nat output
-# def get_all_nanats(str):
-#     if str is None:
-#         return []
-#     items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
-#     out = []
-#     for s in items:
-#         if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
-#             print(s)
-#         else:
-#             nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
-#             prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
-#             out = out + [get_std_country(nat)]
-#     return out
-#     # return [[dict[re.search('^"([A-z]+)", ', s).group(1)], float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))] for s in items]
-
-# def get_all_nanat_probs(str):
-#     if str is None:
-#         return []
-#     items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
-#     out = []
-#     for s in items:
-#         if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
-#             print(s)
-#         else:
-#             nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
-#             prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
-#             out = out + [prob]
-#     return out
+def get_all_nanat_probs(str):
+    if str is None:
+        return []
+    items = re.sub('\\\\u00e9','e', re.sub('(\\[\\[|\\]\\])','',str)).split('], [')
+    out = []
+    for s in items:
+        if re.search('^"([A-z\\s\\-]+)", ', s) is None or re.search('", ([0-9\\.e\\-]+)$', s) is None:
+            print(s)
+        else:
+            nat = re.search('^"([A-z\\s\\-]+)", ', s).group(1)
+            prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
+            out = out + [prob]
+    return out

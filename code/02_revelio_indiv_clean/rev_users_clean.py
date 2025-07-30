@@ -149,7 +149,7 @@ inst_match_clean = con.sql(
 # Merging users with institution matches (long) and collapsing to user x country level, filtering out 
 inst_merge_long = con.sql(
 """
-SELECT user_id, university_raw, match_country, 
+SELECT user_id, university_raw, get_std_country(match_country) AS match_country, 
     us_hs_exact, us_educ, ade_ind, ade_year, 
     CASE WHEN degree_clean = 'High School' OR hs_share > 0.9 THEN matchscore WHEN degree_clean = 'Bachelor' THEN matchscore*0.8 ELSE matchscore*0.5 END AS matchscore_corr, 
     matchscore, matchtype, education_number, 
@@ -206,10 +206,9 @@ nt_merge_long = con.sql("""SELECT user_id, a.fullname_clean, region, prob, f_pro
     nts_long AS b 
     ON a.fullname_clean = b.fullname_clean """)
 
-# combining institution and name matches (user x country level) then combining with nametrace (name x subregion)
 country_merge_long = con.sql(
 """
-SELECT user_id, fullname_clean, country, subregion, nanat_score, inst_score, MAX(f_prob_nt) OVER(PARTITION BY user_id) AS f_prob_nt, SUM(nanat_score) OVER(PARTITION BY user_id, subregion) AS nanat_subregion_score, nt_subregion_score, university_raw, inst_score, us_hs_exact, us_educ, ade_ind, ade_year
+SELECT user_id, MAX(fullname_clean) OVER(PARTITION BY user_id), country, subregion, nanat_score, inst_score, MAX(f_prob_nt) OVER(PARTITION BY user_id) AS f_prob_nt, SUM(nanat_score) OVER(PARTITION BY user_id, subregion) AS nanat_subregion_score, nt_subregion_score, university_raw, inst_score, us_hs_exact, us_educ, ade_ind, ade_year
 FROM (
 SELECT  
     CASE WHEN countries.user_id IS NULL THEN nt.user_id ELSE countries.user_id END AS user_id,
@@ -217,7 +216,8 @@ SELECT
     country,
     CASE WHEN countries.subregion IS NULL THEN nt.region ELSE countries.subregion END AS subregion,
     CASE WHEN countries.nanat_score IS NULL THEN 0 ELSE nanat_score END AS nanat_score,
-    f_prob_nt, prob AS nt_subregion_score, university_raw, 
+    f_prob_nt, 
+    CASE WHEN prob IS NULL THEN 0 ELSE prob END AS nt_subregion_score, university_raw, 
     CASE WHEN countries.inst_score IS NULL THEN 0 ELSE inst_score END AS inst_score, us_hs_exact, us_educ, ade_ind, ade_year
 FROM (
     SELECT 
@@ -261,7 +261,7 @@ f"""SELECT * FROM (SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt,
     ) AS a 
 LEFT JOIN country_merge_long AS b ON a.user_id = b.user_id
 LEFT JOIN merged_pos_cw AS c ON a.user_id = c.user_id)
-WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (total_score >= 0.1*max_total_score_nonus)
+WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (total_score >= 0.01 OR nanat_subregion_score + nt_subregion_score >= 0.05)
 """)
 
 con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jul28.parquet'")

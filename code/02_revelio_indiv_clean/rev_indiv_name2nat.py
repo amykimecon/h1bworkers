@@ -7,8 +7,9 @@ import duckdb as ddb
 import time
 import pandas as pd
 import sys 
+import os
 
-sys.path.append('../')
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
 
 # helper functions
@@ -16,6 +17,8 @@ sys.path.append('02_revelio_indiv_clean/')
 import rev_indiv_clean_helpers as help
 
 con = ddb.connect()
+
+os.environ['LD_LIBRARY_PATH'] = '/home/yk0581/.conda/env/h1benv/lib/'
 
 ####################
 ## IMPORTING DATA ##
@@ -37,6 +40,8 @@ con.create_function("title", lambda x: x.title(), ['VARCHAR'], 'VARCHAR')
 ## GETTING NAMES ##
 ####################
 testn = 20000
+int_save = False #toggle for intermediate save
+
 rev_clean = con.sql(
 f"""
     SELECT 
@@ -45,7 +50,7 @@ f"""
     {help.inst_clean_regex_sql('university_raw')} AS univ_raw_clean,
     CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
     degree_raw, field_raw, university_raw
-    FROM rev_raw -- LIMIT {testn}
+    FROM rev_raw LIMIT {testn}
 """
 )
 
@@ -53,7 +58,7 @@ f"""
 rev_names = con.sql("SELECT *, ROW_NUMBER() OVER(ORDER BY fullname_clean) AS rownum FROM (SELECT fullname_clean FROM rev_clean WHERE fullname_clean != '' GROUP BY fullname_clean)")
 n = rev_names.shape[0]
 
-def name2nat_subdiv(i, n_tot, df):
+def name2nat_subdiv(i, n_tot, df, int_save = False):
     t0 = time.time()
     df_out = df.loc[df['rownum'] % n_tot == i].copy(deep=True)
     df_out['pred_nats_name'] = df_out['fullname_clean'].apply(help.name2nat_fun)
@@ -61,7 +66,8 @@ def name2nat_subdiv(i, n_tot, df):
     # rev_names_withnat_temp = con.sql(f"SELECT fullname_clean, name2nat(fullname_clean) AS pred_nats_name FROM rev_names WHERE rownum % {n} = {i}")
 
     # con.sql(f"COPY rev_names_withnat_temp TO '{root}/data/int/name2nat_revelio/rev_names_withnat_jun26_{i}of{n}.parquet'")
-    df_out.to_parquet(f'{root}/data/int/name2nat_revelio/rev_names_withnat_jun26_{i}of{n_tot}.parquet')
+    if int_save:
+        df_out.to_parquet(f'{root}/data/int/name2nat_revelio/rev_names_withnat_jun26_{i}of{n_tot}.parquet')
     t1 = time.time()
     print(f"Time to complete iteration {i}: {round((t1-t0)/60,5)} min")
 
@@ -77,7 +83,7 @@ print(f"Running name2nat on {n} names")
 rev_names_df = rev_names.df()
 df_out_all = []
 for i in range(n_subdiv):
-    temp = name2nat_subdiv(i, n_subdiv, rev_names_df)
+    temp = name2nat_subdiv(i, n_subdiv, rev_names_df, int_save)
     df_out_all = df_out_all + [temp]
 
 t1 = time.time()
