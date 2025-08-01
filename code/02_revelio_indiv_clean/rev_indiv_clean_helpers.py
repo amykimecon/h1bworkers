@@ -6,6 +6,7 @@ import pandas as pd
 from name2nat import Name2nat 
 import os
 import sys
+import time 
 
 # local
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -82,6 +83,41 @@ def inst_clean_regex_sql(col):
         '\\s?(&|\\+)\\s?', ' and ', 'g'), 
     -- remove any other punctuation and replace w space
     '[^A-z0-9\\s]', ' ', 'g')
+    """
+
+    return f"TRIM(REGEXP_REPLACE({str_out}, '\\s+', ' ', 'g'))" 
+
+# returns sql string for cleaned major/field of study given column name
+def field_clean_regex_sql(col):
+    str_out = f"""
+    REGEXP_REPLACE(
+    REGEXP_REPLACE(
+    REGEXP_REPLACE(
+    REGEXP_REPLACE(
+    REGEXP_REPLACE(
+    REGEXP_REPLACE(
+    REGEXP_REPLACE(
+    REGEXP_REPLACE(
+        REGEXP_REPLACE(
+            REGEXP_REPLACE(
+                REGEXP_REPLACE(
+                    -- strip accents and convert to lowercase
+                    strip_accents(lower({col})), 
+                -- remove anything in parantheses
+                '\\s*(\\(|\\[)[^\\)\\]]*(\\)|\\])\\s*', ' ', 'g'), 
+            -- remove apostrophes, periods
+            $$'|’|\\.$$, '', 'g'),
+        -- convert 'and' symbols to text
+        '\\s?(&|\\+)\\s?', ' and ', 'g'), 
+    -- remove any other punctuation and replace w space
+    '[^A-z0-9\\s]', ' ', 'g'),
+    '(^|\\s)(engrg|engr|engineeri)($|\\s)', ' engineering ', 'g'),
+    '(^|\\s)(compu|comp|compute)($|\\s)', ' computer ', 'g'),
+    '(^|\\s)elec($|\\s)', ' electrical ', 'g'),
+    '(^|\\s)(sci)($|\\s)', ' science ', 'g'),
+    '(^|\\s)(info)($|\\s)', ' information ', 'g'),
+    '(^|\\s)(sys|syss)($|\\s)', ' systems ', 'g'),
+    '(^|\\s)(tec|techno|tech)($|\\s)', ' technology ', 'g')
     """
 
     return f"TRIM(REGEXP_REPLACE({str_out}, '\\s+', ' ', 'g'))" 
@@ -306,3 +342,82 @@ def get_all_nanat_probs(str):
             prob = float(re.search('", ([0-9\\.e\\-]+)$', s).group(1))
             out = out + [prob]
     return out
+
+
+# breaking up large data tasks and saving intermediate output
+# function to merge chunks
+def chunk_merge(filestub, j, outfile = "", verbose = False):
+    t0 = time.time()
+    merged = []
+    if verbose:
+        print("Retrieving and merging chunks...")
+
+    for i in range(j):
+        chunk = pd.read_parquet(f"{filestub}{i}.parquet")
+        merged = merged + [chunk]
+    
+    merged_all = pd.concat(merged)
+
+    if outfile != "":
+        if verbose:
+            print(f"Saving to {outfile}...")
+        merged_all.to_parquet(outfile)
+    
+    t1 = time.time()
+    if verbose:
+        print(f"Done! Time Elapsed: {round((t1-t0), 2)} s")
+
+    return merged_all
+
+# function to recursively iterate over j chunks of df until chunks are of desired size
+
+# function to iterate over j chunks of userids (splitting each chunk further into k chunks)
+def chunk_query(df, j, fun, outpath = None, d = 10000, verbose = False, extraverbose = False):
+    n = df.shape[0] #total number of items
+
+    # base case: if df has nrow <= d then perform function on df and return
+    if n <= d:
+        print('.', end = '')
+        return(fun(df))
+    
+    # otherwise, further chunk into j (note: only ever save output and skip merge on first iteration)
+    else:  
+        k = int(np.ceil(n/j))
+        if verbose:
+            print("\n----------------------------------------")
+            print(f"Iterating over {j} chunks of {n} items ", end = '')
+
+        # if not saving output, recursively run function on chunks and concatenate into df
+        if outpath is None:
+            if verbose:
+                print("and not saving intermediate output")
+                print("----------------------------------------")
+            
+            chunks = []
+            for i in range(j):
+                if verbose:
+                    print(f"\nchunk #{i+1} of {j}", end = '')
+                t0 = time.time()
+                chunks = chunks + [chunk_query(df.iloc[k*i:k*(i+1)], j = j, fun = fun, outpath = None, d = d, verbose = extraverbose)]
+                t1 = time.time()
+
+                if verbose:
+                    print(f"completed in {round((t1-t0)/60, 2)} min")
+            return pd.concat(chunks)
+        
+        # if saving output, just recursively run query
+        else: 
+            if verbose:
+                print(f"and saving intermediate output to {outpath}")
+                print("----------------------------------------")
+            
+            for i in range(j):
+                if verbose:
+                    print(f"\nchunk #{i+1} of {j}", end = '')
+                t0 = time.time()
+                chunk_query(df.iloc[k*i:k*(i+1)], j = j, fun = fun, outpath = None, d = d, verbose = extraverbose).to_parquet(f"{outpath}{i}.parquet")
+                t1 = time.time() 
+
+                if verbose:
+                    print(f"completed in {round((t1-t0)/60, 2)} min")
+            return None

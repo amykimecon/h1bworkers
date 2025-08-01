@@ -7,14 +7,18 @@ import wrds
 import duckdb as ddb
 import pandas as pd
 import time
+import numpy as np
 import datetime
 import os
 import sys
 
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
 from config import * 
+
+# helper functions
+sys.path.append('02_revelio_indiv_clean/')
+import rev_indiv_clean_helpers as help
 
 con = ddb.connect()
 
@@ -37,7 +41,7 @@ db = wrds.Connection(wrds_username='amykimecon')
 test = False
 
 #####################
-# QUERYING WRDS
+# DEFINING USER SAMPLE
 #####################
 rcids = list(con.sql("SELECT rcid FROM rmerge_w_dups, GROUP BY rcid").df()['rcid'])
 
@@ -48,36 +52,39 @@ else:
 
 userids = db.raw_sql(
 f"""
-    SELECT user_id FROM revelio.individual_positions WHERE country = 'United States' AND rcid IN ({','.join([str(i) for i in rcidsamp])}) GROUP BY user_id
+    SELECT user_id FROM revelio.individual_positions WHERE country = 'United States' AND rcid IN ({','.join([str(i) for i in rcidsamp])}) GROUP BY user_id ORDER BY user_id
 """)
+
+#####################
+# HELPERS
+# #####################
+# function to get relevant position data given list of usernames
+def get_merge_query(userids, db = db):
+    userid_subset = ','.join(userids['user_id'].astype('str'))
+    user_pos = db.raw_sql(f"SELECT a.user_id, rcid, country, startdate, enddate, role_k1500, salary, total_compensation, company_raw, title_raw FROM revelio.individual_positions AS a LEFT JOIN revelio.individual_positions_raw AS b ON a.position_id = b.position_id WHERE a.user_id IN ({userid_subset})")
+
+    return user_pos 
+
+
+#####################
+# QUERYING WRDS
+#####################
+saveloc = f"{root}/data/int/wrds_positions/wrds_positions"
+j = 20
 
 t0_0 = time.time()
 print(f"Current Time: {datetime.datetime.now()}")
+print(f"Running wrds_positions on {userids.shape[0]} userids")
+print("---------------------")
 
-merged = []
-i = 0
-d = 1000
-
-while d*i < len(userids):
-    t0 = time.time()
-    userid_subset = ','.join(userids.iloc[d*i:d*(i+1),]['user_id'].astype('str'))
-
-    user_pos = db.raw_sql(f"SELECT a.user_id, rcid, country, startdate, enddate, role_k1500, salary, total_compensation, company_raw, title_raw FROM revelio.individual_positions AS a LEFT JOIN revelio.individual_positions_raw AS b ON a.position_id = b.position_id WHERE a.user_id IN ({userid_subset})")
-
-    merged = merged + [user_pos]
-    t1 = time.time()
-    print(f"iteration #{i+1} of {int((len(userids) -1)/d) + 1}: {round((t1-t0)/60, 2)} min")
-    i += 1    
-
-# merged = merged + [db.raw_sql(f"SELECT * FROM revelio.individual_positions WHERE rcid IN ({','.join([str(i) for i in rcids[d*i:]])})")]
+# running chunks and saving
+print("Querying and saving individual chunks...")
+help.chunk_query(userids, j = j, fun = get_merge_query, d = 10000, verbose = True, extraverbose=False, outpath = saveloc)
 
 t1_1 = time.time()
-print(f"Iterations Completed! Time Elapsed: {round((t1_1-t0_0)/3600, 2)} hours")
+print(f"Done! Time Elapsed: {round((t1_1-t0_0)/3600, 2)} hours")
 
-print("Merging Iterations and saving to file...")
-merged_all = pd.concat(merged)
-merged_all.to_parquet(f"{root}/data/int/rev_positions_jul31.parquet")
+# getting merged chunks
+out = help.chunk_merge(saveloc, j = j, outfile = f"{root}/data/int/wrds_positions_aug1.parquet", verbose = True)
 
-t2_2 = time.time()
-print(f"Done! Total time: {round((t2_2-t0_0)/60, 2)} min")
-print(f"Current Time: {datetime.datetime.now()}")
+print(f"Script Ended: {datetime.datetime.now()}")
