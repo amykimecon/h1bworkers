@@ -12,7 +12,7 @@ import time
 import json
 import sys
 sys.path.append('..')
-import rev_indiv_clean_helpers as help
+import h1bworkers.code.helpers as help
 from requests.exceptions import ConnectionError
 
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"

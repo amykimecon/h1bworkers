@@ -3,13 +3,9 @@ import json
 import numpy as np
 import re
 import pandas as pd
-from name2nat import Name2nat 
-import os
-import sys
 import time 
 
 # local
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
 
 # SQL QUERIES
@@ -98,6 +94,8 @@ def field_clean_regex_sql(col):
     REGEXP_REPLACE(
     REGEXP_REPLACE(
     REGEXP_REPLACE(
+    REGEXP_REPLACE(
+    REGEXP_REPLACE(
         REGEXP_REPLACE(
             REGEXP_REPLACE(
                 REGEXP_REPLACE(
@@ -113,11 +111,13 @@ def field_clean_regex_sql(col):
     '[^A-z0-9\\s]', ' ', 'g'),
     '(^|\\s)(engrg|engr|engineeri)($|\\s)', ' engineering ', 'g'),
     '(^|\\s)(compu|comp|compute)($|\\s)', ' computer ', 'g'),
-    '(^|\\s)elec($|\\s)', ' electrical ', 'g'),
+    '(^|\\s)(elec|elecs)($|\\s)', ' electrical ', 'g'),
     '(^|\\s)(sci)($|\\s)', ' science ', 'g'),
     '(^|\\s)(info)($|\\s)', ' information ', 'g'),
     '(^|\\s)(sys|syss)($|\\s)', ' systems ', 'g'),
-    '(^|\\s)(tec|techno|tech)($|\\s)', ' technology ', 'g')
+    '(^|\\s)(tec|techno|tech)($|\\s)', ' technology ', 'g'),
+    '(^|\\s)(mech)($|\\s)', ' mechanical ', 'g'),
+    '(^|\\s)(m\\s?a|m\\s?s|b\\s?s|b\\s?a|[0-9]+|m\\s?d|p\\s?h\\s?d|bachelor|bachelors|master|masters|in|and|j\\s?d|degree)($|\\s)', ' ', 'g')
     """
 
     return f"TRIM(REGEXP_REPLACE({str_out}, '\\s+', ' ', 'g'))" 
@@ -202,11 +202,11 @@ def fullname_clean_regex_sql(col):
     """
     return str_out 
 
-# cleaning output from nanat (returns sql code for new column where each row is unique name x [nat, prob])
-def nanats_to_long(col):
-    str_out = f"""REGEXP_SPLIT_TO_ARRAY(UNNEST(REGEXP_SPLIT_TO_ARRAY(REGEXP_REPLACE(REGEXP_REPLACE({col}, '(\\[\\[|\\]\\])', '', 'g'), '",?', '', 'g'), '\\], \\[')), ' ')"""
+# DEPRECATED: cleaning output from nanat (returns sql code for new column where each row is unique name x [nat, prob])
+# def nanats_to_long(col):
+#     str_out = f"""REGEXP_SPLIT_TO_ARRAY(UNNEST(REGEXP_SPLIT_TO_ARRAY(REGEXP_REPLACE(REGEXP_REPLACE({col}, '(\\[\\[|\\]\\])', '', 'g'), '",?', '', 'g'), '\\], \\[')), ' ')"""
 
-    return str_out
+#     return str_out
 
 def get_est_yob():
     str_out = """
@@ -239,18 +239,27 @@ def get_est_yob():
             ) OVER(PARTITION BY user_id) 
         END"""
     return str_out
+
+# given table with list of some position/education type thing with start and enddate, returns sql string long on year x position if year falls between startyr and endyr
+def long_by_year(tab, t0, t1, enddatenull, startdatecol = 'startdate', enddatecol = 'enddate'):
+    str_out = f"""
+        SELECT * FROM generate_series({t0}, {t1}) AS time(t)
+        FULL OUTER JOIN
+        (SELECT *,
+            SUBSTRING({startdatecol}, 1, 4)::INT AS startyr, 
+            CASE WHEN {enddatecol} IS NULL THEN {enddatenull} ELSE SUBSTRING({enddatecol}, 1, 4)::INT END AS endyr FROM {tab}
+        ) AS x 
+        ON time.t BETWEEN x.startyr AND x.endyr
+    """
+    return str_out
     
 ## PYTHON FUNCTIONS
 # randomly sample groups
 def sample_groups(df, groupidcol, n):
     return df.loc[df[groupidcol].isin(np.random.permutation(df[groupidcol].unique())[:n])]
 
-# Importing Country Codes Crosswalk
-with open(f"{root}/data/crosswalks/country_dict.json", "r") as json_file:
-    country_cw_dict = json.load(json_file)
-
 # helper function to get standardized country name
-def get_std_country(country, dict = country_cw_dict):
+def get_std_country(country, dict):
     if country is None:
         return None 
     
@@ -263,7 +272,7 @@ def get_std_country(country, dict = country_cw_dict):
     return "Invalid Country"
 
 # cleaning country from gmaps json
-def get_gmaps_country(adr, dict = country_cw_dict):
+def get_gmaps_country(adr, dict):
     if adr is None:
         return None 
     
@@ -284,34 +293,17 @@ def get_gmaps_country(adr, dict = country_cw_dict):
     
     return "No valid country match found"
 
-# getting subregion from country
-regioncw = pd.read_csv(f"{root}/data/crosswalks/iso_country_codes.csv")
-regioncw['region_clean'] = np.where(pd.isnull(regioncw['intermediate-region']), regioncw['sub-region'], regioncw['intermediate-region'])
-regioncw['country_clean'] = regioncw['name'].apply(get_std_country)
-regioncw_dict = regioncw[['country_clean','region_clean']].set_index('country_clean').T.to_dict('records')[0]
-
-def get_country_subregion(country, regioncw_dict = regioncw_dict):
-    country_clean = get_std_country(country)
+def get_country_subregion(country, countrycw_dict, regioncw_dict):
+    country_clean = get_std_country(country, countrycw_dict)
 
     if country_clean is None or country_clean == "Invalid Country":
         return "Invalid Country"
-    
-    if country_clean == 'Taiwan':
-        return 'Eastern Asia'
-    
-    if country_clean == 'Kosovo':
-        return 'Eastern Europe'
     
     if country in regioncw_dict.keys():
         return regioncw_dict[country]
     
     return 'Invalid Country'
 
-# name2nat helper function
-my_nanat = Name2nat()
-
-def name2nat_fun(name, nanat = my_nanat):
-    return json.dumps(nanat(name, top_n = 10)[0][1])
 
 # cleaning name2nat output
 def get_all_nanats(str):
@@ -372,11 +364,11 @@ def chunk_merge(filestub, j, outfile = "", verbose = False):
 # function to recursively iterate over j chunks of df until chunks are of desired size
 
 # function to iterate over j chunks of userids (splitting each chunk further into k chunks)
-def chunk_query(df, j, fun, outpath = None, d = 10000, verbose = False, extraverbose = False):
+def chunk_query(df, j, fun, jstart = 0, outpath = None, d = 10000, verbose = False, extraverbose = False):
     n = df.shape[0] #total number of items
 
-    # base case: if df has nrow <= d then perform function on df and return
-    if n <= d:
+    # base case: if df has nrow <= d and not first call then perform function on df and return
+    if n <= d and outpath is None:
         print('.', end = '')
         return(fun(df))
     
@@ -394,7 +386,7 @@ def chunk_query(df, j, fun, outpath = None, d = 10000, verbose = False, extraver
                 print("----------------------------------------")
             
             chunks = []
-            for i in range(j):
+            for i in range(jstart, j):
                 if verbose:
                     print(f"\nchunk #{i+1} of {j}", end = '')
                 t0 = time.time()
@@ -411,7 +403,7 @@ def chunk_query(df, j, fun, outpath = None, d = 10000, verbose = False, extraver
                 print(f"and saving intermediate output to {outpath}")
                 print("----------------------------------------")
             
-            for i in range(j):
+            for i in range(jstart, j):
                 if verbose:
                     print(f"\nchunk #{i+1} of {j}", end = '')
                 t0 = time.time()

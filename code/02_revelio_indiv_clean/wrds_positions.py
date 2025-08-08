@@ -16,10 +16,6 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
 
-# helper functions
-sys.path.append('02_revelio_indiv_clean/')
-import rev_indiv_clean_helpers as help
-
 con = ddb.connect()
 
 #####################
@@ -61,7 +57,7 @@ f"""
 # function to get relevant position data given list of usernames
 def get_merge_query(userids, db = db):
     userid_subset = ','.join(userids['user_id'].astype('str'))
-    user_pos = db.raw_sql(f"SELECT a.user_id, rcid, country, startdate, enddate, role_k1500, salary, total_compensation, company_raw, title_raw FROM revelio.individual_positions AS a LEFT JOIN revelio.individual_positions_raw AS b ON a.position_id = b.position_id WHERE a.user_id IN ({userid_subset})")
+    user_pos = db.raw_sql(f"SELECT a.user_id, a.position_id, a.position_number, rcid, country, startdate, enddate, role_k1500, salary, total_compensation, company_raw, title_raw FROM revelio.individual_positions AS a LEFT JOIN revelio.individual_positions_raw AS b ON a.position_id = b.position_id WHERE a.user_id IN ({userid_subset})")
 
     return user_pos 
 

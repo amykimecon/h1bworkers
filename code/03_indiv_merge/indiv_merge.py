@@ -23,10 +23,16 @@ foia_indiv = con.read_parquet(f'{root}/data/clean/foia_indiv.parquet')
 ## revelio
 rev_indiv = con.read_parquet(f'{root}/data/clean/rev_indiv.parquet')
 
+## user x year
+rev_by_year = con.read_parquet(f'{root}/data/int/rev_long_by_year_aug7.parquet')
 
 #####################
 # HELPER FUNCTIONS
 #####################
+# GET DF 
+def merge_df(con = con, rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
+    return con.sql(merge(rev_tab, foia_tab, postfilt, MATCH_MULT_CUTOFF, REV_MULT_COEFF, foia_prefilt, subregion, COUNTRY_SCORE_CUTOFF, MONTH_BUFFER, YOB_BUFFER, F_PROB_BUFFER)).df()
+
 # WRAPPER
 def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
     str_out = merge_filt_func(f"({merge_raw_func(rev_tab, foia_tab, foia_prefilt=foia_prefilt, subregion=subregion)})", postfilt=postfilt, MATCH_MULT_CUTOFF=MATCH_MULT_CUTOFF, REV_MULT_COEFF=REV_MULT_COEFF, COUNTRY_SCORE_CUTOFF=COUNTRY_SCORE_CUTOFF, MONTH_BUFFER=MONTH_BUFFER, YOB_BUFFER=YOB_BUFFER, F_PROB_BUFFER=F_PROB_BUFFER)
@@ -40,7 +46,7 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True):
         mergekey = 'subregion'
     else:
         mergekey = 'country'
-    str_out = f"""SELECT *, a.country AS foia_country, b.country AS rev_country, COUNT(*) OVER(PARTITION BY foia_indiv_id, a.rcid) AS n_match_raw,
+    str_out = f"""SELECT *, a.country AS foia_country, b.country AS rev_country, COUNT(*) OVER(PARTITION BY foia_indiv_id) AS n_match_raw,
             DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, first_startdate) AS startdatediff, 
             DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, last_enddate) AS enddatediff, 
             DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, min_startdate_us::DATETIME) AS months_work_in_us,
@@ -49,7 +55,8 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True):
             (f_prob + f_prob_nt)/2 AS f_prob_avg,
             1 - ABS(female_ind - (f_prob + f_prob_nt)/2) AS f_score,
             CASE WHEN a.country = b.country THEN total_score ELSE 0 END AS country_score,
-            (nanat_subregion_score + nt_subregion_score)/2 AS subregion_score
+            (nanat_subregion_score + nt_subregion_score)/2 AS subregion_score,
+            a.highest_ed_level AS foia_highest_ed_level, b.highest_ed_level AS rev_highest_ed_level
         FROM (SELECT * FROM {foia_tab} {foia_prefilt}) AS a LEFT JOIN {rev_tab} AS b ON a.rcid = b.rcid AND a.{mergekey} = b.{mergekey}"""
     return str_out
 
@@ -58,9 +65,9 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True):
 
 def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
     filt = f"""
-    SELECT *, COUNT(*) OVER(PARTITION BY foia_indiv_id, rcid) AS n_match_filt FROM (
+    SELECT *, COUNT(*) OVER(PARTITION BY foia_indiv_id) AS n_match_filt FROM (
         SELECT *, 
-        ROW_NUMBER() OVER(PARTITION BY foia_indiv_id, rcid, user_id ORDER BY country_score DESC, total_score DESC) AS match_order_ind,
+        ROW_NUMBER() OVER(PARTITION BY foia_indiv_id, user_id ORDER BY country_score DESC, total_score DESC) AS match_order_ind,
         MAX(country_score) OVER(PARTITION BY foia_indiv_id) AS max_country_score,
         FROM {merge_raw_tab}
         WHERE f_score >= 1 - {F_PROB_BUFFER} AND 
@@ -74,8 +81,8 @@ def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV
         filt = f"SELECT * FROM ({filt}) WHERE n_match_filt <= {MATCH_MULT_CUTOFF}"
     
     str_out = f"""
-        SELECT foia_indiv_id, FEIN, lottery_year, rcid, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_work_in_us, n_apps, status_type, ade_ind, ade_year,
-            COUNT(*) OVER(PARTITION BY foia_indiv_id, rcid) AS n_match_filt,
+    SELECT *, total_score/(SUM(total_score) OVER(PARTITION BY foia_indiv_id)) AS weight_norm FROM (
+        SELECT foia_indiv_id, FEIN, lottery_year, rcid, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_work_in_us, n_apps, status_type, ade_ind, ade_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt,
             (COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year))/n_apps AS share_apps_matched_emp,
             COUNT(DISTINCT user_id) OVER(PARTITION BY FEIN, lottery_year) AS n_rev_users_emp,
             (COUNT(*) OVER(PARTITION BY FEIN, lottery_year))/(COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year)) AS match_mult_emp,
@@ -92,7 +99,7 @@ def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV
         ((f_score - (1 - {F_PROB_BUFFER}))/{F_PROB_BUFFER})/6 +
         subregion_score/6 + country_score/2 AS total_score
         FROM ({filt})
-        """
+    )"""
 
     if postfilt == 'indiv':
         str_out = f"SELECT * FROM ({str_out}) WHERE share_apps_matched_emp = 1 AND rev_mult_emp < {REV_MULT_COEFF}*n_apps_matched_emp  AND n_unique_wintype_emp > 1"
@@ -102,13 +109,12 @@ def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV
 
     return str_out
 
-
 #####################
 # DIFFERENT MERGE VERSIONS
 #####################
-con.sql(f"COPY ({merge()}) TO '{root}/data/int/merge_filt_base_jul30.parquet'")
-con.sql(f"COPY ({merge(foia_prefilt = "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan'")}) TO '{root}/data/int/merge_filt_prefilt_jul30.parquet'")
-con.sql(f"COPY ({merge(postfilt='indiv')}) TO '{root}/data/int/merge_filt_postfilt_jul30.parquet'")
+# con.sql(f"COPY ({merge()}) TO '{root}/data/int/merge_filt_base_jul30.parquet'")
+# con.sql(f"COPY ({merge(foia_prefilt = "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan'")}) TO '{root}/data/int/merge_filt_prefilt_jul30.parquet'")
+# con.sql(f"COPY ({merge(postfilt='indiv')}) TO '{root}/data/int/merge_filt_postfilt_jul30.parquet'")
 
 
 

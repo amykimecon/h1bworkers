@@ -36,6 +36,9 @@ elif os.environ.get('USER') == 'amykimecon':
 # setting path
 os.chdir(f"{code}")
 
+# import helper functions
+import helpers as help
+
 ##################################
 ### IMPORTING HELPER FUNCTIONS ###
 ##################################

@@ -15,7 +15,7 @@ from config import *
 
 # helper functions
 sys.path.append('02_revelio_indiv_clean/')
-import rev_indiv_clean_helpers as help
+import h1bworkers.code.helpers as help
 
 con = ddb.connect()
 

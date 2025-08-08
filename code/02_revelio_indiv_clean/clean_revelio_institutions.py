@@ -8,20 +8,22 @@ import pandas as pd
 import time
 import os
 import sys
+import json
 
 sys.path.append('../')
 from config import * 
 
-# helper functions
-sys.path.append('02_revelio_indiv_clean/')
-import rev_indiv_clean_helpers as help
-
 con = ddb.connect()
 
-# import country crosswalk function to sql
-con.create_function("get_std_country", lambda x: help.get_std_country(x), ['VARCHAR'], 'VARCHAR')
+# Importing Country Codes Crosswalk
+with open(f"{root}/data/crosswalks/country_dict.json", "r") as json_file:
+    country_cw_dict = json.load(json_file)
 
-con.create_function("get_gmaps_country", lambda x: help.get_gmaps_country(x), ['VARCHAR'], 'VARCHAR')
+## Creating DuckDB functions from python helpers
+# country crosswalk function
+con.create_function("get_std_country", lambda x: help.get_std_country(x, country_cw_dict), ['VARCHAR'], 'VARCHAR')
+
+con.create_function("get_gmaps_country", lambda x: help.get_gmaps_country(x, country_cw_dict), ['VARCHAR'], 'VARCHAR')
 
 ####################
 ## IMPORTING DATA ##

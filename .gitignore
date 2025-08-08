@@ -13,3 +13,4 @@ code/10_misc/resources/best-model.pt
 *.pt
 *.pyc
 *.tmp
+*.out
