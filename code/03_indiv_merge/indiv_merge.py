@@ -10,6 +10,18 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from config import * # File Description: Merging H-1B and Revelio Individual Data
+# Author: Amy Kim
+# Date Created: Jun 30 2025
+
+# Imports and Paths
+import duckdb as ddb
+import pandas as pd
+import numpy as np
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
 
 con = ddb.connect()
@@ -23,23 +35,37 @@ foia_indiv = con.read_parquet(f'{root}/data/clean/foia_indiv.parquet')
 ## revelio
 rev_indiv = con.read_parquet(f'{root}/data/clean/rev_indiv.parquet')
 
-## user x year
-rev_by_year = con.read_parquet(f'{root}/data/int/rev_long_by_year_aug7.parquet')
+## revelio education data
+rev_educ = con.read_parquet(f'{root}/data/int/rev_educ_long_aug8.parquet')
+
+# collapsing to user x institution (for now use country with top score)
+rev_educ_clean = con.sql("SELECT *, ed_startdate AS startdate, ed_enddate AS enddate FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY user_id, education_number ORDER BY matchscore DESC) AS match_order FROM rev_educ WHERE degree_clean != 'Non-Degree') WHERE match_order = 1")
+
+# Importing User x Position-level Data (all positions, cleaned and deduplicated)
+merged_pos = con.read_parquet(f'{root}/data/int/merged_pos_clean_aug8.parquet')
+
+# removing duplicates, setting alt enddate as enddate if missing
+merged_pos_clean = con.sql("SELECT * EXCLUDE (enddate), CASE WHEN alt_enddate IS NULL THEN enddate ELSE alt_enddate END AS enddate FROM merged_pos WHERE pos_dup_ind IS NULL OR pos_dup_ind = 0")
 
 #####################
-# HELPER FUNCTIONS
+# WRAPPER FUNCTIONS FOR MERGE
 #####################
 # GET DF 
 def merge_df(con = con, rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
     return con.sql(merge(rev_tab, foia_tab, postfilt, MATCH_MULT_CUTOFF, REV_MULT_COEFF, foia_prefilt, subregion, COUNTRY_SCORE_CUTOFF, MONTH_BUFFER, YOB_BUFFER, F_PROB_BUFFER)).df()
 
 # WRAPPER
-def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
+def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
     str_out = merge_filt_func(f"({merge_raw_func(rev_tab, foia_tab, foia_prefilt=foia_prefilt, subregion=subregion)})", postfilt=postfilt, MATCH_MULT_CUTOFF=MATCH_MULT_CUTOFF, REV_MULT_COEFF=REV_MULT_COEFF, COUNTRY_SCORE_CUTOFF=COUNTRY_SCORE_CUTOFF, MONTH_BUFFER=MONTH_BUFFER, YOB_BUFFER=YOB_BUFFER, F_PROB_BUFFER=F_PROB_BUFFER)
+
+    if with_t_vars:
+        str_out = f"SELECT * EXCLUDE (b.foia_indiv_id, b.user_id) FROM ({str_out}) AS a LEFT JOIN ({get_rel_year_inds_wide(f"({str_out})")}) AS b ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id"
 
     return str_out
 
-
+#####################
+# REV X FOIA MERGE FUNCTIONS
+#####################
 # MERGE 
 def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True):
     if subregion:
@@ -64,6 +90,11 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True):
 # postfilt can be 'indiv' (filter on n_match_filt (# matches per app), then post-filter), 'emp' (filter on everything at employer level including match_mult_emp (avg # matches per app at employer level)), or anything else (no post-filtering)
 
 def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
+
+    # warnings
+    if MONTH_BUFFER >= 9:
+        print('Warning! Month buffer of 9+ months will include positions started in the calendar year after the lottery, which may result in issues downstream')
+
     filt = f"""
     SELECT *, COUNT(*) OVER(PARTITION BY foia_indiv_id) AS n_match_filt FROM (
         SELECT *, 
@@ -108,6 +139,532 @@ def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV
         str_out = f"SELECT * FROM ({str_out}) WHERE share_apps_matched_emp = 1 AND rev_mult_emp < {REV_MULT_COEFF}*n_apps_matched_emp  AND n_unique_wintype_emp > 1 AND match_mult_emp <= {MATCH_MULT_CUTOFF}"
 
     return str_out
+
+
+
+#####################
+# LONG POSITION/EDUC MERGE
+#####################
+def get_rel_year_inds_wide(merge_tab, t0 = -1, t1 = 5):
+
+    # join position and education data, unpivot long on variable, then pivot wide on variable x t
+    str_out = f"""
+    PIVOT 
+        (UNPIVOT     
+            (SELECT * EXCLUDE(b.foia_indiv_id, b.user_id, b.t) 
+            FROM ({get_rel_year_inds_pos('mergetest')}) AS a JOIN ({get_rel_year_inds_educ('mergetest')}) AS b ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id AND a.t = b.t)
+        ON * EXCLUDE(foia_indiv_id, user_id, t) 
+        INTO NAME var VALUE val)
+    ON var || t USING FIRST(val)
+    """
+
+    return str_out
+
+def get_rel_year_inds_educ(merge_tab, educ_tab = 'rev_educ_clean', t0 = -1, t1 = 5):
+    """ Takes output of merge function and a table with user_id x education data and returns table at merge x t level with relevant variables (where t is relative to lottery year)
+
+    Parameters
+    -----------
+    merge_tab : str
+        Name or SQL string representing table that is output of merge functions
+    educ_tab: str
+        Name or SQL string representing table with user_id x education data
+    t0, t1: optional inputs to help.long_by_year
+
+    Returns
+    -------
+    String representing SQL query for table at merge x t level with relevant education variables
+    """
+
+    educlong = f"""
+        SELECT *,
+            -- indicator for education being in US
+                CASE WHEN match_country = 'United States' THEN 1 ELSE 0 END AS educ_in_us,
+            -- indicator for education being in country of birth
+                CASE WHEN match_country = foia_country THEN 1 ELSE 0 END AS educ_in_home_country,
+            -- indicator for masters
+                CASE WHEN degree_clean = 'Master' OR degree_clean = 'MBA' THEN 1 ELSE 0 END AS masters,
+            -- indicator for doctors
+                CASE WHEN degree_clean = 'Doctor' THEN 1 ELSE 0 END AS doctors,
+            -- indicator for education having been started before reference year
+                CASE WHEN (MIN(t) OVER(PARTITION BY foia_indiv_id, user_id, education_number)) < 0 THEN 1 ELSE 0 END AS start_before,
+            -- total number of educations in t
+                COUNT(DISTINCT education_number) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_educ_t
+        FROM ({get_long_by_year(merge_tab, educ_tab, long_tab_vars = ', degree_clean, match_country, startdate, enddate, education_number', t0 = t0, t1 = t1, enddatenull = "(CASE WHEN degree_clean = 'Master' OR degree_clean = 'MBA' THEN SUBSTRING(startdate, 1, 4)::INT + 2 ELSE SUBSTRING(startdate, 1, 4)::INT + 4 END)")})   
+        ORDER BY foia_indiv_id, user_id, t 
+    """
+
+    educgroup = f""" 
+    SELECT 
+        foia_indiv_id, user_id, t,
+        CASE WHEN COUNT(DISTINCT education_number) = 0 THEN 1 ELSE 0 END AS no_educations,
+        MAX(educ_in_us) AS educ_in_us, MAX(educ_in_home_country) AS educ_in_home_country,
+        MAX(masters) AS masters, MAX(doctors) AS doctors,
+        MAX(CASE WHEN start_before = 0 AND educ_in_us = 1 THEN 1 ELSE 0 END) AS new_educ_in_us,
+        MAX(CASE WHEN start_before = 0 AND educ_in_home_country = 1 THEN 1 ELSE 0 END) AS new_educ_in_home_country, 
+        MAX(CASE WHEN start_before = 0 AND masters = 1 THEN 1 ELSE 0 END) AS new_masters, 
+        MAX(CASE WHEN start_before = 0 AND doctors = 1 THEN 1 ELSE 0 END) AS new_doctors,
+        MAX(CASE WHEN start_before = 0 THEN 1 ELSE 0 END) AS new_educ
+    FROM ({educlong}) WHERE t IS NOT NULL
+    GROUP BY foia_indiv_id, user_id, t"""
+
+    return educgroup
+
+
+def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 = 5):
+    """ Takes output of merge function and a table with user_id x position data and returns table at merge x t level with relevant variables (where t is relative to lottery year)
+
+    Parameters
+    -----------
+    merge_tab : str
+        Name or SQL string representing table that is output of merge functions
+    pos_tab: str
+        Name or SQL string representing table with user_id x position data
+    t0, t1: optional inputs to help.long_by_year
+
+    Returns
+    -------
+    String representing SQL query for table at merge x t level with relevant position variables
+    """
+
+    # merging long on position x t
+    poslong = f"""
+        SELECT *, 
+        -- indicator for position being in US
+            CASE WHEN country = 'United States' THEN 1 ELSE 0 END AS in_us,
+        -- indicator for position being in country of birth
+            CASE WHEN country = foia_country THEN 1 ELSE 0 END AS in_home_country,
+        -- indicator for being at same company as matched on in lottery
+            CASE WHEN rcid = ref_rcid THEN 1 ELSE 0 END AS same_company,
+        -- creating reference position number variable (first when all positions with t <= 0 and rcid = ref rcid are ordered by t desc, position number asc)
+            MAX(CASE WHEN ref_pos_priority = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id) AS ref_position_number,
+        -- indicator for still being at reference position
+            CASE WHEN position_number = (MAX(CASE WHEN ref_pos_priority = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id)) THEN 1 ELSE 0 END AS same_position,
+        -- indicator for position being started before reference position
+            CASE WHEN position_number < (MAX(CASE WHEN ref_pos_priority = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id)) THEN 1 ELSE 0 END AS start_before,
+        -- imputed total compensation of reference position
+            CASE WHEN position_number = (MAX(CASE WHEN ref_pos_priority = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id)) THEN total_compensation ELSE 0 END AS ref_comp,
+        -- total number of positions in t
+            COUNT(DISTINCT position_id) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_pos_t
+        FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY foia_indiv_id, user_id ORDER BY (CASE WHEN t <= 0 THEN 1 ELSE 0 END) DESC, t DESC, position_number) AS ref_pos_priority FROM ({
+            get_long_by_year(merge_tab, pos_tab, long_tab_vars = ', position_id, position_number, b.rcid AS rcid, startdate, enddate, title_raw, company_raw, country, total_compensation', t0 = t0, t1 = t1)}))  
+        ORDER BY foia_indiv_id, user_id, t 
+    """
+
+    # Filtering and grouping by t
+    posgroup = f""" 
+    SELECT 
+        foia_indiv_id, user_id, t,
+        CASE WHEN COUNT(DISTINCT position_number) = 0 THEN 1 ELSE 0 END AS no_positions,
+        MAX(in_us) AS in_us, MAX(in_home_country) AS in_home_country,
+        MAX(CASE WHEN start_before = 0 AND same_company = 0 THEN 1 ELSE 0 END) AS change_company,
+        MAX(CASE WHEN start_before = 0 AND same_position = 0 THEN 1 ELSE 0 END) AS change_position,
+        SUM(total_compensation * frac_t) AS agg_compensation,
+        COUNT(*) AS n_pos,
+        COUNT(CASE WHEN start_before = 0 THEN 1 END) AS n_pos_startafter,
+        SUM(frac_t) AS frac_t
+    FROM (
+        SELECT *, COUNT(CASE WHEN start_before = 0 THEN 1 ELSE NULL END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_start_after 
+        FROM ({poslong})
+        ) 
+    WHERE t IS NOT NULL AND (start_before = 0 OR n_start_after = 0)
+    GROUP BY foia_indiv_id, user_id, t"""
+
+    return posgroup
+    
+
+def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddatenull = '2025'):
+    """ Takes output of merge function and a table long on user_id x event and returns SQL string for table long on merge x event x t where t is relative to lottery year 
+
+    Parameters
+    -----------
+    merge_tab : str
+        Name or SQL string representing table that is output of merge functions
+    long_tab: str
+        Name or SQL string representing table long on user_id x event where event has start and end date (e.g. position, education)
+    long_tab_vars: str
+        Additional vars from long_tab to keep for future steps (must start with comma)
+    t0, t1, enddatenull: optional inputs to help.long_by_year
+
+    Returns
+    -------
+    String representing SQL query for table long on merge x event x t
+    """
+
+    rawmerge = f"""
+        SELECT foia_indiv_id, a.user_id, foia_country,
+            lottery_year::INT - 1 AS ref_year, a.rcid AS ref_rcid {long_tab_vars}
+        FROM {merge_tab} AS a LEFT JOIN {long_tab} AS b ON a.user_id = b.user_id
+    """
+
+    return help.long_by_year(tab = f'({rawmerge})', t0 = t0, t1 = t1, t_ref = 'x.ref_year', enddatenull = enddatenull, joinids = 'user_id, foia_indiv_id')
+
+
+mergetest = con.sql(merge(postfilt = 'indiv'))
+
+out = con.sql(get_rel_year_inds_wide('mergetest'))
+
+
+con = ddb.connect()
+
+#####################
+# IMPORTING DATA
+#####################
+## foia
+foia_indiv = con.read_parquet(f'{root}/data/clean/foia_indiv.parquet')
+
+## revelio
+rev_indiv = con.read_parquet(f'{root}/data/clean/rev_indiv.parquet')
+
+## revelio education data
+rev_educ = con.read_parquet(f'{root}/data/int/rev_educ_long_aug8.parquet')
+
+# collapsing to user x institution (for now use country with top score)
+rev_educ_clean = con.sql("SELECT *, ed_startdate AS startdate, ed_enddate AS enddate FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY user_id, education_number ORDER BY matchscore DESC) AS match_order FROM rev_educ WHERE degree_clean != 'Non-Degree') WHERE match_order = 1")
+
+# Importing User x Position-level Data (all positions, cleaned and deduplicated)
+merged_pos = con.read_parquet(f'{root}/data/int/merged_pos_clean_aug8.parquet')
+
+# removing duplicates, setting alt enddate as enddate if missing
+merged_pos_clean = con.sql("SELECT * EXCLUDE (enddate), CASE WHEN alt_enddate IS NULL THEN enddate ELSE alt_enddate END AS enddate FROM merged_pos WHERE pos_dup_ind IS NULL OR pos_dup_ind = 0")
+
+# ###########################################################
+# ### PIVOTING LONG ON YEAR TO GET USER x ACTIVITY IN YEAR
+# ###########################################################
+
+# # ids = ",".join(con.sql(help.random_ids_sql('user_id','rev_clean', n = 10)).df()['user_id'].astype(str))
+# # pos_filt = con.sql(f"SELECT * FROM merged_pos_clean WHERE user_id IN ({ids})")
+
+# # merging education with institutions to get country (for now use country with top score)
+# educ_merge = con.sql(f"SELECT * FROM rev_indiv AS a LEFT JOIN (SELECT * FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY university_raw ORDER BY matchscore DESC) AS match_order FROM inst_match_clean) WHERE match_order = 1) AS b ON a.university_raw = b.university_raw")
+# # educ_filt = con.sql(f"SELECT * FROM rev_clean AS a LEFT JOIN (SELECT * FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY university_raw ORDER BY matchscore DESC) AS match_order FROM inst_match_clean) WHERE match_order = 1) AS b ON a.university_raw = b.university_raw WHERE user_id IN ({ids})")
+
+# pos_by_year = con.sql(
+# f"""
+#     SELECT user_id, t, 
+#         LIST_TRANSFORM(
+#             LIST_ZIP(
+#                 ARRAY_AGG(title_raw ORDER BY position_number),
+#                 ARRAY_AGG(rcid ORDER BY position_number),
+#                 ARRAY_AGG(company_raw ORDER BY position_number),
+#                 ARRAY_AGG(country ORDER BY position_number),
+#                 ARRAY_AGG(startdate ORDER BY position_number),
+#                 ARRAY_AGG(enddate ORDER BY position_number),
+#                 ARRAY_AGG(total_compensation ORDER BY position_number),
+#                 ARRAY_AGG(max_share_foia ORDER BY position_number)
+#             ),
+#             x -> STRUCT_PACK(title_raw := x[1], rcid := x[2], company_raw := x[3], country := x[4], startdate := x[5], enddate := x[6], total_compensation := x[7], share_foia_occ := x[8])
+#         ) AS positions,
+#         COUNT(*) AS n_pos
+#     FROM ({help.long_by_year('merged_pos_clean', 2018, 2025, enddatenull = "2025")}
+#     ) GROUP BY user_id, t
+# """)
+
+# educ_by_year = con.sql(
+# f"""
+#     SELECT user_id, t, 
+#         LIST_TRANSFORM(
+#             LIST_ZIP(
+#                 ARRAY_AGG(degree_clean ORDER BY education_number),
+#                 ARRAY_AGG(university_raw ORDER BY education_number),
+#                 ARRAY_AGG(match_country ORDER BY education_number),
+#                 ARRAY_AGG(ed_startdate ORDER BY education_number),
+#                 ARRAY_AGG(ed_enddate ORDER BY education_number)
+#             ),
+#             x -> STRUCT_PACK(degree_clean := x[1], university_raw := x[2], match_country := x[3], ed_startdate := x[4], ed_enddate := x[5])
+#         ) AS educations,
+#         COUNT(*) AS n_educ
+#     FROM ({help.long_by_year('educ_merge', 2018, 2025, enddatenull = "(CASE WHEN degree_clean = 'Master' THEN SUBSTRING(ed_startdate, 1, 4)::INT + 2 ELSE SUBSTRING(ed_startdate, 1, 4)::INT + 4 END)", startdatecol = 'ed_startdate', enddatecol = 'ed_enddate')}
+#     ) GROUP BY user_id, t
+# """)
+
+# all_by_year = con.sql("SELECT * EXCLUDE(b.user_id, b.t) FROM pos_by_year AS a FULL JOIN educ_by_year AS b ON a.user_id = b.user_id AND a.t = b.t AND a.t IS NOT NULL and b.t IS NOT NULL")
+
+# con.sql(f"COPY all_by_year TO '{root}/data/int/rev_long_by_year_aug7.parquet'")
+
+# # eventual use case:
+# ## matchdf with userid (linkedin) x foiaindivid (h1b) 
+# ## left join matchdf with this data on userid = user_id
+# ## create indicator for rcid x year (if no match because of enddate month buffer, use rcid x year - 1)
+# ## fillna by userid to get `reference year` and `reference year rcid/position etc.`
+# ## now dataset is in terms of userid x t where t is relative to lottery year, can compare across years
+
+# # what about case when multiple positions in a year?
+# ## case 1: transition [want to take new position]
+# ## case 2: volunteer/board position (held throughout) [want to ignore]
+# ## case 3: startup (2 positions -> 1 or 1 position -> 2) [want to treat all as real]
+
+
+# ## solution 1: ignore any positions started prior to reference position
+# ## solution 2: 
+
+
+
+# ## n-3: 
+
+# ## n-2: foia_id x user_id x t
+
+# ## n-1 result: foia_id x user_id with same outcome variables
+
+# ## end result: want to have dataset with each row foia_id, outcome variables: in t+1 to t+5: in school in US, working in US, in home country, in diff job in same company, total compensation
+
+#####################
+# WRAPPER FUNCTIONS FOR MERGE
+#####################
+# GET DF 
+def merge_df(con = con, rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
+    return con.sql(merge(rev_tab, foia_tab, postfilt, MATCH_MULT_CUTOFF, REV_MULT_COEFF, foia_prefilt, subregion, COUNTRY_SCORE_CUTOFF, MONTH_BUFFER, YOB_BUFFER, F_PROB_BUFFER)).df()
+
+# WRAPPER
+def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
+    str_out = merge_filt_func(f"({merge_raw_func(rev_tab, foia_tab, foia_prefilt=foia_prefilt, subregion=subregion)})", postfilt=postfilt, MATCH_MULT_CUTOFF=MATCH_MULT_CUTOFF, REV_MULT_COEFF=REV_MULT_COEFF, COUNTRY_SCORE_CUTOFF=COUNTRY_SCORE_CUTOFF, MONTH_BUFFER=MONTH_BUFFER, YOB_BUFFER=YOB_BUFFER, F_PROB_BUFFER=F_PROB_BUFFER)
+
+    if with_t_vars:
+        str_out = f"SELECT * EXCLUDE (b.foia_indiv_id, b.user_id) FROM ({str_out}) AS a LEFT JOIN ({get_rel_year_inds_wide(f"({str_out})")}) AS b ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id"
+
+    return str_out
+
+#####################
+# REV X FOIA MERGE FUNCTIONS
+#####################
+# MERGE 
+def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True):
+    if subregion:
+        mergekey = 'subregion'
+    else:
+        mergekey = 'country'
+    str_out = f"""SELECT *, a.country AS foia_country, b.country AS rev_country, COUNT(*) OVER(PARTITION BY foia_indiv_id) AS n_match_raw,
+            DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, first_startdate) AS startdatediff, 
+            DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, last_enddate) AS enddatediff, 
+            DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, min_startdate_us::DATETIME) AS months_work_in_us,
+            SUBSTRING(min_startdate, 1, 4)::INTEGER - 16 AS max_yob,
+            DATEDIFF('month', ((lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, updated_dt::DATETIME) AS updatediff,
+            (f_prob + f_prob_nt)/2 AS f_prob_avg,
+            1 - ABS(female_ind - (f_prob + f_prob_nt)/2) AS f_score,
+            CASE WHEN a.country = b.country THEN total_score ELSE 0 END AS country_score,
+            (nanat_subregion_score + nt_subregion_score)/2 AS subregion_score,
+            a.highest_ed_level AS foia_highest_ed_level, b.highest_ed_level AS rev_highest_ed_level
+        FROM (SELECT * FROM {foia_tab} {foia_prefilt}) AS a LEFT JOIN {rev_tab} AS b ON a.rcid = b.rcid AND a.{mergekey} = b.{mergekey}"""
+    return str_out
+
+# FILTERS
+# postfilt can be 'indiv' (filter on n_match_filt (# matches per app), then post-filter), 'emp' (filter on everything at employer level including match_mult_emp (avg # matches per app at employer level)), or anything else (no post-filtering)
+
+def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
+
+    # warnings
+    if MONTH_BUFFER >= 9:
+        print('Warning! Month buffer of 9+ months will include positions started in the calendar year after the lottery, which may result in issues downstream')
+
+    filt = f"""
+    SELECT *, COUNT(*) OVER(PARTITION BY foia_indiv_id) AS n_match_filt FROM (
+        SELECT *, 
+        ROW_NUMBER() OVER(PARTITION BY foia_indiv_id, user_id ORDER BY country_score DESC, total_score DESC) AS match_order_ind,
+        MAX(country_score) OVER(PARTITION BY foia_indiv_id) AS max_country_score,
+        FROM {merge_raw_tab}
+        WHERE f_score >= 1 - {F_PROB_BUFFER} AND 
+            (ABS(yob::INTEGER - est_yob) <= {YOB_BUFFER} OR (est_yob IS NULL AND yob::INTEGER <= max_yob))
+            AND startdatediff <= {0+MONTH_BUFFER} AND startdatediff >= {-36 - MONTH_BUFFER} AND enddatediff >= {0-MONTH_BUFFER}
+        ) 
+    WHERE match_order_ind = 1 AND stem_ind = 1 AND foia_occ_ind = 1 AND (country_score > {COUNTRY_SCORE_CUTOFF} OR max_country_score <= {COUNTRY_SCORE_CUTOFF})
+    """
+    
+    if postfilt == 'indiv':
+        filt = f"SELECT * FROM ({filt}) WHERE n_match_filt <= {MATCH_MULT_CUTOFF}"
+    
+    str_out = f"""
+    SELECT *, total_score/(SUM(total_score) OVER(PARTITION BY foia_indiv_id)) AS weight_norm FROM (
+        SELECT foia_indiv_id, FEIN, lottery_year, rcid, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_work_in_us, n_apps, status_type, ade_ind, ade_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt,
+            (COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year))/n_apps AS share_apps_matched_emp,
+            COUNT(DISTINCT user_id) OVER(PARTITION BY FEIN, lottery_year) AS n_rev_users_emp,
+            (COUNT(*) OVER(PARTITION BY FEIN, lottery_year))/(COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year)) AS match_mult_emp,
+            (COUNT(*) OVER(PARTITION BY FEIN, lottery_year))/(COUNT(DISTINCT user_id) OVER(PARTITION BY FEIN, lottery_year)) AS rev_mult_emp,
+            COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year) AS n_apps_matched_emp,
+            COUNT(DISTINCT status_type) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_wintype_emp,
+        (CASE WHEN est_yob IS NULL THEN 0
+            WHEN ABS(est_yob - yob::INTEGER) <= 1 THEN 1
+            WHEN est_yob - yob::INTEGER <= 3 AND est_yob - yob::INTEGER >= 2 THEN 0.8
+            WHEN est_yob - yob::INTEGER >= -3 AND est_yob - yob::INTEGER <= -2 THEN 0.6
+            WHEN est_yob - yob::INTEGER <= {YOB_BUFFER} AND est_yob - yob::INTEGER >= 4 THEN 0.4
+            WHEN est_yob - yob::INTEGER >= -{YOB_BUFFER} AND est_yob - yob::INTEGER <= -4 THEN 0.2
+        END)/6 + 
+        ((f_score - (1 - {F_PROB_BUFFER}))/{F_PROB_BUFFER})/6 +
+        subregion_score/6 + country_score/2 AS total_score
+        FROM ({filt})
+    )"""
+
+    if postfilt == 'indiv':
+        str_out = f"SELECT * FROM ({str_out}) WHERE share_apps_matched_emp = 1 AND rev_mult_emp < {REV_MULT_COEFF}*n_apps_matched_emp  AND n_unique_wintype_emp > 1"
+
+    elif postfilt == 'emp':
+        str_out = f"SELECT * FROM ({str_out}) WHERE share_apps_matched_emp = 1 AND rev_mult_emp < {REV_MULT_COEFF}*n_apps_matched_emp  AND n_unique_wintype_emp > 1 AND match_mult_emp <= {MATCH_MULT_CUTOFF}"
+
+    return str_out
+
+
+
+#####################
+# LONG POSITION/EDUC MERGE
+#####################
+def get_rel_year_inds_wide(merge_tab, t0 = -1, t1 = 5):
+
+    # join position and education data, unpivot long on variable, then pivot wide on variable x t
+    str_out = f"""
+    PIVOT 
+        (UNPIVOT     
+            (SELECT * EXCLUDE(b.foia_indiv_id, b.user_id, b.t) 
+            FROM ({get_rel_year_inds_pos('mergetest')}) AS a JOIN ({get_rel_year_inds_educ('mergetest')}) AS b ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id AND a.t = b.t)
+        ON * EXCLUDE(foia_indiv_id, user_id, t) 
+        INTO NAME var VALUE val)
+    ON var || t USING FIRST(val)
+    """
+
+    return str_out
+
+def get_rel_year_inds_educ(merge_tab, educ_tab = 'rev_educ_clean', t0 = -1, t1 = 5):
+    """ Takes output of merge function and a table with user_id x education data and returns table at merge x t level with relevant variables (where t is relative to lottery year)
+
+    Parameters
+    -----------
+    merge_tab : str
+        Name or SQL string representing table that is output of merge functions
+    educ_tab: str
+        Name or SQL string representing table with user_id x education data
+    t0, t1: optional inputs to help.long_by_year
+
+    Returns
+    -------
+    String representing SQL query for table at merge x t level with relevant education variables
+    """
+
+    educlong = f"""
+        SELECT *,
+            -- indicator for education being in US
+                CASE WHEN match_country = 'United States' THEN 1 ELSE 0 END AS educ_in_us,
+            -- indicator for education being in country of birth
+                CASE WHEN match_country = foia_country THEN 1 ELSE 0 END AS educ_in_home_country,
+            -- indicator for masters
+                CASE WHEN degree_clean = 'Master' OR degree_clean = 'MBA' THEN 1 ELSE 0 END AS masters,
+            -- indicator for doctors
+                CASE WHEN degree_clean = 'Doctor' THEN 1 ELSE 0 END AS doctors,
+            -- indicator for education having been started before reference year
+                CASE WHEN (MIN(t) OVER(PARTITION BY foia_indiv_id, user_id, education_number)) < 0 THEN 1 ELSE 0 END AS start_before,
+            -- total number of educations in t
+                COUNT(DISTINCT education_number) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_educ_t
+        FROM ({get_long_by_year(merge_tab, educ_tab, long_tab_vars = ', degree_clean, match_country, startdate, enddate, education_number', t0 = t0, t1 = t1, enddatenull = "(CASE WHEN degree_clean = 'Master' OR degree_clean = 'MBA' THEN SUBSTRING(startdate, 1, 4)::INT + 2 ELSE SUBSTRING(startdate, 1, 4)::INT + 4 END)")})   
+        ORDER BY foia_indiv_id, user_id, t 
+    """
+
+    educgroup = f""" 
+    SELECT 
+        foia_indiv_id, user_id, t,
+        CASE WHEN COUNT(DISTINCT education_number) = 0 THEN 1 ELSE 0 END AS no_educations,
+        MAX(educ_in_us) AS educ_in_us, MAX(educ_in_home_country) AS educ_in_home_country,
+        MAX(masters) AS masters, MAX(doctors) AS doctors,
+        MAX(CASE WHEN start_before = 0 AND educ_in_us = 1 THEN 1 ELSE 0 END) AS new_educ_in_us,
+        MAX(CASE WHEN start_before = 0 AND educ_in_home_country = 1 THEN 1 ELSE 0 END) AS new_educ_in_home_country, 
+        MAX(CASE WHEN start_before = 0 AND masters = 1 THEN 1 ELSE 0 END) AS new_masters, 
+        MAX(CASE WHEN start_before = 0 AND doctors = 1 THEN 1 ELSE 0 END) AS new_doctors,
+        MAX(CASE WHEN start_before = 0 THEN 1 ELSE 0 END) AS new_educ
+    FROM ({educlong}) WHERE t IS NOT NULL
+    GROUP BY foia_indiv_id, user_id, t"""
+
+    return educgroup
+
+
+def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 = 5):
+    """ Takes output of merge function and a table with user_id x position data and returns table at merge x t level with relevant variables (where t is relative to lottery year)
+
+    Parameters
+    -----------
+    merge_tab : str
+        Name or SQL string representing table that is output of merge functions
+    pos_tab: str
+        Name or SQL string representing table with user_id x position data
+    t0, t1: optional inputs to help.long_by_year
+
+    Returns
+    -------
+    String representing SQL query for table at merge x t level with relevant position variables
+    """
+
+    # merging long on position x t
+    poslong = f"""
+        SELECT *, 
+        -- indicator for position being in US
+            CASE WHEN country = 'United States' THEN 1 ELSE 0 END AS in_us,
+        -- indicator for position being in country of birth
+            CASE WHEN country = foia_country THEN 1 ELSE 0 END AS in_home_country,
+        -- indicator for being at same company as matched on in lottery
+            CASE WHEN rcid = ref_rcid THEN 1 ELSE 0 END AS same_company,
+        -- creating reference position number variable (first when all positions with t <= 0 and rcid = ref rcid are ordered by t desc, position number asc)
+            MAX(CASE WHEN ref_pos_priority = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id) AS ref_position_number,
+        -- indicator for still being at reference position
+            CASE WHEN position_number = (MAX(CASE WHEN ref_pos_priority = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id)) THEN 1 ELSE 0 END AS same_position,
+        -- indicator for position being started before reference position
+            CASE WHEN position_number < (MAX(CASE WHEN ref_pos_priority = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id)) THEN 1 ELSE 0 END AS start_before,
+        -- imputed total compensation of reference position
+            CASE WHEN position_number = (MAX(CASE WHEN ref_pos_priority = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id)) THEN total_compensation ELSE 0 END AS ref_comp,
+        -- total number of positions in t
+            COUNT(DISTINCT position_id) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_pos_t
+        FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY foia_indiv_id, user_id ORDER BY (CASE WHEN t <= 0 THEN 1 ELSE 0 END) DESC, t DESC, position_number) AS ref_pos_priority FROM ({
+            get_long_by_year(merge_tab, pos_tab, long_tab_vars = ', position_id, position_number, b.rcid AS rcid, startdate, enddate, title_raw, company_raw, country, total_compensation', t0 = t0, t1 = t1)}))  
+        ORDER BY foia_indiv_id, user_id, t 
+    """
+
+    # Filtering and grouping by t
+    posgroup = f""" 
+    SELECT 
+        foia_indiv_id, user_id, t,
+        CASE WHEN COUNT(DISTINCT position_number) = 0 THEN 1 ELSE 0 END AS no_positions,
+        MAX(in_us) AS in_us, MAX(in_home_country) AS in_home_country,
+        MAX(CASE WHEN start_before = 0 AND same_company = 0 THEN 1 ELSE 0 END) AS change_company,
+        MAX(CASE WHEN start_before = 0 AND same_position = 0 THEN 1 ELSE 0 END) AS change_position,
+        SUM(total_compensation * frac_t) AS agg_compensation,
+        COUNT(*) AS n_pos,
+        COUNT(CASE WHEN start_before = 0 THEN 1 END) AS n_pos_startafter,
+        SUM(frac_t) AS frac_t
+    FROM (
+        SELECT *, COUNT(CASE WHEN start_before = 0 THEN 1 ELSE NULL END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_start_after 
+        FROM ({poslong})
+        ) 
+    WHERE t IS NOT NULL AND (start_before = 0 OR n_start_after = 0)
+    GROUP BY foia_indiv_id, user_id, t"""
+
+    return posgroup
+    
+
+def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddatenull = '2025'):
+    """ Takes output of merge function and a table long on user_id x event and returns SQL string for table long on merge x event x t where t is relative to lottery year 
+
+    Parameters
+    -----------
+    merge_tab : str
+        Name or SQL string representing table that is output of merge functions
+    long_tab: str
+        Name or SQL string representing table long on user_id x event where event has start and end date (e.g. position, education)
+    long_tab_vars: str
+        Additional vars from long_tab to keep for future steps (must start with comma)
+    t0, t1, enddatenull: optional inputs to help.long_by_year
+
+    Returns
+    -------
+    String representing SQL query for table long on merge x event x t
+    """
+
+    rawmerge = f"""
+        SELECT foia_indiv_id, a.user_id, foia_country,
+            lottery_year::INT - 1 AS ref_year, a.rcid AS ref_rcid {long_tab_vars}
+        FROM {merge_tab} AS a LEFT JOIN {long_tab} AS b ON a.user_id = b.user_id
+    """
+
+    return help.long_by_year(tab = f'({rawmerge})', t0 = t0, t1 = t1, t_ref = 'x.ref_year', enddatenull = enddatenull, joinids = 'user_id, foia_indiv_id')
+
+
+mergetest = con.sql(merge(postfilt = 'indiv'))
+
+out = con.sql(get_rel_year_inds_wide('mergetest'))
+
 
 #####################
 # DIFFERENT MERGE VERSIONS

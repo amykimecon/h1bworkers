@@ -200,6 +200,42 @@ inst_match_clean = con.sql(
     WHERE lower(REGEXP_REPLACE(university_raw, '[^A-z]', '', 'g')) NOT IN ('highschool', 'ged', 'unknown', 'invalid')
 """)
 
+# Merging users with institution matches
+rev_users_with_inst = con.sql(
+""" 
+SELECT user_id, education_number, degree_clean, ed_startdate, ed_enddate,
+    a.university_raw, match_country, matchscore, matchtype, hs_share,
+-- trying to get earliest education for each country
+    ROW_NUMBER() OVER(PARTITION BY user_id, match_country ORDER BY education_number) AS educ_order,
+-- ID-ing if US high school (only exact matches)
+    MAX(CASE WHEN 
+        (degree_clean = 'High School' OR hs_share >= 0.5) AND 
+        match_country = 'United States' AND 
+        (matchtype = 'exact' OR (n_country_match = 1)) 
+        THEN 1 ELSE 0 END) 
+    OVER(PARTITION BY user_id) AS us_hs_exact,
+-- ID-ing if any US education
+    MAX(CASE WHEN degree_clean != 'Non-Degree' AND match_country = 'United States' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS us_educ,
+-- ADE status 
+    MAX(CASE WHEN degree_clean IN ('Master', 'Doctor', 'MBA') AND match_country = 'United States' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS ade_ind,
+-- ADE year
+    MAX(CASE WHEN degree_clean IN ('Master', 'MBA') AND match_country = 'United States' 
+            THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 1 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) 
+        WHEN degree_clean = 'Doctor' AND match_country = 'United States' 
+            THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 4 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) 
+        END) OVER(PARTITION BY user_id) AS ade_year
+FROM 
+    (SELECT *,
+    -- Getting share of given institution labelled as high school
+        (SUM(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY university_raw))/(SUM(CASE WHEN degree_clean != 'Missing' THEN 1 ELSE 0 END) OVER(PARTITION BY university_raw)) AS hs_share,
+    FROM rev_users_filt) AS a 
+JOIN inst_match_clean AS b 
+ON a.university_raw = b.university_raw 
+""")
+
+# Saving intermediate user x inst x year data
+con.sql(f"COPY (SELECT * EXCLUDE (us_hs_exact, us_educ, ade_ind, ade_year)  FROM rev_users_with_inst) TO '{root}/data/int/rev_educ_long_aug8.parquet'")
+
 # Merging users with institution matches (long) and collapsing to user x country level, filtering out 
 inst_merge_long = con.sql(
 """
@@ -209,36 +245,7 @@ SELECT user_id, university_raw, get_std_country(match_country) AS match_country,
     matchscore, matchtype, education_number, 
     MAX(matchscore) OVER(PARTITION BY user_id, match_country) AS max_matchscore,
     COUNT(*) OVER(PARTITION BY user_id, match_country) AS n_match
-FROM
-    (SELECT user_id, education_number, degree_clean, 
-        a.university_raw, match_country, matchscore, matchtype, hs_share,
-    -- trying to get earliest education for each country
-        ROW_NUMBER() OVER(PARTITION BY user_id, match_country ORDER BY education_number) AS educ_order,
-    -- ID-ing if US high school (only exact matches)
-        MAX(CASE WHEN 
-            (degree_clean = 'High School' OR hs_share >= 0.5) AND 
-            match_country = 'United States' AND 
-            (matchtype = 'exact' OR (n_country_match = 1)) 
-            THEN 1 ELSE 0 END) 
-        OVER(PARTITION BY user_id) AS us_hs_exact,
-    -- ID-ing if any US education
-        MAX(CASE WHEN degree_clean != 'Non-Degree' AND match_country = 'United States' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS us_educ,
-    -- ADE status 
-        MAX(CASE WHEN degree_clean IN ('Master', 'Doctor', 'MBA') AND match_country = 'United States' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS ade_ind,
-    -- ADE year
-        MAX(CASE WHEN degree_clean IN ('Master', 'MBA') AND match_country = 'United States' 
-                THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 1 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) 
-            WHEN degree_clean = 'Doctor' AND match_country = 'United States' 
-                THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 4 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) 
-            END) OVER(PARTITION BY user_id) AS ade_year
-    FROM 
-        (SELECT *,
-        -- Getting share of given institution labelled as high school
-            (SUM(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY university_raw))/(SUM(CASE WHEN degree_clean != 'Missing' THEN 1 ELSE 0 END) OVER(PARTITION BY university_raw)) AS hs_share,
-        FROM rev_users_filt) AS a 
-    JOIN inst_match_clean AS b 
-    ON a.university_raw = b.university_raw
-    ) 
+FROM rev_users_with_inst
 WHERE educ_order = 1 AND match_country != 'NA'
 """
 )
@@ -293,15 +300,26 @@ ON countries.user_id = nt.user_id AND countries.subregion = nt.region)
 ### CLEANING POSITION DATA
 #####################################
 ## testing
-# ids = ",".join(con.sql(help.random_ids_sql('user_id','rev_clean', n = 100)).df()['user_id'].astype(str))
+# ids = ",".join(con.sql(help.random_ids_sql('user_id','rev_clean', n = 1000)).df()['user_id'].astype(str))
 # pos_filt = con.sql(f"SELECT * FROM merged_pos WHERE user_id IN ({ids})")
 
 # # TODO:Cleaning position history -- (impute rcid if company name similar to below,) get rid of duplicates -- also need to clean duplicate users!
 
-merged_pos_clean = con.sql("SELECT *, CASE WHEN max_share_foia > 0 THEN 1 ELSE 0 END AS foia_occ_ind FROM merged_pos LEFT JOIN occ_cw ON merged_pos.role_k1500 = occ_cw.role_k1500")
+pos_with_null_enddates = con.sql(
+"""
+    SELECT a.user_id, a.position_number, a.startdate, a.enddate, b.startdate AS alt_enddate, 
+        CASE WHEN DATEDIFF('month', a.startdate::DATETIME, b.startdate::DATETIME) <= 3 AND jaro_winkler_similarity(a.company_raw, b.company_raw) >= 0.85 THEN 1 ELSE 0 END AS pos_dup_ind,
+        CASE WHEN b.position_number = (MIN(CASE WHEN DATEDIFF('month', a.startdate::DATETIME, b.startdate::DATETIME) >= 6 THEN b.position_number ELSE 10000 END) OVER(PARTITION BY a.user_id, a.position_number)) THEN 1 ELSE 0 END AS next_pos_ind
+    FROM (SELECT * FROM merged_pos WHERE enddate IS NULL) AS a 
+    JOIN (SELECT user_id, position_number, startdate, company_raw FROM merged_pos) AS b 
+    ON a.user_id = b.user_id AND NOT (a.position_number = b.position_number) AND (a.startdate < b.startdate)
+""")
 
-# x = con.sql("SELECT * FROM pos_filt AS a JOIN pos_filt AS b ON a.user_id = b.user_id AND (a.startdate = b.startdate AND a.enddate = b.enddate)")
 
+merged_pos_clean = con.sql("SELECT *, CASE WHEN max_share_foia > 0 THEN 1 ELSE 0 END AS foia_occ_ind FROM merged_pos AS a LEFT JOIN (SELECT user_id, position_number, alt_enddate, pos_dup_ind FROM pos_with_null_enddates WHERE next_pos_ind = 1 OR pos_dup_ind = 1) AS b ON a.user_id = b.user_id AND a.position_number = b.position_number LEFT JOIN occ_cw AS c ON a.role_k1500 = c.role_k1500")
+
+
+con.sql(f"COPY merged_pos_clean TO '{root}/data/int/merged_pos_clean_aug8.parquet'")
 
 # 8/6/25: what to do with null enddates? if last position, can impute as updated dt, but if not last position? if i take next start date, this will cut out freelance/part-time work or work preceding freelance/part-time work (e.g. if i have a FT job and start doing something on the side and hold both jobs concurrently)
 # okay for now just leave as today if null (most conservative -- downside is that enddatediff filter will be less effective)
@@ -334,8 +352,10 @@ merged_pos_user = con.sql(f"""
 #####################################
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
-final_user_merge = con.sql(
-f"""SELECT * FROM (SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt, f_prob, stem_ind, f_prob_nt, fullname, university_raw, country, subregion, inst_score, nanat_score, nanat_subregion_score, nt_subregion_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 0.5*inst_score + 0.25*nanat_subregion_score + 0.25*nt_subregion_score AS total_subregion_score,
+user_merge = con.sql(
+f"""
+SELECT * FROM (
+    SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt, f_prob, stem_ind, f_prob_nt, fullname, university_raw, country, subregion, inst_score, nanat_score, nanat_subregion_score, nt_subregion_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 0.5*inst_score + 0.25*nanat_subregion_score + 0.25*nt_subregion_score AS total_subregion_score,
         MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, 
         MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ,
         MAX(CASE WHEN ade_ind IS NULL THEN 0 ELSE ade_ind END) OVER(PARTITION BY a.user_id) AS ade_ind,
@@ -343,6 +363,8 @@ f"""SELECT * FROM (SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt,
         MAX(0.5*inst_score + 0.5*nanat_score) OVER(PARTITION BY a.user_id) AS max_total_score,
         MAX(CASE WHEN country = 'United States' THEN 0 ELSE 0.5*inst_score + 0.5*nanat_score END) OVER(PARTITION BY a.user_id) AS max_total_score_nonus,
         foia_occ_ind, min_h1b_occ_rank, fields, highest_ed_level
+
+    -- taking original revelio user data, collapsing to user level and creating necessary variables
     FROM (
         SELECT user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt, MAX(stem_ind_postsec) AS stem_ind, ARRAY_AGG(field_clean) FILTER (WHERE field_clean IS NOT NULL) AS fields, 
         CASE WHEN MAX(CASE WHEN degree_clean = 'Doctor' THEN 1 ELSE 0 END) = 1 THEN 'Doctor' 
@@ -358,8 +380,15 @@ f"""SELECT * FROM (SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt,
                 f_prob, fullname FROM rev_users_filt
         ) GROUP BY user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt
     ) AS a 
-LEFT JOIN country_merge_long AS b ON a.user_id = b.user_id
-LEFT JOIN merged_pos_cw AS c ON a.user_id = c.user_id)
+
+    -- left joining on user id with user x country level cleaned data from above
+    LEFT JOIN country_merge_long AS b ON a.user_id = b.user_id
+
+    -- left joining on user id with user-level position information from above
+    LEFT JOIN merged_pos_cw AS c ON a.user_id = c.user_id
+    )
+
+-- filtering on country guess quality 
 WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (total_score >= 0.01 OR nanat_subregion_score + nt_subregion_score >= 0.05)
 """)
 
@@ -372,18 +401,24 @@ WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (
 # cleaning revelio data (collapsing to user x company x country level)
 rev_indiv = con.sql(
 """
-SELECT * FROM (
+SELECT * FROM
+-- start with user x rcid data (get rcid-specific startdate)
+(
     (SELECT user_id, 
         MIN(startdate)::DATETIME AS first_startdate, 
         MAX(CASE WHEN enddate IS NULL THEN '2025-03-01' ELSE enddate END)::DATETIME AS last_enddate, rcid 
-    FROM merged_pos WHERE country = 'United States' AND startdate >= '2015-01-01' GROUP BY user_id, rcid) AS a 
+    FROM merged_pos_clean WHERE country = 'United States' AND startdate >= '2015-01-01' GROUP BY user_id, rcid) AS a 
     JOIN 
     (SELECT rcid FROM samp_to_rcid GROUP BY rcid) AS b 
     ON a.rcid = b.rcid
-) AS pos 
+) AS pos
+
+-- joining on user id with final user merge data from above, filtered on OPT-likely 
 JOIN 
-(SELECT * FROM final_user_merge WHERE (us_hs_exact IS NULL OR us_hs_exact = 0) AND (us_educ IS NULL OR us_educ = 1)) AS users 
+(SELECT * FROM user_merge WHERE (us_hs_exact IS NULL OR us_hs_exact = 0) AND (us_educ IS NULL OR us_educ = 1)) AS users 
 ON pos.user_id = users.user_id
+
+-- left joining on user id with user-level position history data 
 LEFT JOIN
 merged_pos_user AS poshist
 ON pos.user_id = poshist.user_id
@@ -391,4 +426,3 @@ ON pos.user_id = poshist.user_id
 
 con.sql(f"COPY rev_indiv TO '{root}/data/clean/rev_indiv.parquet'")
 print('Done!')
-
