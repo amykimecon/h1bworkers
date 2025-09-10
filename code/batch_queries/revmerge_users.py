@@ -18,7 +18,7 @@ if os.environ.get('USER') == 'amykimecon':
     out_path = "/scratch/princeton/amykimecon"
 
 else:
-    sys.path.append('../')
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
     from config import * 
     in_path = f'{root}/data/wrds/wrds_in'
     out_path = f'{root}/data/int'

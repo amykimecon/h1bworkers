@@ -371,6 +371,7 @@ def chunk_merge(filestub, j, outfile = "", verbose = False):
 # function to iterate over j chunks of userids (splitting each chunk further into k chunks)
 def chunk_query(df, j, fun, jstart = 0, outpath = None, d = 10000, verbose = False, extraverbose = False):
     n = df.shape[0] #total number of items
+    #print(f"n: {n}")
 
     # base case: if df has nrow <= d and not first call then perform function on df and return
     if n <= d and outpath is None:
@@ -395,7 +396,8 @@ def chunk_query(df, j, fun, jstart = 0, outpath = None, d = 10000, verbose = Fal
                 if verbose:
                     print(f"\nchunk #{i+1} of {j}", end = '')
                 t0 = time.time()
-                chunks = chunks + [chunk_query(df.iloc[k*i:k*(i+1)], j = j, fun = fun, outpath = None, d = d, verbose = extraverbose)]
+                if k*i <= n:
+                    chunks = chunks + [chunk_query(df.iloc[k*i:k*(i+1)], j = j, fun = fun, outpath = None, d = d, verbose = extraverbose)]
                 t1 = time.time()
 
                 if verbose:

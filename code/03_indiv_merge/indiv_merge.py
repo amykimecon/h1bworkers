@@ -10,56 +10,51 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import * # File Description: Merging H-1B and Revelio Individual Data
-# Author: Amy Kim
-# Date Created: Jun 30 2025
-
-# Imports and Paths
-import duckdb as ddb
-import pandas as pd
-import numpy as np
-import os
-import sys
-
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
 
-con = ddb.connect()
+con_indiv = ddb.connect()
 
 #####################
 # IMPORTING DATA
 #####################
 ## foia
-foia_indiv = con.read_parquet(f'{root}/data/clean/foia_indiv.parquet')
+foia_indiv = con_indiv.read_parquet(f'{root}/data/clean/foia_indiv.parquet')
 
 ## revelio
-rev_indiv = con.read_parquet(f'{root}/data/clean/rev_indiv.parquet')
+rev_indiv = con_indiv.read_parquet(f'{root}/data/clean/rev_indiv.parquet')
 
 ## revelio education data
-rev_educ = con.read_parquet(f'{root}/data/int/rev_educ_long_aug8.parquet')
+rev_educ = con_indiv.read_parquet(f'{root}/data/int/rev_educ_long_aug8.parquet')
 
 # collapsing to user x institution (for now use country with top score)
-rev_educ_clean = con.sql("SELECT *, ed_startdate AS startdate, ed_enddate AS enddate FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY user_id, education_number ORDER BY matchscore DESC) AS match_order FROM rev_educ WHERE degree_clean != 'Non-Degree') WHERE match_order = 1")
+rev_educ_clean = con_indiv.sql("SELECT *, ed_startdate AS startdate, ed_enddate AS enddate FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY user_id, education_number ORDER BY matchscore DESC) AS match_order FROM rev_educ WHERE degree_clean != 'Non-Degree') WHERE match_order = 1")
 
 # Importing User x Position-level Data (all positions, cleaned and deduplicated)
-merged_pos = con.read_parquet(f'{root}/data/int/merged_pos_clean_aug8.parquet')
+merged_pos = con_indiv.read_parquet(f'{root}/data/int/merged_pos_clean_aug8.parquet')
 
 # removing duplicates, setting alt enddate as enddate if missing
-merged_pos_clean = con.sql("SELECT * EXCLUDE (enddate), CASE WHEN alt_enddate IS NULL THEN enddate ELSE alt_enddate END AS enddate FROM merged_pos WHERE pos_dup_ind IS NULL OR pos_dup_ind = 0")
+merged_pos_clean = con_indiv.sql("SELECT * EXCLUDE (enddate), CASE WHEN alt_enddate IS NULL THEN enddate ELSE alt_enddate END AS enddate FROM merged_pos WHERE pos_dup_ind IS NULL OR pos_dup_ind = 0")
 
 #####################
 # WRAPPER FUNCTIONS FOR MERGE
 #####################
 # GET DF 
-def merge_df(con = con, rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
-    return con.sql(merge(rev_tab, foia_tab, with_t_vars, postfilt, MATCH_MULT_CUTOFF, REV_MULT_COEFF, foia_prefilt, subregion, COUNTRY_SCORE_CUTOFF, MONTH_BUFFER, YOB_BUFFER, F_PROB_BUFFER)).df()
+def merge_df(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, verbose = False, con = con_indiv):
+    return con.sql(merge(rev_tab = rev_tab, foia_tab = foia_tab, with_t_vars = with_t_vars, postfilt = postfilt, MATCH_MULT_CUTOFF = MATCH_MULT_CUTOFF, REV_MULT_COEFF = REV_MULT_COEFF, foia_prefilt = foia_prefilt, subregion = subregion, COUNTRY_SCORE_CUTOFF = COUNTRY_SCORE_CUTOFF, MONTH_BUFFER = MONTH_BUFFER, YOB_BUFFER = YOB_BUFFER, F_PROB_BUFFER = F_PROB_BUFFER, verbose = verbose, con = con)).df()
 
 # WRAPPER
-def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8):
+def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, verbose = False, con = con_indiv):
     str_out = merge_filt_func(f"({merge_raw_func(rev_tab, foia_tab, foia_prefilt=foia_prefilt, subregion=subregion)})", postfilt=postfilt, MATCH_MULT_CUTOFF=MATCH_MULT_CUTOFF, REV_MULT_COEFF=REV_MULT_COEFF, COUNTRY_SCORE_CUTOFF=COUNTRY_SCORE_CUTOFF, MONTH_BUFFER=MONTH_BUFFER, YOB_BUFFER=YOB_BUFFER, F_PROB_BUFFER=F_PROB_BUFFER)
 
     if with_t_vars:
         str_out = f"SELECT * EXCLUDE (b.foia_indiv_id, b.user_id) FROM ({str_out}) AS a LEFT JOIN ({get_rel_year_inds_wide(f"({str_out})")}) AS b ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id"
+    
+    if verbose:
+        print(f"Main H-1B Sample Size: {con.sql(f"SELECT COUNT(DISTINCT foia_indiv_id) FROM {foia_tab} {foia_prefilt}").df().iloc[0,0]} Applications")
+        print(f"Main LinkedIn Sample Size: {con.sql(f"SELECT COUNT(DISTINCT user_id) FROM {rev_tab} WHERE (stem_ind IS NULL OR stem_ind = 1) AND (foia_occ_ind IS NULL OR foia_occ_ind = 1)").df().iloc[0,0]} Users")
+
+        ns = con.sql(f"SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM ({str_out})").df()
+        print(f"Resulting Merge Size: {ns.iloc[0,0]} potential matches for {ns.iloc[0,1]} applications (multiplicity {round(ns.iloc[0,0]/ns.iloc[0,1],2)})")
 
     return str_out
 
@@ -105,7 +100,7 @@ def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV
             (ABS(yob::INTEGER - est_yob) <= {YOB_BUFFER} OR (est_yob IS NULL AND yob::INTEGER <= max_yob))
             AND startdatediff <= {0+MONTH_BUFFER} AND startdatediff >= {-36 - MONTH_BUFFER} AND enddatediff >= {0-MONTH_BUFFER}
         ) 
-    WHERE match_order_ind = 1 AND stem_ind = 1 AND foia_occ_ind = 1 AND (country_score > {COUNTRY_SCORE_CUTOFF} OR max_country_score <= {COUNTRY_SCORE_CUTOFF})
+    WHERE match_order_ind = 1 AND (stem_ind IS NULL OR stem_ind = 1) AND (foia_occ_ind IS NULL OR foia_occ_ind = 1) AND (country_score > {COUNTRY_SCORE_CUTOFF} OR max_country_score <= {COUNTRY_SCORE_CUTOFF})
     """
     
     if postfilt == 'indiv':
@@ -113,7 +108,7 @@ def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV
     
     str_out = f"""
     SELECT *, total_score/(SUM(total_score) OVER(PARTITION BY foia_indiv_id)) AS weight_norm FROM (
-        SELECT foia_indiv_id, FEIN, lottery_year, rcid, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_work_in_us, n_apps, status_type, ade_ind, ade_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt,
+        SELECT foia_indiv_id, FEIN, lottery_year, rcid, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_work_in_us, n_apps, status_type, ade_ind, ade_year, last_grad_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, high_rep_emp_ind, no_rep_emp_ind, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt,
             (COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year))/n_apps AS share_apps_matched_emp,
             COUNT(DISTINCT user_id) OVER(PARTITION BY FEIN, lottery_year) AS n_rev_users_emp,
             (COUNT(*) OVER(PARTITION BY FEIN, lottery_year))/(COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year)) AS match_mult_emp,
@@ -232,6 +227,8 @@ def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 =
         SELECT *, 
         -- indicator for position being in US
             CASE WHEN country = 'United States' THEN 1 ELSE 0 END AS in_us,
+        -- indicator for position being null
+            CASE WHEN country IS NULL THEN 1 ELSE 0 END AS loc_null,
         -- indicator for position being in country of birth
             CASE WHEN country = foia_country THEN 1 ELSE 0 END AS in_home_country,
         -- indicator for being at same company as matched on in lottery
@@ -257,6 +254,7 @@ def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 =
         foia_indiv_id, user_id, t,
         CASE WHEN COUNT(DISTINCT position_number) = 0 THEN 1 ELSE 0 END AS no_positions,
         MAX(in_us) AS in_us, MAX(in_home_country) AS in_home_country,
+        MAX(loc_null) AS loc_null,
         MAX(CASE WHEN start_before = 0 AND same_company = 0 THEN 1 ELSE 0 END) AS change_company,
         MAX(CASE WHEN start_before = 0 AND same_position = 0 THEN 1 ELSE 0 END) AS change_position,
         SUM(total_compensation * frac_t) AS agg_compensation,
@@ -300,6 +298,9 @@ def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddat
     return help.long_by_year(tab = f'({rawmerge})', t0 = t0, t1 = t1, t_ref = 'x.ref_year', enddatenull = enddatenull, joinids = 'user_id, foia_indiv_id')
 
 
+# x = con_indiv.sql(merge(with_t_vars = True, MATCH_MULT_CUTOFF = 2))
+# full_df = con.sql(f"COPY ({merge(with_t_vars=True)}) TO '{root}/data/int/merge_filt_base_with_t_vars_aug21.parquet'")
+
 #mergetest = con.sql(merge(postfilt = 'indiv'))
 
 #out = con.sql(get_rel_year_inds_wide('mergetest'))
@@ -309,12 +310,16 @@ def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddat
 
 # out = con.sql(get_rel_year_inds_wide('mergetest'))
 
+# for c in [2,4,6]:
+#     con_indiv.sql(f"COPY ({merge(with_t_vars = True, MATCH_MULT_CUTOFF = c, postfilt = 'indiv')}) TO '{root}/data/int/merge_filt_mult{c}_sep8.parquet'")
 
-#####################
-# DIFFERENT MERGE VERSIONS
+# # con_indiv.sql(f"COPY ({merge(with_t_vars = True)}) TO '{root}/data/int/merge_filt_baseline_sep8.parquet'")
+
 # #####################
-# con.sql(f"COPY ({merge(with_t_vars=True)}) TO '{root}/data/int/merge_filt_base_jul30.parquet'")
-# con.sql(f"COPY ({merge(foia_prefilt = "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan'")}) TO '{root}/data/int/merge_filt_prefilt_jul30.parquet'")
+# # DIFFERENT MERGE VERSIONS
+# # #####################
+# # con.sql(f"COPY ({merge(with_t_vars=True)}) TO '{root}/data/int/merge_filt_base_jul30.parquet'")
+con_indiv.sql(f"COPY ({merge(foia_prefilt = "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan'", with_t_vars = True)}) TO '{root}/data/int/merge_filt_prefilt_sep8.parquet'")
 # con.sql(f"COPY ({merge(postfilt='indiv')}) TO '{root}/data/int/merge_filt_postfilt_jul30.parquet'")
 
 

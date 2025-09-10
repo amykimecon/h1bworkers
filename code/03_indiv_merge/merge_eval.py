@@ -42,6 +42,7 @@ merged_pos = con.read_parquet(f'{root}/data/int/merged_pos_clean_aug8.parquet')
 
 # removing duplicates, setting alt enddate as enddate if missing
 merged_pos_clean = con.sql("SELECT * EXCLUDE (enddate), CASE WHEN alt_enddate IS NULL THEN enddate ELSE alt_enddate END AS enddate FROM merged_pos WHERE pos_dup_ind IS NULL OR pos_dup_ind = 0")
+
 #####################
 # CLEANING FOIA DATA
 #####################
@@ -56,10 +57,14 @@ foiadf['fvisa'] = np.where(foiadf['prev_visa'].isnull() == 0, np.where(foiadf['p
 # TODO: some indicators for top industries and occupations 
 
 #####################
+# IMPORTING DATA
+#####################
+# Testing/Spot-Checking
+
+
+#####################
 # MERGE SAMPLES
 #####################
-
-
 # function that takes in a list of mergedfs and a list of column names and outputs a modified foiadf with columns for the max, mean, and sum total scores of the individual id in the foiadf + indicator for if foia_indiv_id was successfully merged
 def foia_compare_df(mergedfs, colnames, foiadf = foiadf):
     if len(mergedfs) != len(colnames):
@@ -155,12 +160,12 @@ def merge_listmatch(mergedf, listcol, matchcol, prefix):
 
 # 4. pivot long on job title, check if match
 
-# mergedf = merge_df().set_index(['foia_indiv_id'])
-# foiadf_withmerge = foia_compare_df([mergedf], ['baseline'])
-# merge_eval(mergedf)
-# merge_eval(merge_df(foia_prefilt = "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan'"))
+mergedf = merge_df(verbose=True).set_index(['foia_indiv_id'])
+foiadf_withmerge = foia_compare_df([mergedf], ['baseline'])
+merge_eval(mergedf)
+merge_eval(merge_df(foia_prefilt = "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan'", verbose=True))
 
-# merge_eval(merge_df(postfilt = 'indiv'))
+merge_eval(merge_df(postfilt = 'indiv', verbose=True))
 
 
 
@@ -182,9 +187,9 @@ for mergedf in mergedfs:
         print(v)
         mergedf[f'{v}alt'] = mergedf[v] * mergedf['weight_norm']
         print(mergedf.groupby('foia_indiv_id')[f'{v}alt'].agg('sum').mean())
-    # mergedf['leave1norm'] = mergedf['weight_norm'] * mergedf['change_company1']
-    # mergedf['leave2norm'] = mergedf['weight_norm'] * mergedf['change_company2']
-    # print(1 - mergedf.groupby('foia_indiv_id')[['leave1norm', 'leave2norm']].agg('sum').mean())
+    mergedf['leave1norm'] = mergedf['weight_norm'] * mergedf['change_company1']
+    mergedf['leave2norm'] = mergedf['weight_norm'] * mergedf['change_company2']
+    print(1 - mergedf.groupby('foia_indiv_id')[['leave1norm', 'leave2norm']].agg('sum').mean())
 
     # print(mergedf.groupby('foia_indiv_id')[['in_us1', 'in_us2', 'promote1', 'promote2', 'new_educ1', 'new_educ2']].agg('sum').mean())
 

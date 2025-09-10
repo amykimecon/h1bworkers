@@ -15,6 +15,10 @@ from config import *
 CUTOFF_SHARE_MULTIREG=0
 CUTOFF_N_APPS_TOT=10
 
+# TOGGLE FOR TESTING
+test = False
+test_user = 322249231.0
+
 con = ddb.connect()
 
 # Importing Country Codes Crosswalk
@@ -52,10 +56,10 @@ foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all
 foia_with_ids = con.sql("SELECT *, CASE WHEN matched IS NULL THEN 0 ELSE matched END AS matchind FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id, 1 AS matched FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
 
 # Importing User x Education-level Data (From WRDS Server)
-rev_raw = con.read_parquet(f"{wrds_out}/rev_user_merge0.parquet")
+rev_raw = con.read_parquet(f"{root}/data/int/wrds_users_sep2.parquet") #con.read_parquet(f"{wrds_out}/rev_user_merge0.parquet")
 
-for j in range(1,10):
-    rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{wrds_out}/rev_user_merge{j}.parquet'")
+# for j in range(1,10):
+#     rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{wrds_out}/rev_user_merge{j}.parquet'")
 
 # Importing Institution x Country Matches
 inst_country_cw = con.read_parquet(f"{root}/data/int/rev_inst_countries_jun30.parquet")
@@ -88,15 +92,16 @@ GROUP BY foia_id, lottery_year, main_rcid
 # IDing outsourcing/staffing companies (defining share of applications that are multiple registrations ['duplicates']; counting total number of apps)
 foia_main_samp_unfilt = con.sql("SELECT FEIN, lottery_year, COUNT(CASE WHEN ben_multi_reg_ind = 1 THEN 1 END)/COUNT(*) AS share_multireg, COUNT(*) AS n_apps_tot, COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END) AS n_success, COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END)/COUNT(*) AS win_rate FROM foia_with_ids GROUP BY FEIN, lottery_year")
 
-n = con.sql('SELECT COUNT(*) FROM foia_main_samp_unfilt').df().iloc[0,0]
-print(f"Total Employer x Years: {n}")
-print(f'Employer x Years with Fewer than 50 Apps: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE n_apps_tot < 50").df().iloc[0,0]}')
-print(f'Employer x Years with Fewer than 50% Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg < 0.5").df().iloc[0,0]}')
-print(f'Employer x Years with No Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg = 0").df().iloc[0,0]}')
+# counts (verbose)
+# n = con.sql('SELECT COUNT(*) FROM foia_main_samp_unfilt').df().iloc[0,0]
+# print(f"Total Employer x Years: {n}")
+# print(f'Employer x Years with Fewer than 50 Apps: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE n_apps_tot < 50").df().iloc[0,0]}')
+# print(f'Employer x Years with Fewer than 50% Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg < 0.5").df().iloc[0,0]}')
+# print(f'Employer x Years with No Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg = 0").df().iloc[0,0]}')
 
 # main sample (conservative): companies with fewer than 50 applications and no duplicate registrations TODO: declare these as constants at top
-foia_main_samp = con.sql(f'SELECT * FROM foia_main_samp_unfilt WHERE n_apps_tot <= {CUTOFF_N_APPS_TOT} AND share_multireg <= {CUTOFF_SHARE_MULTIREG}')
-print(f"Preferred Sample: {foia_main_samp.df().shape[0]} ({round(100*foia_main_samp.df().shape[0]/n)}%)")
+# foia_main_samp = con.sql(f'SELECT * FROM foia_main_samp_unfilt WHERE n_apps_tot <= {CUTOFF_N_APPS_TOT} AND share_multireg <= {CUTOFF_SHARE_MULTIREG}')
+# print(f"Preferred Sample: {foia_main_samp.df().shape[0]} ({round(100*foia_main_samp.df().shape[0]/n)}%)")
 
 # computing win rate by sample
 foia_main_samp_def = con.sql(f"SELECT *, CASE WHEN n_apps_tot <= {CUTOFF_N_APPS_TOT} AND share_multireg <= {CUTOFF_SHARE_MULTIREG} THEN 'insamp' ELSE 'outsamp' END AS sampgroup FROM foia_main_samp_unfilt")
@@ -106,7 +111,8 @@ con.sql("SELECT sampgroup, SUM(n_success)/SUM(n_apps_tot) AS total_win_rate FROM
 samp_to_rcid = con.sql("SELECT a.FEIN, a.lottery_year, sampgroup, b.foia_id, c.main_rcid, CASE WHEN rcid IS NULL THEN c.main_rcid ELSE d.rcid END AS rcid FROM ((SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS a JOIN (SELECT FEIN, lottery_year, foia_id FROM foia_with_ids GROUP BY FEIN, lottery_year, foia_id) AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year JOIN (SELECT main_rcid, foia_id FROM id_merge) AS c ON b.foia_id = c.foia_id) LEFT JOIN (SELECT main_rcid, rcid FROM dup_rcids) AS d ON c.main_rcid = d.main_rcid")
 
 # writing company sample crosswalk to file
-con.sql(f"COPY samp_to_rcid TO '{root}/data/int/company_merge_sample_jul10.parquet'")
+if not test:
+    con.sql(f"COPY samp_to_rcid TO '{root}/data/int/company_merge_sample_jul10.parquet'")
 
 # selecting user ids from list of positions based on whether company in sample and start date is after 2015 (conservative bandwidth) -- TODO: declare cutoff date as constant; TODO: move startdate filter into merged_pos query, avoid pulling people who got promoted after 2015 but started working before 2015
 user_samp = con.sql("SELECT user_id FROM ((SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a JOIN (SELECT user_id, rcid FROM merged_pos WHERE country = 'United States' AND startdate >= '2015-01-01') AS b ON a.rcid = b.rcid) GROUP BY user_id")
@@ -115,7 +121,30 @@ print('Done!')
 #####################################
 ### CLEANING AND SAVING FOIA INDIVIDUAL DATA
 #####################################
-print('Cleaning and Saving Individual-level H-1B Data...')
+print('Cleaning Individual-level H-1B Data...')
+
+# identifying companies that submit 'repeat applications' for losers
+match_rep = con.sql(
+"""
+SELECT FEIN, 
+-- indicator for no losers matched over subsequent years (unless no apps at all over other years)
+    CASE WHEN MEAN(share_rep) = 0 AND MEAN(n_ly) > 1 AND COUNT(*) > 1 THEN 1 ELSE 0 END AS no_rep_emp_ind,
+-- indicator for over 80 percent of losers matched over subsequent years
+    CASE WHEN MEAN(share_rep) >= 0.8 THEN 1 ELSE 0 END AS high_rep_emp_ind,
+    MEAN(share_rep) AS share_rep, MEAN(n_ly) AS n_ly, COUNT(*) AS n
+FROM (
+    SELECT a.lottery_year AS base_ly, 
+        a.FEIN AS FEIN, b.FEIN AS match_FEIN,
+        a.gender, a.ben_year_of_birth, a.country_of_nationality, a.n_ly,
+        (COUNT(match_FEIN) OVER(PARTITION BY a.FEIN, a.lottery_year))/(COUNT(*) OVER(PARTITION BY a.lottery_year, a.FEIN)) AS share_rep 
+    FROM (
+        SELECT * FROM (SELECT *, COUNT(DISTINCT lottery_year) OVER(PARTITION BY FEIN) AS n_ly FROM foia_raw_file) WHERE FEIN != '(b)(3) (b)(6) (b)(7)(c)' AND lottery_year::INT < 2024 AND status_type != 'SELECTED'
+    ) AS a 
+    LEFT JOIN (SELECT * FROM foia_raw_file WHERE FEIN != '(b)(3) (b)(6) (b)(7)(c)') AS b 
+    ON a.lottery_year::INT = b.lottery_year::INT - 1 AND a.gender = b.gender AND a.ben_year_of_birth = b.ben_year_of_birth AND a.country_of_nationality = b.country_of_nationality AND a.FEIN = b.FEIN
+) GROUP BY FEIN
+""")
+
 foia_indiv = con.sql(
 f"""SELECT a.FEIN, a.lottery_year, country, 
         get_country_subregion(country) AS subregion, 
@@ -145,31 +174,51 @@ f"""SELECT a.FEIN, a.lottery_year, country,
             WHEN NAICS2 = '51' THEN 'Other Information'
             WHEN NAICS_CODE = 'NA' OR NAICS2 = '99' THEN NULL
             ELSE 'Other' END AS industry,
-        {help.field_clean_regex_sql('BEN_PFIELD_OF_STUDY')} AS field_clean, DOT_CODE, {help.inst_clean_regex_sql('JOB_TITLE')} AS job_title, n_apps, n_unique_country, foia_indiv_id, main_rcid, rcid 
+        {help.field_clean_regex_sql('BEN_PFIELD_OF_STUDY')} AS field_clean, DOT_CODE, {help.inst_clean_regex_sql('JOB_TITLE')} AS job_title, n_apps, n_unique_country, no_rep_emp_ind, high_rep_emp_ind, foia_indiv_id, main_rcid, rcid 
     FROM (
         SELECT FEIN, lottery_year, get_std_country(country_of_nationality) AS country, 
-            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY FEIN, lottery_year) AS n_apps, COUNT(DISTINCT country_of_birth) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id 
+            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY FEIN, lottery_year) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id 
         FROM foia_raw_file WHERE FEIN != '(b)(3) (b)(6) (b)(7)(c)'
-    ) AS a JOIN samp_to_rcid AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year WHERE sampgroup = 'insamp'""")
+    ) AS a JOIN samp_to_rcid AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year
+    LEFT JOIN (SELECT FEIN, no_rep_emp_ind, high_rep_emp_ind, share_rep FROM match_rep) AS c ON a.FEIN = c.FEIN 
+    WHERE sampgroup = 'insamp'""")
 
-con.sql(f"COPY foia_indiv TO '{root}/data/clean/foia_indiv.parquet'")
+if not test:
+    print("Writing FOIA indiv to file...")
+    con.sql(f"COPY foia_indiv TO '{root}/data/clean/foia_indiv.parquet'")
 print('Done!')
 
 #####################################
 ### CLEANING AND MERGING REVELIO USERS TO COUNTRIES
 #####################################
-print('Cleaning and Saving Individual-level Revelio User Data...')
+print('Cleaning Individual-level Revelio User Data...')
+
+# # Test for specific firm
+# rev_users_filt = con.sql(f"""
+# SELECT * FROM
+#     (SELECT 
+#     fullname, degree, user_id, rcid,
+#     {help.degree_clean_regex_sql()} AS degree_clean,
+#     {help.inst_clean_regex_sql('university_raw')} AS univ_raw_clean,
+#     {help.stem_ind_regex_sql()} AS stem_ind,
+#     {help.field_clean_regex_sql('field_raw')} AS field_clean,
+#     CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
+#     university_raw, f_prob, education_number, ed_enddate, ed_startdate, ROW_NUMBER() OVER(PARTITION BY user_id, education_number) AS dup_num, updated_dt
+#     FROM rev_raw)
+# WHERE rcid = 857329.0
+# """)
 
 # Cleaning Revelio Data, removing duplicates
 rev_clean = con.sql(
 f"""
 SELECT * FROM
     (SELECT 
-    fullname, degree, user_id, rcid,
+    fullname, degree, user_id, 
     {help.degree_clean_regex_sql()} AS degree_clean,
     {help.inst_clean_regex_sql('university_raw')} AS univ_raw_clean,
     {help.stem_ind_regex_sql()} AS stem_ind,
     {help.field_clean_regex_sql('field_raw')} AS field_clean,
+    profile_linkedin_url, user_location, user_country,
     CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
     university_raw, f_prob, education_number, ed_enddate, ed_startdate, ROW_NUMBER() OVER(PARTITION BY user_id, education_number) AS dup_num, updated_dt
     FROM rev_raw)
@@ -180,20 +229,35 @@ WHERE dup_num = 1
 # Filtering to only include users in the preferred sample
 rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a.user_id = b.user_id")
 
-# # temp for testing
-# ids = ",".join(con.sql(help.random_ids_sql('user_id','rev_clean', n = 100)).df()['user_id'].astype(str))
-# rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a.user_id = b.user_id WHERE a.user_id IN ({ids})")
+# testing
+if test:
+    ids = ",".join(con.sql(help.random_ids_sql('user_id','rev_clean', n = 100)).df()['user_id'].astype(str))
+    rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a.user_id = b.user_id WHERE a.user_id IN ({ids}) OR a.user_id = {test_user}")
 
 # Cleaning name matches (long on country)
-nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country(raw_eth) AS nanat_country, nanat_prob FROM (UNPIVOT (SELECT fullname_clean, UNNEST(pred_nats_name) FROM nanats) ON COLUMNS(* EXCLUDE (fullname_clean)) INTO NAME raw_eth VALUE nanat_prob)) GROUP BY fullname_clean, nanat_country")
+# testing
+if test:
+    nanats_long = con.sql(
+        f"""SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (
+            SELECT fullname_clean, get_std_country(raw_eth) AS nanat_country, nanat_prob FROM (
+                UNPIVOT (
+                    SELECT a.fullname_clean, UNNEST(pred_nats_name) FROM nanats AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean
+                ) 
+                ON COLUMNS(* EXCLUDE (fullname_clean)) INTO NAME raw_eth VALUE nanat_prob
+            )
+        ) GROUP BY fullname_clean, nanat_country""")
 
-# # # temp for testing
-# nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country({help.nanats_to_long('pred_nats_name')}[1]) AS nanat_country, {help.nanats_to_long('pred_nats_name')}[2]::FLOAT AS nanat_prob FROM (SELECT * FROM nanats AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean)) GROUP BY fullname_clean, nanat_country")
-# nts_long = con.sql("SELECT * FROM nts_long AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean")
+    # nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country({help.nanats_to_long('pred_nats_name')}[1]) AS nanat_country, {help.nanats_to_long('pred_nats_name')}[2]::FLOAT AS nanat_prob FROM (SELECT * FROM nanats AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean)) GROUP BY fullname_clean, nanat_country")
+
+    nts_long = con.sql("SELECT * FROM nts_long AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean")
+# not testing
+else:
+    nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country(raw_eth) AS nanat_country, nanat_prob FROM (UNPIVOT (SELECT fullname_clean, UNNEST(pred_nats_name) FROM nanats) ON COLUMNS(* EXCLUDE (fullname_clean)) INTO NAME raw_eth VALUE nanat_prob)) GROUP BY fullname_clean, nanat_country")
+
 
 # Cleaning institution matches 
 inst_match_clean = con.sql(
-"""
+"""-
     SELECT *, 
         COUNT(*) OVER(PARTITION BY university_raw) AS n_country_match 
     FROM inst_country_cw
@@ -220,10 +284,12 @@ SELECT user_id, education_number, degree_clean, ed_startdate, ed_enddate,
     MAX(CASE WHEN degree_clean IN ('Master', 'Doctor', 'MBA') AND match_country = 'United States' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS ade_ind,
 -- ADE year
     MAX(CASE WHEN degree_clean IN ('Master', 'MBA') AND match_country = 'United States' 
-            THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 1 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) 
+            THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 2 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) 
         WHEN degree_clean = 'Doctor' AND match_country = 'United States' 
             THEN (CASE WHEN ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 4 ELSE SUBSTRING(ed_enddate, 1, 4)::INT END) 
-        END) OVER(PARTITION BY user_id) AS ade_year
+        END) OVER(PARTITION BY user_id) AS ade_year,
+-- Latest Degree Year
+    MAX(CASE WHEN match_country = 'United States' AND ed_enddate IS NULL AND ed_startdate IS NOT NULL AND degree_clean NOT IN ('Master','MBA','Associate') THEN SUBSTRING(ed_startdate, 1, 4)::INT + 4 WHEN match_country = 'United States' AND ed_enddate IS NULL AND ed_startdate IS NOT NULL THEN SUBSTRING(ed_startdate, 1, 4)::INT + 2 WHEN match_country = 'United States' THEN SUBSTRING(ed_enddate, 1, 4)::INT ELSE NULL END) OVER(PARTITION BY user_id) AS last_grad_year
 FROM 
     (SELECT *,
     -- Getting share of given institution labelled as high school
@@ -234,13 +300,15 @@ ON a.university_raw = b.university_raw
 """)
 
 # Saving intermediate user x inst x year data
-con.sql(f"COPY (SELECT * EXCLUDE (us_hs_exact, us_educ, ade_ind, ade_year)  FROM rev_users_with_inst) TO '{root}/data/int/rev_educ_long_aug8.parquet'")
+if not test:
+    print("Saving intermediate copy of users with institutions to file...")
+    con.sql(f"COPY (SELECT * EXCLUDE (us_hs_exact, us_educ, ade_ind, ade_year)  FROM rev_users_with_inst) TO '{root}/data/int/rev_educ_long_aug8.parquet'")
 
 # Merging users with institution matches (long) and collapsing to user x country level, filtering out 
 inst_merge_long = con.sql(
 """
 SELECT user_id, university_raw, get_std_country(match_country) AS match_country, 
-    us_hs_exact, us_educ, ade_ind, ade_year, 
+    us_hs_exact, us_educ, ade_ind, ade_year, last_grad_year,
     CASE WHEN degree_clean = 'High School' OR hs_share > 0.9 THEN matchscore WHEN degree_clean = 'Bachelor' THEN matchscore*0.8 ELSE matchscore*0.5 END AS matchscore_corr, 
     matchscore, matchtype, education_number, 
     MAX(matchscore) OVER(PARTITION BY user_id, match_country) AS max_matchscore,
@@ -267,9 +335,10 @@ nt_merge_long = con.sql("""SELECT user_id, a.fullname_clean, region, prob, f_pro
     nts_long AS b 
     ON a.fullname_clean = b.fullname_clean """)
 
+# combining all country matches
 country_merge_long = con.sql(
 """
-SELECT user_id, MAX(fullname_clean) OVER(PARTITION BY user_id), country, subregion, nanat_score, inst_score, MAX(f_prob_nt) OVER(PARTITION BY user_id) AS f_prob_nt, SUM(nanat_score) OVER(PARTITION BY user_id, subregion) AS nanat_subregion_score, nt_subregion_score, university_raw, inst_score, us_hs_exact, us_educ, ade_ind, ade_year
+SELECT user_id, MAX(fullname_clean) OVER(PARTITION BY user_id), country, subregion, nanat_score, inst_score, MAX(f_prob_nt) OVER(PARTITION BY user_id) AS f_prob_nt, SUM(nanat_score) OVER(PARTITION BY user_id, subregion) AS nanat_subregion_score, nt_subregion_score, university_raw, inst_score, us_hs_exact, us_educ, ade_ind, ade_year, last_grad_year
 FROM (
 SELECT  
     CASE WHEN countries.user_id IS NULL THEN nt.user_id ELSE countries.user_id END AS user_id,
@@ -279,7 +348,7 @@ SELECT
     CASE WHEN countries.nanat_score IS NULL THEN 0 ELSE nanat_score END AS nanat_score,
     f_prob_nt, 
     CASE WHEN prob IS NULL THEN 0 ELSE prob END AS nt_subregion_score, university_raw, 
-    CASE WHEN countries.inst_score IS NULL THEN 0 ELSE inst_score END AS inst_score, us_hs_exact, us_educ, ade_ind, ade_year
+    CASE WHEN countries.inst_score IS NULL THEN 0 ELSE inst_score END AS inst_score, us_hs_exact, us_educ, ade_ind, ade_year, last_grad_year
 FROM (
     SELECT 
         CASE WHEN a.user_id IS NULL THEN b.user_id ELSE a.user_id END AS user_id, fullname_clean, university_raw,
@@ -287,7 +356,7 @@ FROM (
         CASE WHEN match_country IS NULL THEN get_country_subregion(nanat_country) ELSE get_country_subregion(match_country) END AS subregion, 
         CASE WHEN match_country IS NULL THEN 0 ELSE matchscore_corr END AS inst_score, 
         CASE WHEN nanat_country IS NULL THEN 0 ELSE nanat_prob END AS nanat_score,
-        us_hs_exact, us_educ, ade_ind, ade_year
+        us_hs_exact, us_educ, ade_ind, ade_year, last_grad_year
     FROM inst_merge_long AS a 
     FULL JOIN name_merge_long AS b 
     ON a.user_id = b.user_id AND a.match_country = b.nanat_country
@@ -296,12 +365,16 @@ FULL JOIN nt_merge_long AS nt
 ON countries.user_id = nt.user_id AND countries.subregion = nt.region)
 """)
 
+print("Done!")
+
 #####################################
 ### CLEANING POSITION DATA
 #####################################
-## testing
-# ids = ",".join(con.sql(help.random_ids_sql('user_id','rev_clean', n = 1000)).df()['user_id'].astype(str))
-# pos_filt = con.sql(f"SELECT * FROM merged_pos WHERE user_id IN ({ids})")
+print("Cleaning Revelio Position Data...")
+
+# testing
+if test:
+    merged_pos = con.sql(f"SELECT * FROM merged_pos WHERE user_id IN ({ids}) OR user_id = {test_user}")
 
 # # TODO:Cleaning position history -- (impute rcid if company name similar to below,) get rid of duplicates -- also need to clean duplicate users!
 
@@ -318,8 +391,9 @@ pos_with_null_enddates = con.sql(
 
 merged_pos_clean = con.sql("SELECT *, CASE WHEN max_share_foia > 0 THEN 1 ELSE 0 END AS foia_occ_ind FROM merged_pos AS a LEFT JOIN (SELECT user_id, position_number, alt_enddate, pos_dup_ind FROM pos_with_null_enddates WHERE next_pos_ind = 1 OR pos_dup_ind = 1) AS b ON a.user_id = b.user_id AND a.position_number = b.position_number LEFT JOIN occ_cw AS c ON a.role_k1500 = c.role_k1500")
 
-
-con.sql(f"COPY merged_pos_clean TO '{root}/data/int/merged_pos_clean_aug8.parquet'")
+if not test:
+    print("Saving cleaned positions to file...")
+    con.sql(f"COPY merged_pos_clean TO '{root}/data/int/merged_pos_clean_aug8.parquet'")
 
 # 8/6/25: what to do with null enddates? if last position, can impute as updated dt, but if not last position? if i take next start date, this will cut out freelance/part-time work or work preceding freelance/part-time work (e.g. if i have a FT job and start doing something on the side and hold both jobs concurrently)
 # okay for now just leave as today if null (most conservative -- downside is that enddatediff filter will be less effective)
@@ -349,9 +423,12 @@ merged_pos_user = con.sql(f"""
     """
     )
 
+print("Done!")
+
 #####################################
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
+print("Final merge...")
 user_merge = con.sql(
 f"""
 SELECT * FROM (
@@ -360,6 +437,7 @@ SELECT * FROM (
         MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ,
         MAX(CASE WHEN ade_ind IS NULL THEN 0 ELSE ade_ind END) OVER(PARTITION BY a.user_id) AS ade_ind,
         MIN(ade_year) OVER(PARTITION BY a.user_id) AS ade_year,
+        MIN(last_grad_year) OVER(PARTITION BY a.user_id) AS last_grad_year,
         MAX(0.5*inst_score + 0.5*nanat_score) OVER(PARTITION BY a.user_id) AS max_total_score,
         MAX(CASE WHEN country = 'United States' THEN 0 ELSE 0.5*inst_score + 0.5*nanat_score END) OVER(PARTITION BY a.user_id) AS max_total_score_nonus,
         foia_occ_ind, min_h1b_occ_rank, fields, highest_ed_level
@@ -406,7 +484,7 @@ SELECT * FROM
 (
     (SELECT user_id, 
         MIN(startdate)::DATETIME AS first_startdate, 
-        MAX(CASE WHEN enddate IS NULL THEN '2025-03-01' ELSE enddate END)::DATETIME AS last_enddate, rcid 
+        MAX(CASE WHEN alt_enddate IS NULL AND enddate IS NULL THEN '2025-03-01' WHEN enddate IS NULL AND alt_enddate IS NOT NULL THEN alt_enddate ELSE enddate END)::DATETIME AS last_enddate, rcid 
     FROM merged_pos_clean WHERE country = 'United States' AND startdate >= '2015-01-01' GROUP BY user_id, rcid) AS a 
     JOIN 
     (SELECT rcid FROM samp_to_rcid GROUP BY rcid) AS b 
@@ -424,5 +502,8 @@ merged_pos_user AS poshist
 ON pos.user_id = poshist.user_id
 """)
 
-con.sql(f"COPY rev_indiv TO '{root}/data/clean/rev_indiv.parquet'")
+if not test:
+    print("Saving full rev indiv file...")
+    con.sql(f"COPY rev_indiv TO '{root}/data/clean/rev_indiv.parquet'")
+
 print('Done!')
