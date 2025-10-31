@@ -319,7 +319,7 @@ def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddat
 # # DIFFERENT MERGE VERSIONS
 # # #####################
 # # con.sql(f"COPY ({merge(with_t_vars=True)}) TO '{root}/data/int/merge_filt_base_jul30.parquet'")
-con_indiv.sql(f"COPY ({merge(foia_prefilt = "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan'", with_t_vars = True)}) TO '{root}/data/int/merge_filt_prefilt_sep8.parquet'")
+# con_indiv.sql(f"COPY ({merge(foia_prefilt = "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan'", with_t_vars = True)}) TO '{root}/data/int/merge_filt_prefilt_sep8.parquet'")
 # con.sql(f"COPY ({merge(postfilt='indiv')}) TO '{root}/data/int/merge_filt_postfilt_jul30.parquet'")
 
 

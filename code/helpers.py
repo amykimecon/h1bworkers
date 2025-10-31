@@ -4,6 +4,10 @@ import numpy as np
 import re
 import pandas as pd
 import time 
+import tqdm
+import math
+from rapidfuzz import process, distance
+import jellyfish
 
 # local
 from config import * 
@@ -370,53 +374,373 @@ def chunk_merge(filestub, j, outfile = "", verbose = False):
 
 # function to iterate over j chunks of userids (splitting each chunk further into k chunks)
 def chunk_query(df, j, fun, jstart = 0, outpath = None, d = 10000, verbose = False, extraverbose = False):
-    n = df.shape[0] #total number of items
-    #print(f"n: {n}")
+    # ---- initialize / propagate progress bars ----
+    # We detect "root" call by lack of private pbars in locals()
+    _pb_rows   = getattr(chunk_query, "_pb_rows", None)
+    _root_owner = False
+
+    #total number of items
+    n = df.shape[0] 
+
+    # if no observations, return None
+    if n == 0:
+        return(None)
+    
+    # Create bars once at the root
+    if _pb_rows is None:
+        from tqdm.auto import tqdm 
+        n_tot = n
+        if jstart > 0:
+            n_tot = n_tot - (jstart * int(np.ceil(n / j)))
+        chunk_query._pb_rows   = tqdm(total=n_tot,             desc="Rows processed", unit="row")
+        _pb_rows   = chunk_query._pb_rows
+        _root_owner = True  # we own these bars and must close them
 
     # base case: if df has nrow <= d and not first call then perform function on df and return
     if n <= d and outpath is None:
-        print('.', end = '')
-        return(fun(df))
-    
-    # otherwise, further chunk into j (note: only ever save output and skip merge on first iteration)
-    else:  
-        k = int(np.ceil(n/j))
-        if verbose:
-            print("\n----------------------------------------")
-            print(f"Iterating over {j} chunks of {n} items ", end = '')
-
-        # if not saving output, recursively run function on chunks and concatenate into df
-        if outpath is None:
-            if verbose:
-                print("and not saving intermediate output")
-                print("----------------------------------------")
-            
-            chunks = []
-            for i in range(jstart, j):
-                if verbose:
-                    print(f"\nchunk #{i+1} of {j}", end = '')
-                t0 = time.time()
-                if k*i <= n:
-                    chunks = chunks + [chunk_query(df.iloc[k*i:k*(i+1)], j = j, fun = fun, outpath = None, d = d, verbose = extraverbose)]
-                t1 = time.time()
-
-                if verbose:
-                    print(f"completed in {round((t1-t0)/60, 2)} min")
-            return pd.concat(chunks)
+        out = fun(df)
+        # progress updates
+        if _pb_rows is not None:
+            _pb_rows.update(n)
         
-        # if saving output, just recursively run query
-        else: 
-            if verbose:
-                print(f"and saving intermediate output to {outpath}")
-                print("----------------------------------------")
-            
-            for i in range(jstart, j):
-                if verbose:
-                    print(f"\nchunk #{i+1} of {j}", end = '')
-                t0 = time.time()
-                chunk_query(df.iloc[k*i:k*(i+1)], j = j, fun = fun, outpath = None, d = d, verbose = extraverbose).to_parquet(f"{outpath}{i}.parquet")
-                t1 = time.time() 
+        # close if we created bars at root
+        if _root_owner:
+            _pb_rows.close()
+            chunk_query._pb_rows   = None
 
-                if verbose:
-                    print(f"completed in {round((t1-t0)/60, 2)} min")
+        return out
+    
+    # Otherwise, split into j chunks and recurse
+    k = int(np.ceil(n / j))
+    if verbose:
+        print("\n----------------------------------------")
+        print(f"Iterating over {j} chunks of {n} items ", end='')
+        if outpath is None:
+            print("and not saving intermediate output")
+        else:
+            print(f"and saving intermediate output to {outpath}")
+        print("----------------------------------------")
+
+    # if not saving output, recursively run function on chunks and concatenate into df
+    if outpath is None:
+        chunks = []
+        for i in range(jstart, j):
+            if verbose:
+                print(f"\nchunk #{i+1} of {j}", end = '')
+            t0 = time.time()
+
+            start = k * i
+            stop  = k * (i + 1)
+            if start >= n:
+                break
+
+            subdf = df.iloc[start:stop]
+            newchunk = chunk_query(subdf, j = j, fun = fun, outpath = None, d = d, verbose = extraverbose)
+            
+            if isinstance(newchunk, pd.DataFrame) and not newchunk.empty:
+                newchunk = newchunk.loc[:, newchunk.notna().any(axis=0)]
+                if newchunk.shape[0] != 0 and newchunk.shape[1] != 0:
+                    chunks = chunks + [newchunk]
+            t1 = time.time()
+
+            if verbose:
+                print(f"completed in {round((t1-t0)/60, 2)} min", end = '')
+
+        # close bars if root
+        if _root_owner and _pb_rows is not None:
+            _pb_rows.close()
+            chunk_query._pb_rows   = None
+
+        if len(chunks)>0:
+            return pd.concat(chunks)
+        else:
             return None
+        
+    # if saving output, just recursively run query
+    else: 
+        for i in range(jstart, j):
+            if verbose:
+                print(f"\nchunk #{i+1} of {j}", end = '')
+            t0 = time.time()
+            start = k * i
+            stop  = k * (i + 1)
+            if start >= n:
+                break
+
+            subdf = df.iloc[start:stop]
+            newchunk = chunk_query(subdf, j = j, fun = fun, outpath = None, d = d, verbose = extraverbose)
+
+            if isinstance(newchunk, pd.DataFrame) and not newchunk.empty:
+                newchunk.to_parquet(f"{outpath}{i}.parquet")
+            
+            else:
+                print("DF empty, not saved")
+
+            t1 = time.time() 
+
+            if verbose:
+                print(f"completed in {round((t1-t0)/60, 2)} min")
+        
+        # close bars if root
+        if _root_owner and _pb_rows is not None:
+            _pb_rows.close()
+            chunk_query._pb_rows   = None
+
+        return None
+    
+## FUZZY MERGE
+
+def _norm(s):
+    if pd.isna(s): return ""
+    s = str(s).lower()
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def fuzzy_join_lev(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    left_on: str,
+    right_on: str,
+    *,
+    threshold: float = 0.88,     # similarity in [0,1]
+    top_n: int = 1,              # keep best n matches per left row
+    block_key: str | None = None,# optional column in both to reduce comparisons
+    normalize: bool = True,
+    keep_score: bool = True,
+) -> pd.DataFrame:
+    """
+    Fuzzy join using Levenshtein normalized similarity (RapidFuzz).
+    Returns one row per kept match (duplicates left rows when top_n > 1).
+    """
+    L = left.copy()
+    R = right.copy()
+
+    # normalize keys
+    lkey, rkey = left_on, right_on
+    if normalize:
+        L[lkey + "_n"] = L[left_on].map(_norm)
+        R[rkey + "_n"] = R[right_on].map(_norm)
+        lkey, rkey = lkey + "_n", rkey + "_n"
+
+    # optional blocking
+    if block_key is not None:
+        if block_key not in L.columns or block_key not in R.columns:
+            raise ValueError(f"block_key '{block_key}' must exist in both dataframes")
+        groups = np.intersect1d(L[block_key].dropna().unique(), R[block_key].dropna().unique())
+        blocks = ((L[L[block_key] == g], R[R[block_key] == g]) for g in groups)
+    else:
+        blocks = ((L, R),)
+
+    out_parts = []
+
+    for Lp, Rp in blocks:
+        if Lp.empty or Rp.empty:
+            continue
+
+        left_vals  = Lp[lkey].fillna("").tolist()
+        right_vals = Rp[rkey].fillna("").tolist()
+
+        # Levenshtein normalized similarity in [0,1] (do NOT divide by 100)
+        sim = process.cdist(
+            left_vals, right_vals,
+            scorer=distance.Levenshtein.normalized_similarity,
+            workers=-1
+        )
+
+        if top_n == 1:
+            # best match per left row
+            jmax = sim.argmax(axis=1)                      # shape (m_left,)
+            best = sim[np.arange(sim.shape[0]), jmax]      # shape (m_left,)
+            keep = best >= threshold
+
+            if keep.any():
+                left_sel  = Lp.loc[keep].reset_index(drop=True)
+                right_sel = Rp.iloc[jmax[keep]].reset_index(drop=True)
+
+                merged = pd.concat(
+                    [left_sel.add_suffix("_left"), right_sel.add_suffix("_right")],
+                    axis=1
+                )
+                if keep_score:
+                    merged["_lev_sim"] = best[keep]
+                out_parts.append(merged)
+
+        else:
+            # top-n candidates per left row
+            k = min(top_n, sim.shape[1])
+            # indices of top-k columns (unsorted order OK; we'll mask anyway)
+            top_idx = np.argpartition(-sim, kth=k-1, axis=1)[:, :k]
+            rows, cols = np.indices(top_idx.shape)
+            top_scores = sim[rows, top_idx]                # shape (m_left, k)
+
+            keep_mask = top_scores >= threshold
+            if keep_mask.any():
+                # gather matched row indices
+                li = Lp.index.values[rows[keep_mask]]
+                ri = Rp.index.values[top_idx[keep_mask]]
+
+                left_multi  = Lp.loc[li].reset_index(drop=True)
+                right_multi = Rp.loc[ri].reset_index(drop=True)
+
+                matched = pd.concat(
+                    [left_multi.add_suffix("_left"), right_multi.add_suffix("_right")],
+                    axis=1
+                )
+                if keep_score:
+                    matched["_lev_sim"] = top_scores[keep_mask]
+                out_parts.append(matched)
+
+    if not out_parts:
+        cols = list(left.add_suffix("_left").columns) + list(right.add_suffix("_right").columns)
+        if keep_score:
+            cols += ["_lev_sim"]
+        return pd.DataFrame(columns=cols)
+
+    return pd.concat(out_parts, ignore_index=True)
+
+# Function that weights levenshtein and jaro-winkler metrics
+def fuzzy_join_lev_jw(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    left_on: str,
+    right_on: str,
+    *,
+    weights=(0.6, 0.4),            # (lev_weight, jw_weight)
+    threshold: float = 0.88,       # combined cutoff in [0,1]
+    top_n: int = 1,                # keep top-n matches per left row
+    jw_top_k: int = 25,            # compute JW for top-k Levenshtein candidates
+    block_key: str | None = None,  # optional column in both to reduce comparisons
+    normalize: bool = True,
+    keep_subscores: bool = True,
+) -> pd.DataFrame:
+
+    lev_w, jw_w = float(weights[0]), float(weights[1])
+    if lev_w < 0 or jw_w < 0:
+        raise ValueError("weights must be non-negative")
+    if lev_w + jw_w == 0:
+        raise ValueError("weights sum to zero")
+    s = lev_w + jw_w
+    lev_w, jw_w = lev_w / s, jw_w / s
+
+    L = left.copy()
+    R = right.copy()
+
+    # normalize keys
+    lkey, rkey = left_on, right_on
+    if normalize:
+        L[lkey + "_n"] = L[left_on].map(_norm)
+        R[rkey + "_n"] = R[right_on].map(_norm)
+        lkey, rkey = lkey + "_n", rkey + "_n"
+
+    # optional blocking
+    if block_key is not None:
+        if block_key not in L.columns or block_key not in R.columns:
+            raise ValueError(f"block_key '{block_key}' must exist in both dataframes")
+        groups = np.intersect1d(L[block_key].dropna().unique(), R[block_key].dropna().unique())
+        blocks = ((L[L[block_key] == g], R[R[block_key] == g]) for g in groups)
+    else:
+        blocks = ((L, R),)
+
+    out_parts = []
+
+    for Lp, Rp in blocks:
+        if Lp.empty or Rp.empty:
+            continue
+
+        lv = Lp[lkey].fillna("").tolist()
+        rv = Rp[rkey].fillna("").tolist()
+
+        # Levenshtein normalized similarity in [0,1]
+        lev_sim = process.cdist(
+            lv, rv,
+            scorer=distance.Levenshtein.normalized_similarity,
+            workers=-1
+        )
+        m_left, m_right = lev_sim.shape
+        if m_left == 0 or m_right == 0:
+            continue
+
+        k = min(jw_top_k, m_right)
+
+        if top_n == 1:
+            # top-k candidates by Levenshtein per row
+            top_idx = np.argpartition(-lev_sim, kth=k-1, axis=1)[:, :k]
+
+            # compute JW only for those candidates
+            jw_sim_top = np.zeros((m_left, k), dtype=float)
+            for i in range(m_left):
+                a = lv[i]
+                candidates = [rv[j] for j in top_idx[i]]
+                jw_sim_top[i, :] = [jellyfish.jaro_winkler_similarity(a, b) for b in candidates]
+
+            # combine scores on the candidate set
+            combo_top = lev_w * lev_sim[np.arange(m_left)[:, None], top_idx] + jw_w * jw_sim_top
+
+            best_pos_in_k = combo_top.argmax(axis=1)
+            best_cols     = top_idx[np.arange(m_left), best_pos_in_k]
+            best_scores   = combo_top[np.arange(m_left), best_pos_in_k]
+
+            keep = best_scores >= threshold
+            if keep.any():
+                left_sel  = Lp.loc[keep].reset_index(drop=True)
+                right_sel = Rp.iloc[best_cols[keep]].reset_index(drop=True)
+
+                merged = pd.concat(
+                    [left_sel.add_suffix("_left"), right_sel.add_suffix("_right")],
+                    axis=1
+                )
+                merged["_score"] = best_scores[keep]
+
+                if keep_subscores:
+                    # recover component scores for kept pairs
+                    lev_keep = lev_sim[keep, :][np.arange(keep.sum()), best_cols[keep]]
+                    # No walrus inside comprehension: precompute arrays, then list-comp
+                    lv_np = np.array(lv, dtype=object)[keep]
+                    rv_np = Rp[rkey].iloc[best_cols[keep]].astype(str).tolist()
+                    jw_keep = [jellyfish.jaro_winkler_similarity(a, b) for a, b in zip(lv_np, rv_np)]
+                    merged["_lev_sim"] = lev_keep
+                    merged["_jw_sim"]  = jw_keep
+
+                out_parts.append(merged)
+
+        else:
+            # keep up to top_n candidates per left row above threshold
+            k_for_keep = min(max(k, top_n), m_right)
+            top_idx = np.argpartition(-lev_sim, kth=k_for_keep-1, axis=1)[:, :k_for_keep]
+            rows, cols = np.indices(top_idx.shape)
+            lev_top = lev_sim[rows, top_idx]
+
+            jw_top = np.zeros_like(lev_top, dtype=float)
+            for i in range(m_left):
+                a = lv[i]
+                candidates = [rv[j] for j in top_idx[i]]
+                jw_top[i, :] = [jellyfish.jaro_winkler_similarity(a, b) for b in candidates]
+
+            combo = lev_w * lev_top + jw_w * jw_top
+            keep_mask = combo >= threshold
+            if keep_mask.any():
+                li = Lp.index.values[rows[keep_mask]]
+                ri = Rp.index.values[top_idx[keep_mask]]
+
+                left_multi  = Lp.loc[li].reset_index(drop=True)
+                right_multi = Rp.loc[ri].reset_index(drop=True)
+
+                matched = pd.concat(
+                    [left_multi.add_suffix("_left"), right_multi.add_suffix("_right")],
+                    axis=1
+                )
+                matched["_score"] = combo[keep_mask]
+                if keep_subscores:
+                    matched["_lev_sim"] = lev_top[keep_mask]
+                    matched["_jw_sim"]  = jw_top[keep_mask]
+                out_parts.append(matched)
+
+    if not out_parts:
+        base_cols = list(left.add_suffix("_left").columns) + list(right.add_suffix("_right").columns)
+        extra = ["_score"]
+        if keep_subscores:
+            extra += ["_lev_sim", "_jw_sim"]
+        return pd.DataFrame(columns=base_cols + extra)
+
+    return pd.concat(out_parts, ignore_index=True)

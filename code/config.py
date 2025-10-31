@@ -2,6 +2,7 @@
 # Author: Amy Kim
 # Date Created: July 8 2025
 import os 
+import json
 
 #######################
 ### DECLARING PATHS ###
@@ -35,6 +36,12 @@ elif os.environ.get('USER') == 'amykimecon':
 
 # setting path
 os.chdir(f"{code}")
+
+# reading api key as global
+with open(f"{root}/data/private_configs/hud_api_key.json") as f:
+    cfg = json.load(f)
+
+HUD_API_KEY = cfg["api_key"]
 
 # import helper functions
 import helpers as help

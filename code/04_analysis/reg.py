@@ -112,9 +112,10 @@ def merge_collapse(merge_clean, index = 'firm x year'):
     merge_out = merge_clean.copy().reset_index()
     
     ## COLLAPSING TO APPLICATION LEVEL
-    outcomes = ['change_company1', 'change_company2','change_company3', 'promote1', 'promote2', 'in_us1', 'in_us2', 'ade', 'work_1yr', 'work_2yr', 'new_educ1', 'new_educ2', 'agg_compensation1', 'agg_compensation2', 'graddiff', 'in_home_country1', 'in_home_country2', 'loc_null1', 'loc_null2']
+    outcomes = ['change_company1', 'change_company2','change_company3', 'promote1', 'promote2', 'in_us1', 'in_us2', 'ade', 'work_1yr', 'work_2yr', 'new_educ1', 'new_educ2', 'agg_compensation1', 'agg_compensation2', 'graddiff', 'in_home_country1', 'in_home_country2']#, 'loc_null1', 'loc_null2']
     df = merge_out.groupby(['foia_indiv_id', 'FEIN', 'female_ind', 'yob', 'age', 'lottery_year', 'foia_country', 'winner', 'n_apps', 'n_unique_country', 'high_rep_emp_ind', 'no_rep_emp_ind']).agg(
-        **{var: (var, lambda x, var = var: np.average(x, weights = merge_out.loc[x.index, 'weight_norm'])) for var in outcomes}
+        **{var: (var, 
+                 lambda x, var = var: np.average(x.dropna(), weights = merge_out.loc[x.dropna().index, 'weight_norm']) if x.notna().any() else np.nan) for var in outcomes}
     ).reset_index()
 
     ## MORE CLEANING
@@ -137,12 +138,16 @@ def merge_collapse(merge_clean, index = 'firm x year'):
 # mergedfs_raw = [pd.read_parquet(f'{root}/data/int/merge_filt_mult{c}_sep8.parquet') for c in [2,4,6]] + [pd.read_parquet(f'{root}/data/int/merge_filt_baseline_sep8.parquet')]
 mergedfs_raw = [pd.read_parquet(f'{root}/data/int/merge_filt_mult{c}_sep8.parquet') for c in [2,4,6]]
 
-mergedf_prefilt_raw = pd.read_parquet(f'{root}/data/int/merge_filt_prefilt_aug13.parquet')
+mergedf_prefilt_raw = pd.read_parquet(f'{root}/data/int/merge_filt_prefilt_sep8.parquet')
 
 mergedfs_clean = [merge_filt_clean(df) for df in mergedfs_raw]
 mergedfs = [merge_collapse(df, 'firm x year') for df in mergedfs_clean]
 mergedf_clean = merge_filt_clean(mergedf_prefilt_raw)
 mergedf = merge_collapse(mergedf_clean, 'firm x year')
+mergedf2 = merge_collapse(mergedf_clean, "firm + year")
+
+mergedf_main_clean = merge_filt_clean(pd.read_parquet(f'{root}/data/int/merge_filt_baseline_sep8.parquet'))
+mergedf_main = merge_collapse(mergedf_main_clean)
 # foia_tab = con.sql("CREATE OR REPLACE TABLE foia AS SELECT * FROM foia_indiv USING SAMPLE 100")
 # rev_tab = con.sql("CREATE OR REPLACE TABLE rev AS SELECT * FROM rev_indiv")
 # mergetest_raw = merge_df(rev_tab = 'rev', foia_tab = 'foia', with_t_vars=True, con = con)
@@ -156,7 +161,7 @@ for mergedf in mergedfs_raw:
     mergedf['winner'] = mergedf['status_type'] == "SELECTED"
     # print(mergedf.groupby(['foia_indiv_id','winner'])['weight_norm'].agg('max').reset_index().groupby('winner')['weight_norm'].agg('mean'))
     print("mean match weight")
-    print(mergedf.groupby(['foia_indiv_id','winner'])['weight_norm'].agg('mean').reset_index().groupby('winner')['weight_norm'].agg('mean'))
+    print(mergedf.groupby(['foia_indiv_id','winner'])['weight_norm'].agg('max').reset_index().groupby('winner')['weight_norm'].agg('mean'))
     
     print("mean multiplicity")
     print(mergedf.groupby(['foia_indiv_id','winner'])['weight_norm'].size().reset_index().groupby('winner')['weight_norm'].agg('mean'))
@@ -237,11 +242,32 @@ def panelols_to_latex(results, col_labels, row_var = 'winner', verbose = False):
 #####################
 # REGRESSIONS
 #####################
+df = mergedf_main_clean 
+df['const'] = 1
+yrno = 1
+yvar_list = [f'work_{yrno}yr',f'in_us{yrno}',f'new_educ{yrno}']
+x = panelols_to_latex(
+    results = [PanelOLS.from_formula(f'{yvar} ~ winner + ade {fes}', data = df, weights = df['weight_norm']).fit(cov_type = 'clustered') for yvar in yvar_list for fes in ['+ const','+ EntityEffects']],
+    col_labels = [f"{yvar} ({fes})" for yvar in yvar_list for fes in ['no fes','firm x year']],
+    verbose = True
+)
+
+df = mergedf_main
+yrno = 2
+yvar_list = [f'work_{yrno}yr',f'in_us{yrno}',f'new_educ{yrno}']
+y = panelols_to_latex(
+    results = [PanelOLS.from_formula(f'{yvar} ~ winner + ade {fes}', data = df).fit(cov_type = 'clustered') for yvar in yvar_list for fes in ['+ const','+ EntityEffects']],
+    col_labels = [f"{yvar} ({fes})" for yvar in yvar_list for fes in ['no fes','firm x year']],
+    verbose = True
+)
+
+
+
 m0_0s, m0_1s, m1s, m2s, m3s = [], [], [], [], []
 wls = True
-yvar1 = 'stay2'
-yvar2 = 'stay3'
-for i in range(4):
+yvar1 = 'work_1yr'
+yvar2 = 'work_2yr'
+for i in range(3):
     df = mergedfs[i].copy() #.loc[all_dfs[i]['lottery_year']==2023]
     df['stay1'] = 1 - df['change_company1']
     df['stay2'] = 1 - df['change_company2']
@@ -255,12 +281,13 @@ for i in range(4):
     # keep only relevant columns + preserve panel index
     keep = ["stay1", "stay2", "stay3", "work_1yr", 'work_2yr', "winner", "ade", "weight_norm",'firm_year_fe', 'foia_indiv_id']
     df_raw = df_raw.reset_index()[keep].copy().set_index(['firm_year_fe', 'foia_indiv_id'])
+    df_raw['const'] = 1
     
     # wls ()
     if wls:
-        m1s = m1s + [PanelOLS.from_formula(f'{yvar1} ~ winner + ade + EntityEffects', data=df_raw, weights=df_raw['weight_norm']).fit(cov_type = 'clustered')]
+        m1s = m1s + [PanelOLS.from_formula(f'{yvar1} ~ winner + ade + const', data=df_raw, weights=df_raw['weight_norm']).fit(cov_type = 'clustered')]
 
-        m2s = m2s + [PanelOLS.from_formula(f'{yvar2} ~ winner + ade + EntityEffects', data=df_raw, weights=df_raw['weight_norm']).fit(cov_type = 'clustered')]
+        m2s = m2s + [PanelOLS.from_formula(f'{yvar2} ~ winner + ade + const', data=df_raw, weights=df_raw['weight_norm']).fit(cov_type = 'clustered')]
      
     # # DV mean for winners
     # print(df.loc[df['winner'] == 1]['stay1'].mean())
@@ -273,7 +300,7 @@ for i in range(4):
         m2s = m2s + [PanelOLS.from_formula(f'{yvar2} ~ winner + ade + EntityEffects', data=df).fit(cov_type = 'clustered')]
 
 ## outputting regression results
-panelols_to_latex(m1s + m2s, [f'c = {c} (t{t})' for t in [1,2] for c in [2,4,6, 'inf'] ], verbose = True)
+panelols_to_latex(m1s + m2s, [f'c = {c} (t{t})' for t in [1,2] for c in [2,4,6] ], verbose = True)
 
 df = mergedfs_clean[3]
 yvar_list = ['in_us1', 'in_us2', 'in_home_country1','in_home_country2', 'new_educ1', 'new_educ2']
