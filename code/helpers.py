@@ -1,13 +1,18 @@
 ## HELPERS FOR CLEANING INDIVIDUAL REVELIO DATA
 import json
-import numpy as np
-import re
-import pandas as pd
-import time 
-import tqdm
 import math
-from rapidfuzz import process, distance
+import re
+import time
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
 import jellyfish
+import numpy as np
+import pandas as pd
+import tqdm
+from rapidfuzz import distance, process
+import importlib.util
 
 # local
 from config import * 
@@ -99,20 +104,17 @@ def field_clean_regex_sql(col):
     REGEXP_REPLACE(
     REGEXP_REPLACE(
     REGEXP_REPLACE(
-    REGEXP_REPLACE(
         REGEXP_REPLACE(
             REGEXP_REPLACE(
                 REGEXP_REPLACE(
                     -- strip accents and convert to lowercase
                     strip_accents(lower({col})), 
-                -- remove anything in parantheses
-                '\\s*(\\(|\\[)[^\\)\\]]*(\\)|\\])\\s*', ' ', 'g'), 
             -- remove apostrophes, periods
             $$'|’|\\.$$, '', 'g'),
         -- convert 'and' symbols to text
         '\\s?(&|\\+)\\s?', ' and ', 'g'), 
     -- remove any other punctuation and replace w space
-    '[^A-z0-9\\s]', ' ', 'g'),
+    '[^A-z0-9/\\s]', ' ', 'g'),
     '(^|\\s)(engrg|engr|engineeri)($|\\s)', ' engineering ', 'g'),
     '(^|\\s)(compu|comp|compute)($|\\s)', ' computer ', 'g'),
     '(^|\\s)(elec|elecs)($|\\s)', ' electrical ', 'g'),
@@ -744,3 +746,30 @@ def fuzzy_join_lev_jw(
         return pd.DataFrame(columns=base_cols + extra)
 
     return pd.concat(out_parts, ignore_index=True)
+
+
+# ------------------------------------------------------------------
+# CIP matching compatibility wrappers (implementation moved to 10_misc/cip_matching.py)
+
+
+@lru_cache(maxsize=1)
+def _load_cip_matching_module():
+    module_path = Path(__file__).resolve().parent / "10_misc" / "cip_matching.py"
+    spec = importlib.util.spec_from_file_location("cip_matching", module_path)
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise ImportError(f"Unable to load CIP matching module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def match_fields_to_cip(*args: Any, **kwargs: Any):
+    """Proxy to 10_misc.cip_matching.match_fields_to_cip."""
+    module = _load_cip_matching_module()
+    return module.match_fields_to_cip(*args, **kwargs)
+
+
+def add_hardcoded_cip_match(*args: Any, **kwargs: Any):
+    """Proxy to 10_misc.cip_matching.add_hardcoded_cip_match."""
+    module = _load_cip_matching_module()
+    return module.add_hardcoded_cip_match(*args, **kwargs)
