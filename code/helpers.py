@@ -164,6 +164,23 @@ def degree_clean_regex_sql():
     """
     return str_out
 
+def degree_clean_degree_missing_regex_sql():
+    str_out = f"""
+        CASE 
+            WHEN lower(university_raw) ~ '.*(high\\s?school).*' OR lower(degree_raw) ~ '.*(high\\s?school).*' OR lower(field_raw) ~ '.*(high\\s?school).*' OR lower(degree_raw) ~ 'g\\.?e\\.?d\\.?' THEN 'High School' 
+            WHEN lower(degree_raw) ~ '.*(cert|credential|course|semester|exchange|abroad|summer|internship|edx|cdl|coursera|udemy).*' OR lower(university_raw) ~ '.*(edx|course|credential|semester|exchange|abroad|summer|internship|certificat|coursera|udemy).*' OR lower(field_raw) ~ '.*(edx|course|credential|semester|exchange|abroad|summer|internship|certificat|coursera|udemy).*' THEN 'Non-Degree'
+            WHEN (lower(degree_raw) ~ '.*(undergrad).*') OR (degree_raw ~ '.*\\b(B\\.?A\\.?|B\\.?S\\.?C\\.?E\\.?|B\\.?Sc\\.?|B\\.?A\\.?E\\.?|B\\.?Eng\\.?|A\\.?B\\.?|S\\.?B\\.?|B\\.?B\\.?M\\.?|B\\.?I\\.?S\\.?)\\b.*') OR degree_raw ~ '^B\\.?\\s?S\\.?.*' OR lower(field_raw) ~ '.*bachelor.*' OR lower(degree_raw) ~ '.*(bachelor|baccalauréat).*' THEN 'Bachelor'
+            WHEN lower(degree_raw) ~ '.*(master).*' OR degree_raw ~ '^M\\.?(Eng|Sc|A)\\.?.*' THEN 'Master'
+            WHEN degree_raw ~ '.*(M\\.?S\\.?C\\.?E\\.?|M\\.?P\\.?A\\.?|M\\.?Eng|M\\.?Sc|M\\.?A).*' OR lower(field_raw) ~ '.*master.*' OR lower(degree_raw) ~ '.*master.*' THEN 'Master'
+            WHEN lower(field_raw) ~ '.*(associate).*' OR degree_raw ~ 'A\\.?\\s?A\\.?.*' OR lower(degree_raw) ~ '.*associate.*' OR lower(field_raw) ~ '.*associate.*' THEN 'Associate' 
+            WHEN lower(degree_raw) ~ '.*(doctor|ph\\.?\\s?d\\.?|d\\.?o\\.?|dvm|jd).*' OR degree_raw ~ '.*(Ph\\.?D\\.?|D\\.?O\\.?|J\\.?D\\.?).*' THEN 'Doctor'
+            WHEN (university_raw ~ '.*(HS| High| HIGH| high|H\\.S\\.|S\\.?S\\.?C|H\\.?S\\.?C\\.?|I\\.?B\\.?)$') THEN 'High School' 
+            WHEN degree_raw ~ '^B\\.?\\s?[A-Z].*' THEN 'Bachelor'
+            WHEN degree_raw ~ '^M\\.?\\s?[A-Z].*' THEN 'Master'
+            ELSE 'Missing' END
+    """
+    return str_out
+
 # indicator for whether major is STEM or not
 # logic: NOT if hs/nondegree, JD/MD?
 #       YES if engineering

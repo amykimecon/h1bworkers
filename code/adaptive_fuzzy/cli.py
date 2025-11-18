@@ -846,6 +846,7 @@ class CandidateCacheManager:
         self.jaro_threshold = jaro_threshold
         self.feature_cache = feature_cache
         self.pairs: Dict[Tuple[str, str], PairCandidate] = {}
+        self._covered = np.zeros(len(self.names), dtype=np.bool_)
         self.coverage_limit = 0
         self._name_to_index: Dict[str, int] = {name: idx for idx, name in enumerate(self.names)}
         self.ann_retriever = ann_retriever
@@ -884,26 +885,49 @@ class CandidateCacheManager:
         self._register_candidates(filtered, persist=True)
 
     def _extend_coverage(self, subset_size: int, max_candidates: Optional[int]) -> None:
-        target_subset = self.names[:subset_size]
-        if not target_subset:
+        start = self.coverage_limit
+        if start >= subset_size:
+            return
+
+        sources = self.names[start:subset_size]
+        if not sources:
             self.coverage_limit = subset_size
             return
-        limit = max_candidates
-        if limit is None:
-            limit = _scaled_candidate_limit(len(target_subset), 200, minimum=10_000)
+
+        # keep limit sane relative to sources and top_k
+        if max_candidates is None and self.ann_retriever is not None:
+            max_candidates = len(sources) * self.ann_retriever.top_k
+
         if self.ann_retriever is not None:
-            tuples = self.ann_retriever.generate_candidates(target_subset, limit)
-            generated = [PairCandidate(a, b, score) for a, b, score in tuples]
+            # stream from ANN to avoid massive dicts and sorts
+            it = self.ann_retriever.generate_candidates(
+                sources, limit=None, allowed_targets=self.names[:subset_size], stream=True
+            )
+            buf = []
+            flush_every = 2_000_000  # 2M pairs per flush (tune to RAM)
+            for a, b, score in it:
+                buf.append(PairCandidate(a, b, score))
+                if len(buf) >= flush_every:
+                    filtered = filter_candidates_by_ground_truth(buf, self.representative_ids)
+                    self._register_candidates(filtered, persist=True)
+                    buf.clear()
+            if buf:
+                filtered = filter_candidates_by_ground_truth(buf, self.representative_ids)
+                self._register_candidates(filtered, persist=True)
         else:
+            # fallback: token-overlap generation just for 'sources'
             generated = generate_pair_candidates(
-                target_subset,
-                max_candidates=limit,
+                sources,
+                max_candidates=_scaled_candidate_limit(len(sources), 200, minimum=10_000),
                 token_overlap_threshold=self.token_overlap_threshold,
                 jaro_threshold=self.jaro_threshold,
             )
-        filtered = filter_candidates_by_ground_truth(generated, self.representative_ids)
-        self._register_candidates(filtered, persist=True)
+            filtered = filter_candidates_by_ground_truth(generated, self.representative_ids)
+            self._register_candidates(filtered, persist=True)
+
+        # coverage will advance via _update_coverage_with_pair + contiguous prefix walk
         self.coverage_limit = max(self.coverage_limit, subset_size)
+
 
     def _register_candidates(self, candidates: Sequence[PairCandidate], persist: bool) -> None:
         if not candidates:
@@ -958,37 +982,49 @@ class CandidateCacheManager:
         self.feature_cache[(name_b, name_a)] = features.copy()
 
     def _update_coverage_with_pair(self, name_a: str, name_b: str) -> None:
-        idx_a = self._name_to_index.get(name_a, -1)
-        idx_b = self._name_to_index.get(name_b, -1)
-        max_idx = max(idx_a, idx_b)
-        if max_idx >= 0 and max_idx + 1 > self.coverage_limit:
-            self.coverage_limit = max_idx + 1
+        for name in (name_a, name_b):
+            idx = self._name_to_index.get(name, -1)
+            if 0 <= idx < len(self._covered):
+                self._covered[idx] = True
+        # advance the contiguous prefix only
+        while self.coverage_limit < len(self._covered) and self._covered[self.coverage_limit]:
+            self.coverage_limit += 1
 
     def _persist_rows(self, rows: List[Dict[str, float]]) -> None:
-        if not self.cache_path:
-            return
-        if not rows:
+        if not self.cache_path or not rows:
             return
         df_new = pd.DataFrame(rows)
-        if self.cache_path.exists():
-            conn = duckdb.connect()
-            existing = conn.execute(f"SELECT * FROM read_parquet('{self.cache_path}')").df()
-            conn.close()
-            if not existing.empty:
-                combined = pd.concat([existing, df_new], ignore_index=True)
-                combined = combined.drop_duplicates(subset=["name_a", "name_b"], keep="last")
-            else:
-                combined = df_new
-        else:
-            combined = df_new
-        combined = combined.reset_index(drop=True)
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_out = self.cache_path.with_suffix(".tmp.parquet")
+
         conn = duckdb.connect()
-        conn.register("candidate_features_df", combined)
-        conn.execute(
-            f"COPY candidate_features_df TO '{self.cache_path}' (FORMAT 'parquet', COMPRESSION 'ZSTD')"
-        )
-        conn.close()
+        conn.register("df_new", df_new)
+
+        if self.cache_path.exists():
+            # Keep the latest (highest score) per (name_a, name_b)
+            conn.execute(f"""
+                COPY (
+                SELECT * EXCLUDE rn FROM (
+                    SELECT *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY name_a, name_b
+                            ORDER BY score DESC
+                        ) AS rn
+                    FROM (
+                    SELECT * FROM read_parquet('{self.cache_path}')
+                    UNION ALL
+                    SELECT * FROM df_new
+                    )
+                ) WHERE rn = 1
+                ) TO '{tmp_out}' (FORMAT 'parquet', COMPRESSION 'ZSTD');
+            """)
+            conn.close()
+            tmp_out.replace(self.cache_path)
+        else:
+            conn.execute(
+                f"COPY df_new TO '{self.cache_path}' (FORMAT 'parquet', COMPRESSION 'ZSTD')"
+            )
+            conn.close()
+
 
 
 def prepare_candidate_data(
@@ -2390,7 +2426,7 @@ def _main_impl(args: argparse.Namespace) -> Optional[pd.DataFrame]:
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        cluster_frame.to_csv(args.output, index=False)
+        cluster_frame.to_parquet(args.output, index=False)
         print(f"Cluster assignments written to {args.output}")
     else:
         print(cluster_frame.to_string(index=False))

@@ -7,7 +7,14 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import *
+import adaptive_fuzzy.cli as af_cli
 from adaptive_fuzzy.cli import run_adaptive_fuzzy_pipeline
+
+def _no_expand(self, subset_size, max_candidates=None):
+    print(f"[FAST] skipping expand_to_size({subset_size:,})")
+    return
+
+af_cli.CandidateCacheManager.expand_to_size = _no_expand
 
 test = False
 
@@ -30,7 +37,9 @@ clusters = run_adaptive_fuzzy_pipeline(
     ann_index = f"{root}/data/tmp/ihma_ann{suffix}.index",
     use_ann_retrieval = True,
     output = f"{root}/data/int/ihma_clusters_nov2025{suffix}.parquet",
-    limit = 10000 if test else None
+    limit = 10000 if test else None,
+    ann_top_k = 20,
+    ann_nprobe = 8
 )
 
 # 

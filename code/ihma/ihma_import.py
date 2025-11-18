@@ -30,87 +30,95 @@ test = False
 saveloc_users = f"{root}/data/int/ihma_educ/ihma_educ_full_raw"
 outfileloc_users = f"{root}/data/int/ihma_educ_full_raw_nov2025.parquet"
 
-def fetch_user_education_with_raw(userids: pd.DataFrame, *, db=db) -> pd.DataFrame:
-    """
-    Helper for chunked imports: returns education rows plus the matching
-    `individual_user_education_raw` fields for the supplied user ids.
+saveloc_positions = f"{root}/data/int/ihma_positions/ihma_positions_all"
+outfileloc_positions = f"{root}/data/int/ihma_positions_all_nov2025.parquet"
 
-    Parameters
-    ----------
-    userids : DataFrame
-        DataFrame containing a `user_id` column. Matches helpers.chunk_query
-        expectations.
-    db : wrds.Connection
-        Active WRDS connection (defaults to the module-level connection).
-    """
+users = pd.read_parquet(f"{root}/data/clean/ihma_main_user_samp_nov2025.parquet")
+usersamp = users[['user_id']]
 
-    if "user_id" not in userids.columns:
-        raise KeyError("Expected userids DataFrame to contain 'user_id' column.")
+# def fetch_user_education_with_raw(userids: pd.DataFrame, *, db=db) -> pd.DataFrame:
+#     """
+#     Helper for chunked imports: returns education rows plus the matching
+#     `individual_user_education_raw` fields for the supplied user ids.
 
-    userid_subset = ",".join(userids["user_id"].astype(str))
-    if not userid_subset:
-        return pd.DataFrame(
-            columns=[
-                "user_id",
-                "university_name",
-                "university_raw",
-                "rsid",
-                "education_number",
-                "startdate",
-                "enddate",
-                "degree_raw",
-                "field_raw"
-            ]
-        )
+#     Parameters
+#     ----------
+#     userids : DataFrame
+#         DataFrame containing a `user_id` column. Matches helpers.chunk_query
+#         expectations.
+#     db : wrds.Connection
+#         Active WRDS connection (defaults to the module-level connection).
+#     """
 
-    query = f"""
-        SELECT
-            educ.user_id,
-            educ.university_name,
-            raw.university_raw,
-            educ.rsid,
-            educ.education_number,
-            educ.startdate,
-            educ.enddate,
-            raw.degree_raw,
-            raw.field_raw
-        FROM (
-            SELECT *
-            FROM revelio.individual_user_education
-            WHERE user_id IN ({userid_subset})
-        ) AS educ
-        LEFT JOIN (
-            SELECT user_id, education_number, university_raw, degree_raw, field_raw
-            FROM revelio.individual_user_education_raw
-        ) AS raw
-        ON educ.user_id = raw.user_id
-        AND educ.education_number = raw.education_number
-    """
-    return db.raw_sql(query)
+#     if "user_id" not in userids.columns:
+#         raise KeyError("Expected userids DataFrame to contain 'user_id' column.")
+
+#     userid_subset = ",".join(userids["user_id"].astype(str))
+#     if not userid_subset:
+#         return pd.DataFrame(
+#             columns=[
+#                 "user_id",
+#                 "university_name",
+#                 "university_raw",
+#                 "rsid",
+#                 "degree",
+#                 "education_number",
+#                 "startdate",
+#                 "enddate",
+#                 "degree_raw",
+#                 "field_raw"
+#             ]
+#         )
+
+#     query = f"""
+#         SELECT
+#             educ.user_id,
+#             educ.university_name,
+#             raw.university_raw,
+#             educ.rsid,
+#             educ.degree,
+#             educ.education_number,
+#             educ.startdate,
+#             educ.enddate,
+#             raw.degree_raw,
+#             raw.field_raw
+#         FROM (
+#             SELECT *
+#             FROM revelio.individual_user_education
+#             WHERE user_id IN ({userid_subset})
+#         ) AS educ
+#         LEFT JOIN (
+#             SELECT user_id, education_number, university_raw, degree_raw, field_raw
+#             FROM revelio.individual_user_education_raw
+#         ) AS raw
+#         ON educ.user_id = raw.user_id
+#         AND educ.education_number = raw.education_number
+#     """
+#     return db.raw_sql(query)
 
 
-if test:
-    testextra = "LIMIT 100000"
-else:
-    testextra = ""
-    print(f"Current Time: {datetime.datetime.now()}")
-    print("Generating user sample...")
-    t1user = time.time()
+# if test:
+#     testextra = "LIMIT 100000"
+# else:
+#     testextra = ""
+#     print(f"Current Time: {datetime.datetime.now()}")
+#     print("Generating user sample...")
+#     t1user = time.time()
 
-usersamp_raw = db.raw_sql(f"SELECT DISTINCT user_id FROM revelio.individual_user_education {testextra}")
+# usersamp_raw = db.raw_sql(f"SELECT DISTINCT user_id FROM revelio.individual_user_education {testextra}")
 
-print(f"Total users before filtering: {usersamp_raw.shape[0]}")
+# print(f"Total users before filtering: {usersamp_raw.shape[0]}")
 
-# filtering to relevant users
-j = 100
-usersamp = help.chunk_query(usersamp_raw, j = j, fun = fetch_user_education_with_raw, d = 10000, verbose = True, extraverbose=test, outpath = saveloc_users)
+# # filtering to relevant users
+# j = 100
+# usersamp = help.chunk_query(usersamp_raw, j = j, fun = fetch_user_education_with_raw, d = 10000, verbose = True, extraverbose=test, outpath = saveloc_users)
 
-if not test:
-    print("Merging user sample chunks...")
-    usersamp = help.chunk_merge(saveloc_users, j = j, outfile = outfileloc_users, verbose = True)
+# if not test:
+#     print("Merging user sample chunks...")
+#     usersamp = help.chunk_merge(saveloc_users, j = j, outfile = outfileloc_users, verbose = True)
 
-    print(f"Total users after filtering: {usersamp.shape[0]}")
-    print(f"Time Elapsed: {round((time.time()-t1user)/60, 2)} minutes")
+#     print(f"Total users after filtering: {usersamp.shape[0]}")
+#     print(f"Time Elapsed: {round((time.time()-t1user)/60, 2)} minutes")
 
 
 # ## TOGGLES
@@ -231,41 +239,46 @@ if not test:
 
 #     return educ_us
 
-# # function to get relevant position data given list of usernames
-# def get_merge_query_positions(userids, db = db):
-#     userid_subset = ','.join(userids['user_id'].astype('str'))
-#     positions = db.raw_sql(
-#     f"""
-#     SELECT user_id, position_id, position_number, rcid, country, state, metro_area, msa, startdate, enddate, role_k1500, salary, total_compensation FROM revelio.individual_positions WHERE user_id IN ({userid_subset})
-#     """)
+# function to get relevant position data given list of usernames
+def get_merge_query_positions(userids, db = db):
+    userid_subset = ','.join(userids['user_id'].astype('str'))
+    # positions = db.raw_sql(
+    # f"""
+    # SELECT user_id, position_id, position_number, rcid, country, state, metro_area, msa, startdate, enddate, role_k1500, salary, total_compensation FROM revelio.individual_positions WHERE user_id IN ({userid_subset})
+    # """)
+    positions = db.raw_sql(
+    f"""
+    SELECT user_id, country, state, metro_area, startdate, enddate, salary, total_compensation FROM revelio.individual_positions WHERE user_id IN ({userid_subset})
+    """)
 
-#     return positions
+    return positions
 
-# #####################
-# # QUERYING WRDS
-# #####################
-# t0_0 = time.time()
-# print(f"Running ihma_import for All Countries on {usersamp.shape[0]} userids")
-# print("---------------------")
+#####################
+# QUERYING WRDS
+#####################
+t0_0 = time.time()
+j = 10
+print(f"Running ihma_import for All Countries on {usersamp.shape[0]} userids")
+print("---------------------")
 
-# # running chunks and saving
+# running chunks and saving
 # print("Education: Querying and saving individual chunks...")
 # testdf = help.chunk_query(usersamp, j = j, fun = get_merge_query_educ, d = 20, verbose = True, extraverbose=test, outpath = saveloc_educ)
 
 # t1_1 = time.time()
 # print(f"Done! Time Elapsed: {round((t1_1-t0_0)/3600, 2)} hours")
 
-# print("Positions: Querying and saving individual chunks...")
-# help.chunk_query(usersamp, j = j, fun = get_merge_query_positions, d = 20, verbose = True, extraverbose=test, outpath = saveloc_positions)
+print("Positions: Querying and saving individual chunks...")
+help.chunk_query(usersamp, j = j, fun = get_merge_query_positions, d = 10000, verbose = True, extraverbose=test, outpath = saveloc_positions)
 
-# t2_2 = time.time()
-# print(f"Done! Time Elapsed: {round((t2_2-t1_1)/3600, 2)} hours")
+t2_2 = time.time()
+print(f"Done! Time Elapsed: {round((t2_2-t0_0)/3600, 2)} hours")
 
-# # getting merged chunks
-# if not test:
-#     print("Merging chunks...")
-#     out_educ = help.chunk_merge(saveloc_educ, j = j, outfile = outfileloc_educ, verbose = True)
+# getting merged chunks
+if not test:
+    print("Merging chunks...")
+    # out_educ = help.chunk_merge(saveloc_educ, j = j, outfile = outfileloc_educ, verbose = True)
 
-#     out_positions = help.chunk_merge(saveloc_positions, j = j, outfile = outfileloc_positions, verbose = True)
+    out_positions = help.chunk_merge(saveloc_positions, j = j, outfile = outfileloc_positions, verbose = True)
 
-# print(f"Script Ended: {datetime.datetime.now()}")
+print(f"Script Ended: {datetime.datetime.now()}")

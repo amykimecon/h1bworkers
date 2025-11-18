@@ -7,6 +7,7 @@ live in ``{root}/data/int``:
 
 * ``rsid_geoname_cw.parquet`` — Revelio RSIDs to ``geoname_id``
 * ``ipeds_geoname_cw.parquet`` — IPEDS UNITIDs to ``geoname_id``
+* ``rsid_ipeds_cw.parquet`` — Revelio RSIDs linked to IPEDS UNITIDs via shared geonames
 
 The matching strategy is:
 
@@ -19,6 +20,9 @@ The matching strategy is:
    unavailable.
 4. Attach the best-scoring geoname id back to the FOIA/IPEDS tables and then
    to the RSID counts.
+5. For RSIDs whose university country is missing or non-US, search for city
+   tokens within their institution names using the global Geonames ``cities500``
+   reference to recover additional matches.
 
 Run the script with ``python 10_misc/create_rsid_geoname_cw.py``. Set the
 ``FROMSCRATCH`` flag below to rebuild intermediate FOIA aggregates if
@@ -53,6 +57,8 @@ WRDS_USERS_PATH = DATA_INT / "wrds_users_sep2.parquet"
 UNIV_ZIP_PATH = DATA_INT / "univ_zip_cw.parquet" # from FOIA data
 RSID_OUTPUT_PATH = DATA_INT / "rsid_geoname_cw.parquet"
 IPEDS_OUTPUT_PATH = DATA_INT / "ipeds_geoname_cw.parquet"
+RSID_IPEDS_OUTPUT_PATH = DATA_INT / "rsid_ipeds_cw.parquet"
+ISO_COUNTRY_CODES_PATH = Path(root) / "data" / "crosswalks" / "iso_country_codes.csv"
 
 GEONAMES_COLUMNS = [
     "geoname_id",
@@ -77,6 +83,16 @@ GEONAMES_COLUMNS = [
 ]
 
 NAME_CLEAN_RE = re.compile(r"[^a-z0-9 ]+")
+
+if ISO_COUNTRY_CODES_PATH.exists():
+    _iso_country_df = pd.read_csv(ISO_COUNTRY_CODES_PATH, usecols=["name", "alpha-2"])
+    ISO_COUNTRY_MAP = {
+        str(name).strip().lower(): str(code).strip().upper()
+        for name, code in zip(_iso_country_df["name"], _iso_country_df["alpha-2"])
+        if pd.notna(name) and pd.notna(code)
+    }
+else:
+    ISO_COUNTRY_MAP: dict[str, str] = {}
 
 STATE_NAME_TO_ABBR = {
     "alabama": "AL",
@@ -357,12 +373,11 @@ def load_univ_zip(con: ddb.DuckDBPyConnection) -> pd.DataFrame:
 
 def load_univ_rsid(con: ddb.DuckDBPyConnection) -> pd.DataFrame:
     query = f"""
-        SELECT rsid, university_raw, COUNT(*) AS n
+        SELECT rsid, university_raw, university_country, COUNT(*) AS n
         FROM read_parquet('{WRDS_USERS_PATH}')
         WHERE university_raw IS NOT NULL
           AND rsid IS NOT NULL
-          AND university_country = 'United States'
-        GROUP BY rsid, university_raw
+        GROUP BY rsid, university_raw, university_country
         HAVING COUNT(*) >= 10
     """
     return con.execute(query).df()
@@ -402,6 +417,61 @@ def load_ipeds_crosswalk() -> pd.DataFrame:
     return merged
 
 
+def load_global_city_tokens(min_token_length: int = 4) -> pd.DataFrame:
+    """
+    Build a lookup table of normalized city tokens from the Geonames cities500 file.
+
+    Only non-US geonames are retained because the token matching is used for RSIDs
+    whose university_country is missing or outside the United States.
+    """
+
+    primary_path = GEONAMES_DIR / "cities500.txt"
+    fallback_path = GEONAMES_DIR / "cities.txt"
+    if primary_path.exists():
+        geoname_path = primary_path
+    elif fallback_path.exists():
+        geoname_path = fallback_path
+    else:
+        raise FileNotFoundError(
+            f"Could not find cities500 or cities.txt under {GEONAMES_DIR}; token lookup unavailable."
+        )
+
+    df = pd.read_csv(
+        geoname_path,
+        sep="\t",
+        header=None,
+        names=GEONAMES_COLUMNS,
+        dtype={"geoname_id": str, "admin1_code": str, "alternatenames": str, "country_code": str},
+        na_values={"": np.nan, "\\N": np.nan},
+        keep_default_na=True,
+    )
+    df["country_code"] = df["country_code"].str.upper()
+    df = df[df["country_code"].ne("US")].copy()
+    base_cols = ["geoname_id", "country_code", "population"]
+
+    variants: list[pd.DataFrame] = []
+    for col in ("name", "asciiname"):
+        chunk = df[base_cols + [col]].rename(columns={col: "variant_raw"})
+        variants.append(chunk)
+
+    alt = df.loc[df["alternatenames"].notna(), base_cols + ["alternatenames"]].copy()
+    if not alt.empty:
+        alt["variant_raw"] = alt["alternatenames"].str.split(",")
+        alt = alt.explode("variant_raw")
+        variants.append(alt[base_cols + ["variant_raw"]])
+
+    combined = pd.concat(variants, ignore_index=True)
+    combined["variant_clean"] = _normalize(combined["variant_raw"])
+    combined = combined[combined["variant_clean"].ne("")]
+    combined["token"] = combined["variant_clean"].str.split(" ")
+    combined = combined.explode("token")
+    combined["token"] = combined["token"].str.strip()
+    combined = combined[combined["token"].str.len() >= min_token_length]
+    combined = combined.drop_duplicates(subset=["token", "geoname_id", "country_code"])
+    combined = combined.rename(columns={"variant_raw": "geo_name"})
+    return combined[["token", "geoname_id", "country_code", "geo_name", "population"]]
+
+
 def build_school_geoname_lookup(school_geo: pd.DataFrame) -> pd.DataFrame:
     lookup = school_geo.dropna(subset=["geoname_id"]).copy()
     lookup["school_clean"] = _normalize(lookup["school_name"])
@@ -419,10 +489,20 @@ def build_school_geoname_lookup(school_geo: pd.DataFrame) -> pd.DataFrame:
     return lookup[cols].drop_duplicates(subset=["school_clean", "geoname_id"])
 
 
-def map_rsid_to_geoname(univ_rsid: pd.DataFrame, school_lookup: pd.DataFrame) -> pd.DataFrame:
+def map_rsid_to_geoname(
+    univ_rsid: pd.DataFrame,
+    school_lookup: pd.DataFrame,
+    city_token_lookup: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
     univ_rsid = univ_rsid.copy()
     univ_rsid["univ_clean"] = _normalize(univ_rsid["university_raw"])
     univ_rsid = univ_rsid[univ_rsid["univ_clean"].ne("")]
+    if "university_country" in univ_rsid.columns:
+        univ_rsid["country_clean"] = univ_rsid["university_country"].fillna("").astype(str).str.strip()
+        univ_rsid["country_iso"] = univ_rsid["country_clean"].str.lower().map(ISO_COUNTRY_MAP)
+    else:
+        univ_rsid["country_clean"] = ""
+        univ_rsid["country_iso"] = np.nan
 
     exact = univ_rsid.merge(
         school_lookup,
@@ -475,6 +555,41 @@ def map_rsid_to_geoname(univ_rsid: pd.DataFrame, school_lookup: pd.DataFrame) ->
 
     combined = pd.concat([exact_matches, fuzzy], ignore_index=True, sort=False)
     combined = combined.dropna(subset=["geoname_id"])
+
+    token_matches = pd.DataFrame()
+    if (
+        city_token_lookup is not None
+        and not city_token_lookup.empty
+    ):
+        remaining = univ_rsid.loc[~univ_rsid["rsid"].isin(combined["rsid"])].copy()
+        if not remaining.empty:
+            target_mask = remaining["country_clean"].str.casefold().ne("united states")
+            token_candidates = remaining.loc[target_mask & remaining["univ_clean"].ne("")]
+            if not token_candidates.empty:
+                token_candidates = token_candidates.assign(tokens=token_candidates["univ_clean"].str.split(" "))
+                token_candidates = token_candidates.explode("tokens")
+                token_candidates["token"] = token_candidates["tokens"].str.strip()
+                token_candidates = token_candidates[token_candidates["token"].str.len() >= 4]
+                token_candidates = token_candidates.drop_duplicates(subset=["rsid", "token"])
+                token_matches = token_candidates.merge(city_token_lookup, on="token", how="inner")
+                token_matches = token_matches[token_matches["geoname_id"].notna()].copy()
+                if "country_iso" in token_matches.columns:
+                    token_matches["country_code"] = token_matches["country_code"].str.upper()
+                    token_matches = token_matches[
+                        token_matches["country_iso"].isna()
+                        | token_matches["country_iso"].eq(token_matches["country_code"])
+                    ]
+                if not token_matches.empty:
+                    token_matches = token_matches.assign(
+                        match_method="city_token",
+                        match_score=token_matches["population"].fillna(0.0),
+                        campus_city=pd.NA,
+                        campus_state=pd.NA,
+                    )
+                    token_matches = token_matches.drop(columns=["tokens", "token"], errors="ignore")
+                    combined = pd.concat([combined, token_matches], ignore_index=True, sort=False)
+
+    combined = combined.dropna(subset=["geoname_id"])
     if combined.empty:
         return combined
 
@@ -511,12 +626,86 @@ def build_ipeds_geoname(ipeds_geo: pd.DataFrame) -> pd.DataFrame:
     return df[keep_cols]
 
 
+def build_rsid_ipeds_crosswalk(univ_rsid: pd.DataFrame, ipeds_names: pd.DataFrame) -> pd.DataFrame:
+    """Link RSIDs directly to IPEDS UNITIDs via normalized university names (including aliases)."""
+
+    columns = [
+        "rsid",
+        "university_raw",
+        "unitid",
+        "instname",
+        "source",
+        "match_count",
+        "n",
+    ]
+    if univ_rsid.empty or ipeds_names.empty:
+        return pd.DataFrame(columns=columns)
+
+    rsid_df = univ_rsid.copy()
+    rsid_df["name_clean"] = _normalize(rsid_df["university_raw"])
+    rsid_df = rsid_df[rsid_df["name_clean"].ne("")]
+
+    ipeds_df = ipeds_names.copy()
+    ipeds_df["inst_clean"] = _normalize(ipeds_df["instname"])
+    ipeds_df = ipeds_df[ipeds_df["inst_clean"].ne("")]
+
+    if rsid_df.empty or ipeds_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    source_priority = {
+        "IPEDSInstnm": 0,
+        "INSTNM": 1,
+        "PEPSSchname": 2,
+        "PEPSLocname": 3,
+        "ALIAS": 4,
+    }
+
+    merged = rsid_df.merge(
+        ipeds_df,
+        left_on="name_clean",
+        right_on="inst_clean",
+        how="left",
+        suffixes=("", "_ipeds"),
+    )
+    merged = merged[merged["UNITID"].notna()].copy()
+    if merged.empty:
+        return pd.DataFrame(columns=columns)
+
+    merged["source_priority"] = merged["source"].map(source_priority).fillna(99)
+    merged["match_count"] = merged.groupby("rsid")["UNITID"].transform("count")
+
+    merged = merged.sort_values(
+        ["rsid", "match_count", "source_priority", "UNITID", "instname"],
+        ascending=[True, True, True, True, True],
+    )
+    merged = merged.drop_duplicates(subset=["rsid"])
+
+    result = merged[
+        [
+            "rsid",
+            "university_raw",
+            "UNITID",
+            "instname",
+            "source",
+            "match_count",
+            "n",
+        ]
+    ].rename(columns={"UNITID": "unitid"})
+    return result
+
+
 def main() -> None:
     con = ddb.connect()
 
     geoname_variants = load_geoname_variants()
     geoname_sources = " and ".join(GEONAMES_CANDIDATE_FILES)
     print(f"Loaded {len(geoname_variants):,} geoname name variants for US cities from {geoname_sources}.")
+    try:
+        city_token_lookup = load_global_city_tokens()
+        print(f"Loaded {len(city_token_lookup):,} global city tokens from Geonames for non-US RSID matching.")
+    except FileNotFoundError as exc:
+        print(f"Warning: {exc}")
+        city_token_lookup = pd.DataFrame()
 
     univ_zip_cw = load_univ_zip(con)
     univ_rsid_cw = load_univ_rsid(con)
@@ -529,8 +718,10 @@ def main() -> None:
     resolved_school_share = school_geo["geoname_id"].notna().mean()
     print(f"Matched {resolved_school_share:.1%} of FOIA campus city/state pairs to geoname ids.")
 
+    # matching RSIDs to geonames via school names and city tokens
+    # TODO: FIX THIS!!!
     school_lookup = build_school_geoname_lookup(school_geo)
-    rsid_geoname = map_rsid_to_geoname(univ_rsid_cw, school_lookup)
+    rsid_geoname = map_rsid_to_geoname(univ_rsid_cw, school_lookup, city_token_lookup=city_token_lookup)
     if not rsid_geoname.empty:
         rsid_geoname.to_parquet(RSID_OUTPUT_PATH, index=False)
         print(
@@ -548,6 +739,15 @@ def main() -> None:
         )
     else:
         print("Warning: no IPEDS to geoname matches were produced.")
+
+    rsid_ipeds = build_rsid_ipeds_crosswalk(univ_rsid_cw, ipeds_cw)
+    if not rsid_ipeds.empty:
+        rsid_ipeds.to_parquet(RSID_IPEDS_OUTPUT_PATH, index=False)
+        print(
+            f"Saved RSID to IPEDS crosswalk for {rsid_ipeds['rsid'].nunique():,} RSIDs ({rsid_ipeds['unitid'].nunique():,} UNITIDs) to {RSID_IPEDS_OUTPUT_PATH}."
+        )
+    else:
+        print("Warning: no RSID to IPEDS matches were produced.")
 
     con.close()
 

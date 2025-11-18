@@ -164,6 +164,7 @@ class AnnRetriever:
     index_path: Path
     top_k: int = 50
     nprobe: int = 32
+    batch_size: int = 100_000
 
     def __post_init__(self) -> None:
         self.embedding_path = Path(self.embedding_path)
@@ -197,57 +198,58 @@ class AnnRetriever:
 
     def generate_candidates(
         self,
-        subset: Sequence[str],
+        sources: Sequence[str],
         limit: Optional[int] = None,
-    ) -> List[Tuple[str, str, float]]:
+        allowed_targets: Optional[Sequence[str]] = None,
+        stream: bool = False
+    ):
+        
         """Return ANN-derived candidate pairs drawn from the supplied subset."""
 
-        if not subset:
-            return []
-        indices: List[int] = []
-        missing: List[str] = []
-        for name in subset:
-            idx = self._lookup.get(name)
-            if idx is None:
-                missing.append(name)
-                continue
-            indices.append(idx)
-        if missing:
-            warnings.warn(
-                f"{len(missing)} names missing from ANN embeddings; rebuild embeddings to include them.",
-                RuntimeWarning,
-            )
-        if not indices:
-            return []
+        # map names -> indices once
+        name_to_idx = {n: i for i, n in enumerate(self.names)}
+        src_idx = [name_to_idx[n] for n in sources if n in name_to_idx]
+        if not src_idx:
+            return [] if not stream else iter(())
 
-        vectors = np.asarray(self._vectors[indices], dtype=np.float32)
-        top_k = max(1, self.top_k)
-        distances, neighbor_ids = self._index.search(vectors, top_k + 1)  # type: ignore[attr-defined]
+        # allowed targets (default: whole corpus)
+        allowed = None if allowed_targets is None else set(allowed_targets)
 
-        subset_set = set(subset)
-        pair_scores: Dict[Tuple[str, str], float] = {}
-        for row_idx, source_idx in enumerate(indices):
-            source_name = self.names[source_idx]
-            neighbor_list = neighbor_ids[row_idx]
-            neighbor_scores = distances[row_idx]
-            for neigh_idx, score in zip(neighbor_list, neighbor_scores):
-                candidate_idx = int(neigh_idx)
-                if candidate_idx < 0 or candidate_idx >= len(self.names):
-                    continue
-                if candidate_idx == source_idx:
-                    continue
-                target_name = self.names[candidate_idx]
-                if target_name not in subset_set:
-                    continue
-                ordered = tuple(sorted((source_name, target_name)))
-                numeric_score = float(score)
-                if ordered not in pair_scores or numeric_score > pair_scores[ordered]:
-                    pair_scores[ordered] = numeric_score
+        def _pairs_for_batch(batch_idx):
+            vectors = np.asarray(self._vectors[batch_idx], dtype=np.float32)
+            D, I = self._index.search(vectors, self.top_k + 1)  # faiss
+            for row_i, src in enumerate(batch_idx):
+                a = self.names[src]
+                for neigh, score in zip(I[row_i], D[row_i]):
+                    j = int(neigh)
+                    if j < 0 or j >= len(self.names) or j == src:
+                        continue
+                    b = self.names[j]
+                    if allowed is not None and b not in allowed:
+                        continue
+                    yield a, b, float(score)
 
-        sorted_pairs = sorted(pair_scores.items(), key=lambda item: item[1], reverse=True)
-        if limit is not None and limit > 0:
-            sorted_pairs = sorted_pairs[:limit]
-        return [(a, b, score) for (a, b), score in sorted_pairs]
+        if stream:
+            # yield on the fly to avoid giant dicts/sorts
+            for s in range(0, len(src_idx), self.batch_size):
+                yield from _pairs_for_batch(src_idx[s:s + self.batch_size])
+        else:
+            # collect with de-dup and optional global trim
+            pair_scores = {}
+            produced = 0
+            for s in range(0, len(src_idx), self.batch_size):
+                for a, b, score in _pairs_for_batch(src_idx[s:s + self.batch_size]):
+                    k = tuple(sorted((a, b)))
+                    # keep best score
+                    if k not in pair_scores or score > pair_scores[k]:
+                        pair_scores[k] = score
+                    produced += 1
+                    if limit and produced >= limit:
+                        break
+            items = pair_scores.items()
+            if limit and limit < len(items):
+                items = sorted(items, key=lambda kv: kv[1], reverse=True)[:limit]
+            return [(a, b, s) for (a, b), s in items]
 
 
 __all__ = [
