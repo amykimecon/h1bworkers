@@ -1,7 +1,4 @@
-# File Description: Cleaning and Merging User and Position Data from Reveliio
-# Author: Amy Kim
-# Date Created: Wed Apr 9 (Updated June 26 2025)
-
+# initial exploration of foia sevp data
 # Imports and Paths
 import duckdb as ddb
 import pandas as pd
@@ -19,8 +16,8 @@ con = ddb.connect()
 
 # TOGGLES
 test = False
-from_scratch = False
-data_concat = False
+from_scratch = True # whether to read raw data files and process from scratch
+data_concat = True  # whether to read raw data files and concatenate into one parquet
 
 #####################################
 ## IMPORTING DATA
