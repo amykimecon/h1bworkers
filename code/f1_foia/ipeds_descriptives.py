@@ -24,6 +24,10 @@ except Exception:  # pragma: no cover - optional dependency
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import *
+OUTFIG_PATH = '/Users/amykim/Documents/GitHub/h1bworkers/output/slides/slides_20251204'
+sns.set_theme(rc={"figure.figsize": (11, 6), "figure.dpi":200, "lines.linewidth": 3}, style="ticks", font_scale=1.4)
+#sns.set_context(font_scale = 2)
+
 INT_FOLDER = f"{root}/data/int/int_files_nov2025"
 IPEDS_GEO_PATH = f"{root}/data/raw/ipeds_cw_2021.csv"
 # Optional shapefiles for county/ZIP outlines (set to your local paths)
@@ -40,20 +44,312 @@ ipeds['awlevel_group'] = np.where(ipeds['awlevel'].isin([5, 7, 17, 9]), ipeds['a
     17: 'Doctor',
     9: 'Doctor'
 }), 'Other')
+ipeds['awlevel_group_alt'] = np.where((ipeds['awlevel']==7) & (ipeds['share_intl']>=0.5), 'IHMP', np.where(ipeds['awlevel']==7, 'Non-IH Master', ipeds['awlevel_group']))
 ipeds['intl_ihmp'] = ipeds['ihmp']*ipeds['cnralt']
+#ipeds['cip_cat'] = np.where(ipeds['cip2dig'].isin([11,14,27,40,52]))
 
 # DESCRIPTIVE ONE: Share of all degree completions by international students over time
 ipeds_by_year = ipeds[ipeds['awlevel_group'] != 'Other'].groupby(['year']).agg({'ctotalt': 'sum', 'cnralt': 'sum', 'intl_ihmp': 'sum'}).reset_index()
-ipeds_by_year['share_intl'] = ipeds_by_year['cnralt'] / ipeds_by_year['ctotalt']
-ipeds_by_year['share_ihmp_intl'] = ipeds_by_year['intl_ihmp'] / ipeds_by_year['ctotalt']
 ipeds_by_deg_year = ipeds[ipeds['awlevel_group'] != 'Other'].groupby(['year', 'awlevel_group']).agg({'ctotalt': 'sum', 'cnralt': 'sum', 'intl_ihmp': 'sum'}).reset_index()
-ipeds_by_deg_year['share_intl'] = ipeds_by_deg_year['cnralt'] / ipeds_by_deg_year['ctotalt']
+ipeds_by_stem_year_ma = ipeds[(ipeds['awlevel_group'] == 'Master')].groupby(['year', 'STEMOPT']).agg({'ctotalt': 'sum', 'cnralt': 'sum', 'intl_ihmp': 'sum'}).reset_index()
+ipeds_by_stem_year_all = ipeds[(ipeds['awlevel_group'] != 'Other')].groupby(['year', 'STEMOPT']).agg({'ctotalt': 'sum', 'cnralt': 'sum', 'intl_ihmp': 'sum'}).reset_index()
 
-sns.lineplot(data=ipeds_by_year, x='year', y='cnralt', color = 'blue')
+# normalizing to 2004 levels and adding share columns
+dfs_out = []
+normyear = 2004
+for df in [ipeds_by_year, ipeds_by_deg_year, ipeds_by_stem_year_ma, ipeds_by_stem_year_all]:
+    df['share_intl'] = df['cnralt'] / df['ctotalt']
+
+    df_norm = df.copy()
+    # normalizing to 2004 levels (by group)
+    group_cols = [col for col in ['awlevel_group', 'STEMOPT'] if col in df_norm.columns]
+    if group_cols:
+        df_norm[['ctotalt', 'cnralt', 'intl_ihmp', 'share_intl']] = df_norm.groupby(group_cols)[['ctotalt', 'cnralt', 'intl_ihmp', 'share_intl']].transform(lambda x: x / x[df_norm['year'] == normyear].values[0])
+    else:
+        df_norm[['ctotalt', 'cnralt', 'intl_ihmp', 'share_intl']] = df_norm[['ctotalt', 'cnralt', 'intl_ihmp', 'share_intl']].div(df_norm.loc[df_norm['year'] == normyear, ['ctotalt', 'cnralt', 'intl_ihmp', 'share_intl']].values[0])
+
+    dfs_out.append((df, df_norm))
+
+# PLOT 1a: Share of international students over time (all degrees)
+g = sns.lineplot(data=dfs_out[0][0], x='year', y='share_intl', color = 'gray')
+g.set_xlabel("Graduation Year")
+g.set_ylabel("International Bachelor+ Graduates as Share of Total")
+g.figure.savefig(f"{OUTFIG_PATH}/ipeds_share_intl_over_time_all_degrees.png")
+
+print(f"Increase in share international (all degrees) from 2004 to 2024: {round(dfs_out[0][0].loc[dfs_out[0][0]['year']==2024, 'share_intl'].values[0]/dfs_out[0][0].loc[dfs_out[0][0]['year']==2004, 'share_intl'].values[0],2)}x")
+
+# PLOT 1b: Number of international students over time (all degrees)
+df_1b = dfs_out[0][0].copy()
+df_1b['cnralt'] = df_1b['cnralt']/1000  # rescaling
+plt.figure()
+g2 = sns.lineplot(data=df_1b, x='year', y='cnralt', color = 'gray')
+g2.set_xlabel("Graduation Year")
+g2.set_ylabel("International Bachelor+ Graduates (thousands)")
+g2.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_intl_over_time_all_degrees.png")
+    
+print(f"Increase in international graduates (all degrees) from 2004 to 2024: {round(dfs_out[0][0].loc[dfs_out[0][0]['year']==2024, 'cnralt'].values[0]/dfs_out[0][0].loc[dfs_out[0][0]['year']==2004, 'cnralt'].values[0],2)}x")
+
+# PLOT 2a: Share of international students over time (by degree)
+df_2a = pd.concat([dfs_out[1][0].copy(), pd.DataFrame({'year': dfs_out[0][0]['year'], 'awlevel_group': 'All Degrees', 'share_intl': dfs_out[0][0]['share_intl']})], ignore_index=True)
+plt.figure()
+g3 = sns.lineplot(data=df_2a, x='year', y='share_intl', hue='awlevel_group')
+g3.set_xlabel("Graduation Year")
+g3.set_ylabel("International Graduates as Share of Total")
+g3.legend(title='Degree Level', loc = 'upper left')
+g3.figure.savefig(f"{OUTFIG_PATH}/ipeds_share_intl_over_time_by_degree.png")
+# PLOT 2b: Number of international students over time (by degree + all degrees)
+df_2b = pd.concat([dfs_out[1][0].copy(), pd.DataFrame({'year': dfs_out[0][0]['year'], 'awlevel_group': 'All Degrees', 'cnralt': dfs_out[0][0]['cnralt']})], ignore_index=True)
+df_2b['cnralt'] = df_2b['cnralt']/1000  # rescaling
+plt.figure()
+g4 = sns.lineplot(data=df_2b, x='year', y='cnralt', hue='awlevel_group')
+g4.set_xlabel("Graduation Year")
+g4.set_ylabel("International Graduates (thousands)")
+g4.legend(title='Degree Level', loc = 'upper left')
+g4.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_intl_over_time_by_degree.png")
+
+# print share of all intl degrees from ma in 2024
+print(f"Share of all int'l students in MA in 2024: {round(df_2b.loc[(df_2b['year']==2024)&(df_2b['awlevel_group']=='Master'), 'cnralt'].values[0]/df_2b.loc[(df_2b['year']==2024)&(df_2b['awlevel_group']=='All Degrees'), 'cnralt'].values[0],2)}")
+
+# print share of all total degrees from ma in 2024
+ipeds_by_deg_year_tot = ipeds[ipeds['awlevel_group'] != 'Other'].groupby(['year', 'awlevel_group']).agg({'ctotalt': 'sum'}).reset_index()
+print(f"Share of all students in MA in 2024: {round(ipeds_by_deg_year_tot.loc[(ipeds_by_deg_year_tot['year']==2024)&(ipeds_by_deg_year_tot['awlevel_group']=='Master'), 'ctotalt'].values[0]/ipeds_by_deg_year_tot.loc[(ipeds_by_deg_year_tot['year']==2024), 'ctotalt'].sum(),2)}")
+
+# PLOT 3a: Share of international students over time (by STEMOPT status)
+for masters in [True, False]:
+    if masters:
+        # stemopt for master's only
+        stemopt_df_3 = dfs_out[2][0].copy()
+        # all degrees for master's only
+        all_deg_df_3 = dfs_out[1][0][dfs_out[1][0]['awlevel_group']=='Master'] # only masters
+        suff = "_ma"
+        ylab_addl = " (Master's Only)"
+    else:
+        stemopt_df_3 = dfs_out[3][0].copy()
+        all_deg_df_3 = dfs_out[0][0] # all
+        suff = "_all"
+        ylab_addl = ""
+
+    stemopt_df_3['STEMOPT'] = np.where(stemopt_df_3['STEMOPT']==1, 'STEM', 'Non-STEM')
+    df_3 = pd.concat([stemopt_df_3, pd.DataFrame({'year': all_deg_df_3['year'], 'STEMOPT': 'All Majors', 'share_intl': all_deg_df_3['share_intl'],'cnralt': all_deg_df_3['cnralt']})], ignore_index=True)
+    plt.figure()
+    g4 = sns.lineplot(data=df_3, x='year', y='share_intl', hue='STEMOPT')
+    g4.set_xlabel("Graduation Year")
+    g4.set_ylabel("International Graduates as Share of Total" + ylab_addl)
+    g4.legend(title='Major Type', loc = 'upper left')
+    g4.figure.savefig(f"{OUTFIG_PATH}/ipeds_share_intl_over_time_by_stemopt{suff}.png")
+
+    # PLOT 3b: Number of international students over time (by STEMOPT status)
+    df_3['cnralt'] = df_3['cnralt']/1000  # rescaling
+    plt.figure()
+    g5 = sns.lineplot(data=df_3, x='year', y='cnralt', hue='STEMOPT')
+    g5.set_xlabel("Graduation Year")
+    g5.set_ylabel("International Graduates (thousands)" + ylab_addl)
+    g5.legend(title='Major Type', loc = 'upper left')
+    g5.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_intl_over_time_by_stemopt{suff}.png")
+
+# # PLOT 4a: Share of international students by degree type over time
+# df_4a = dfs_out[1][0].copy()
+# df_4a['share_of_intl'] = df_4a.groupby('year')['cnralt'].transform(lambda x: x / x.sum())
+# g6 = sns.lineplot(data=df_4a, x='year', y='share_of_intl', hue='awlevel_group')
+# g6.set_xlabel("Graduation Year")
+
+# DESCRIPTIVE TWO: Number of programs over time by share_intl decile
+ncuts = 2
+#groupby = ['year']
+groupby = ['year', 'awlevel_group']
+ipeds_by_share_decile_by_year = ipeds[(ipeds['awlevel_group'] != 'Other')&(ipeds['ctotalt']>=10)].copy()
+ipeds_by_share_decile_by_year['share_intl_decile'] = pd.cut(ipeds_by_share_decile_by_year['share_intl'], bins=[i/ncuts for i in range(ncuts + 1)], labels=[f"{round(100*i/ncuts)}-{round(100*(i+1)/ncuts)}%" for i in range(ncuts)], include_lowest=True)
+ipeds_by_share_decile_by_year = ipeds_by_share_decile_by_year.groupby(groupby + ['share_intl_decile']).agg({'unitid': 'nunique', 'cnralt': 'sum', 'ctotalt': 'mean'}).reset_index().rename(columns={'unitid': 'n_programs', 'ctotalt': 'avg_program_size'})  
+ipeds_by_share_decile_by_year['share_programs'] = ipeds_by_share_decile_by_year.groupby(groupby)['n_programs'].transform(lambda x: x / x.sum())
+ipeds_by_share_decile_by_year['share_students'] = ipeds_by_share_decile_by_year.groupby(groupby)['cnralt'].transform(lambda x: x / x.sum())
+
+# normalize to 2004 levels
+group_cols = ['share_intl_decile', 'awlevel_group']
+normyear = 2004
+
+# 1. Get 2004 baseline per group
+base_2004 = (
+    ipeds_by_share_decile_by_year
+    [ipeds_by_share_decile_by_year['year'] == normyear]
+    .set_index(group_cols)['n_programs']
+    .rename('n_programs_2004')
+)
+
+# 2. Merge back into full df
+ipeds_by_share_decile_by_year = ipeds_by_share_decile_by_year.merge(
+    base_2004,
+    on=group_cols,
+    how='left'
+)
+
+# 3. Normalized series (relative to 2004 level)
+ipeds_by_share_decile_by_year['n_programs_norm'] = (
+    ipeds_by_share_decile_by_year['n_programs'] /
+    ipeds_by_share_decile_by_year['n_programs_2004']
+)
+
+# 4. Label using the actual 2004 level, not the normalized value
+ipeds_by_share_decile_by_year['share_intl_decile_label'] = (
+    ipeds_by_share_decile_by_year
+    .apply(
+        lambda row: f"{row['share_intl_decile']} (2004: {int(row['n_programs_2004'])})",
+        axis=1
+    )
+)
+
+cmap = sns.color_palette("vlag", n_colors=ncuts)
+
+# PLOT 1: Number of programs over time by share_intl decile
+plt.figure()
+g2_1 = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='n_programs_norm', hue='share_intl_decile_label',style = 'share_intl_decile_label', palette=cmap)
+g2_1.set_xlabel("Graduation Year")
+g2_1.set_ylabel("Number of Programs (normalized to 2004)")
+g2_1.legend(title="Program Pct Int'l (2004 # Programs)", loc = 'upper left')
+g2_1.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_programs_by_share_intl_over_time_master_norm.png")
+# print number of new programs between 2004 and 2024 for each decile
+for decile in ipeds_by_share_decile_by_year['share_intl_decile'].unique():
+    n_programs_2004 = ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['year']==2004)&(ipeds_by_share_decile_by_year['awlevel_group']=='Master')&(ipeds_by_share_decile_by_year['share_intl_decile']==decile)]['n_programs'].values[0]
+    n_programs_2024 = ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['year']==2024)&(ipeds_by_share_decile_by_year['awlevel_group']=='Master')&(ipeds_by_share_decile_by_year['share_intl_decile']==decile)]['n_programs'].values[0]
+    print(f"Decile {decile}: New programs from 2004 to 2024: {n_programs_2024 - n_programs_2004} (from {n_programs_2004} to {n_programs_2024})")
+
+# PLOT 1b: Number of programs (not normalized)
+plt.figure()
+g2_1b = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='n_programs', hue='share_intl_decile_label',style = 'share_intl_decile_label', palette=cmap)
+g2_1b.set_xlabel("Graduation Year")
+g2_1b.set_ylabel("Number of Master's Programs")
+g2_1b.legend(title="Program Pct Int'l (2004 # Programs)", loc = 'upper left')
+g2_1b.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_programs_by_share_intl_over_time_stem_master.png")
+
+# PLOT 1c: Share of programs over time by share_intl decile
+plt.figure()
+g2_1c = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='share_programs', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+g2_1c.set_xlabel("Graduation Year")
+g2_1c.set_ylabel("Share of Master's Programs")
+g2_1c.legend(title="Program Pct Int'l", loc = 'upper left')
+g2_1c.figure.savefig(f"{OUTFIG_PATH}/ipeds_share_programs_by_share_intl_over_time_stem_master.png")
+
+# PLOT 2: Share of students over time by share_intl decile
+plt.figure()
+#g2_2 = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='share_students', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+
+g2_2 = sns.lineplot(data=ipeds_by_share_decile_by_year, x='year', y='share_students', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+g2_2.set_xlabel("Graduation Year")
+g2_2.set_ylabel("Share of International Students")
+g2_2.legend(title="Program Pct Int'l", loc = 'upper left')
+g2_2.figure.savefig(f"{OUTFIG_PATH}/ipeds_share_students_by_share_intl_over_time_all.png")
+# print increase in share of students between 2004 and 2024 for each decile
+for decile in ipeds_by_share_decile_by_year['share_intl_decile'].unique():
+    share_students_2004 = ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['year']==2004)&(ipeds_by_share_decile_by_year['share_intl_decile']==decile)]['share_students'].values[0]
+    share_students_2024 = ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['year']==2024)&(ipeds_by_share_decile_by_year['share_intl_decile']==decile)]['share_students'].values[0]
+    print(f"Decile {decile}: Increase in share of students from 2004 to 2024: {round(share_students_2024/share_students_2004,2)}x (from {round(share_students_2004,3)} to {round(share_students_2024,3)})")
+
+# PLOT 2b: Number of students over time by share_intl decile
+plt.figure()
+g2_2b = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='cnralt', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+g2_2b.set_xlabel("Graduation Year")
+g2_2b.set_ylabel("Number of Int'l MA STEM Students")
+g2_2b.legend(title="Program Pct Int'l", loc = 'upper left')
+g2_2b.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_students_by_share_intl_over_time_stem_master.png")
+
+# PLOT 3: Average program size over time by share_intl decile
+plt.figure()
+g3 = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='avg_program_size', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+g3.set_xlabel("Graduation Year")
+g3.set_ylabel("Average Program Size")
+g3.legend(title="Program Pct Int'l", loc = 'upper left')
+g3.figure.savefig(f"{OUTFIG_PATH}/ipeds_avg_program_size_by_share_intl_over_time_stem_master.png")
+
+# DESCRIPTIVE THREE: Tracking programs over time
+# DATA PREP: Group by UNITID x CIPCODE x STEMOPT for MA only, get 2004 and 2024 totals and intl students and intl shares
+ipeds_ma = ipeds[ipeds['awlevel_group']=='Master']
+ipeds_2004 = ipeds_ma[ipeds_ma['year']==2004][['unitid', 'cipcode', 'ctotalt', 'cnralt']].rename(columns={'ctotalt': 'ctotalt_2004', 'cnralt': 'cnralt_2004'})
+ipeds_2024 = ipeds_ma[ipeds_ma['year']==2024][['unitid', 'cipcode', 'ctotalt', 'cnralt']].rename(columns={'ctotalt': 'ctotalt_2024', 'cnralt': 'cnralt_2024'})
+ipeds_2004_2024 = ipeds_2004.merge(ipeds_2024, on=['unitid', 'cipcode'], how='inner')
+# fill nas with 0
+ipeds_2004_2024['ctotalt_2004'] = ipeds_2004_2024['ctotalt_2004'].fillna(0)
+ipeds_2004_2024['cnralt_2004'] = ipeds_2004_2024['cnralt_2004'].fillna(0)
+ipeds_2004_2024['ctotalt_2024'] = ipeds_2004_2024['ctotalt_2024'].fillna(0)
+ipeds_2004_2024['cnralt_2024'] = ipeds_2004_2024['cnralt_2024'].fillna(0)
+ipeds_2004_2024['share_intl_2004'] = np.where(ipeds_2004_2024['ctotalt_2004']>0, ipeds_2004_2024['cnralt_2004']/ipeds_2004_2024['ctotalt_2004'], 0)
+ipeds_2004_2024['share_intl_2024'] = np.where(ipeds_2004_2024['ctotalt_2024']>0, ipeds_2004_2024['cnralt_2024']/ipeds_2004_2024['ctotalt_2024'], 0)
+# compute 2004 to 2024 growth in total students and intl students
+ipeds_2004_2024['growth_total'] = np.where(ipeds_2004_2024['ctotalt_2004']>0, (ipeds_2004_2024['ctotalt_2024']-ipeds_2004_2024['ctotalt_2004'])/ipeds_2004_2024['ctotalt_2004'], np.nan)
+ipeds_2004_2024['growth_intl'] = np.where(ipeds_2004_2024['cnralt_2004']>0, (ipeds_2004_2024['cnralt_2024']-ipeds_2004_2024['cnralt_2004'])/ipeds_2004_2024['cnralt_2004'], np.nan)
+
+# PLOT 1: Distribution of growth rates for total 
+plt.figure()
+g3_1 = sns.histplot(data=ipeds_2004_2024[ipeds_2004_2024['growth_total']<10], x='growth_total', bins=50, kde=False)
+
+# PLOT 2: share intl in 2004 vs share intl in 2024 (for those with at least 10 students in both years)
+plt.figure()
+g3_2 = sns.regplot(data=ipeds_2004_2024[(ipeds_2004_2024['ctotalt_2004']>=10) & (ipeds_2004_2024['ctotalt_2024']>=10)], x='share_intl_2004', y='share_intl_2024', x_bins=20, fit_reg = False)
+
+plt.plot([0, 1], [0, 1], color='red', linestyle='--')
+
+# PLOT 3: distribution of change in share intl from 2004 to 2024
+ipeds_2004_2024['share_intl_change'] = ipeds_2004_2024['share_intl_2024'] - ipeds_2004_2024['share_intl_2004']
+plt.figure()
+g3_3 = sns.histplot(data=ipeds_2004_2024[np.abs(ipeds_2004_2024['share_intl_change'])<0.5], x='share_intl_change', bins=100, kde=False)
+
+
+# PLOT 1: Each UNITID x CIPCODE is a dot, x axis is 2004 share international, 
+# subset: only those that exist in both years
+ipeds_ma = ipeds[ipeds['awlevel_group']=='Master']
+ipeds_2004 = ipeds_ma[ipeds_ma['year']==2004][['unitid', 'cipcode', 'ctotalt']].rename(columns={'ctotalt': 'ctotalt_2004'})
+ipeds_2024 = ipeds_ma[ipeds_ma['year']==2024][['unitid', 'cipcode', 'ctotalt']].rename(columns={'ctotalt': 'ctotalt_2024'})
+ipeds_2004_2024 = ipeds_2004.merge(ipeds_2024, on=['unitid', 'cipcode'], how='inner')
+# fill nas with 0
+ipeds_2004_2024['ctotalt_2004'] = ipeds_2004_2024['ctotalt_2004'].fillna(0)
+ipeds_2004_2024['ctotalt_2024'] = ipeds_2004_2024['ctotalt_2024'].fillna(0)
+
+
+
+# get rid of outliers
+maxn = 500
+ipeds_2004_2024 = ipeds_2004_2024[(ipeds_2004_2024['ctotalt_2004']<=maxn)&(ipeds_2004_2024['ctotalt_2024']<=maxn)]
+plt.figure()
+g3_1 = sns.regplot(data=ipeds_2004_2024, x='ctotalt_2004', y='ctotalt_2024', x_bins=50, fit_reg = False)
+# add 45 degree line
+plt.plot([0, 200], [0, 200], color='red', linestyle='--')
+
+# PLOT 2: Same as above, but color by quartile of share_intl in 2004
+ipeds_2004_full = ipeds[ipeds['year']==2004][['unitid', 'cipcode', 'ctotalt', 'cnralt']].rename(columns={'ctotalt': 'ctotalt_2004', 'cnralt': 'cnralt_2004'})
+
+# DESCRIPTIVE THREE: Number/share of programs/students over time by school characteristics
+# PLOT 1: Share of MA students over time by instsize_lab
+df_size = ipeds[(ipeds['awlevel_group']=='Master')&(ipeds['ctotalt']>=10)].copy()
+df_size = df_size.groupby(['year', 'instsize_lab']).agg({'unitid': 'nunique', 'cnralt': 'sum'}).reset_index().rename(columns={'unitid': 'n_programs'})
+df_size['share_programs'] = df_size.groupby(['year'])['n_programs'].transform(lambda x: x / x.sum())
+df_size['share_students'] = df_size.groupby(['year'])['cnralt'].transform(lambda x: x / x.sum())
+plt.figure()
+g3_1 = sns.lineplot(data=df_size, x='year', y='cnralt', hue='instsize_lab')
+
+# PLOT 2: Share of MA students over time by instcat_lab
+df_cat = ipeds[(ipeds['awlevel_group']=='Master')&(ipeds['ctotalt']>=10)].copy()
+
+# color palette gradient by decile
+g2_1 = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='share_programs', hue='share_intl_decile', palette=cmap)
+
+norm = 0
+# keeping plot y axis consistent for comparison
+ymax = dfs_out[1][norm]['share_intl'].max()*1.1
+ymin = dfs_out[1][norm]['share_intl'].min()*0.9
+
+sns.lineplot(data=dfs_out[0][norm], x='year', y='share_intl', color = 'gray', ylim=(ymin, ymax))
+sns.lineplot(data=dfs_out[1][norm], x='year', y='share_intl', hue='awlevel_group', ylim=(ymin, ymax))
+
+norm = 0
+sns.lineplot(data=dfs_out[0][norm], x='year', y='cnralt', color = 'gray')
+sns.lineplot(data=dfs_out[1][norm], x='year', y='cnralt', hue='awlevel_group')
+
+
+sns.lineplot(data=ipeds_by_year, x='year', y='share_intl', color = 'gray')
+
+
 sns.lineplot(data=ipeds_by_year, x='year', y='ctotalt', color = 'gray')
 
 sns.lineplot(data=ipeds_by_year, x='year', y='share_intl', color = 'gray')
-sns.lineplot(data=ipeds_by_deg_year, x='year', y='share_intl', hue='awlevel_group')
+sns.lineplot(data=ipeds_by_deg_year[ipeds_by_deg_year['awlevel_group']=='Bachelor'], x='year', y='share_intl', hue='awlevel_group')
 
 sns.lineplot(data=ipeds_by_year, x='year', y='cnralt', color = 'gray')
 sns.lineplot(data=ipeds_by_deg_year, x='year', y='cnralt', hue='awlevel_group')
@@ -247,11 +543,11 @@ def _assign_econ_group(cip: str) -> str | None:
     if cip is None:
         return None
     if cip == "450601":
-        return "General Economics"
+        return "General Economics (Non-STEM OPT)"
     if cip == "450603":
-        return "Econometrics"
+        return "Econometrics (STEM OPT)"
     if cip in {"450602", "450604", "450605", "450699"}:
-        return "Other Economics"
+        return "Other Economics (Non-STEM OPT)"
     return None
 
 
@@ -259,13 +555,11 @@ def _assign_fin_math_group(cip: str) -> str | None:
     if cip is None:
         return None
     if cip.startswith("5208"):
-        return "Finance (5208xx)"
+        return "Finance (Non-STEM OPT)"
     if cip.startswith("2701"):
-        return "General Math (2701xx)"
+        return "General Math (STEM OPT)"
     if cip.startswith("2703"):
-        return "Applied Math (2703xx)"
-    if cip.startswith("2705") or cip.startswith("2706"):
-        return "Statistics (2705/2706xx)"
+        return "Applied Math (STEM OPT)"
     return None
 
 
@@ -285,23 +579,26 @@ econ_grouped = econ_grouped.merge(baseline_econ, on=["awlevel_group", "econ_grou
 econ_grouped["rel_to_2010"] = econ_grouped["completions"] / econ_grouped["base_2010"]
 econ_grouped = econ_grouped[econ_grouped['awlevel_group']=="Master"]
 
-fig, axes = plt.subplots(1, len(econ_grouped["awlevel_group"].unique()), figsize=(14, 4), sharey=True)
+fig, axes = plt.subplots(1, len(econ_grouped["awlevel_group"].unique()), figsize=(11, 6), sharey=True)
 if not isinstance(axes, np.ndarray):
     axes = np.array([axes])
 for ax, degree in zip(axes, sorted(econ_grouped["awlevel_group"].unique())):
     subset = econ_grouped[econ_grouped["awlevel_group"] == degree]
     for group_name, grp in subset.groupby("econ_group"):
-        ax.plot(grp["year"], grp["completions"], marker="o", label=group_name)
-    ax.set_title(degree)
+        ax.plot(grp["year"], grp["completions"], marker="o", label = group_name)
+    ax.axvline(2014, color = 'red', linestyle='--', linewidth=1)
+    # add grey box between 2014 and 2016
+    ax.axvspan(2014, 2016, color='gray', alpha=0.3)
+    ax.axvline(2016, color = 'red', linestyle='--', linewidth=1)
     ax.axhline(1, color="gray", linestyle="--", linewidth=1)
-    ax.set_ylabel("Completions (relative to 2010)")
+    ax.set_ylabel("Total Master's Degrees")
     ax.set_xlabel("Year")
     ax.legend()
-fig.suptitle("Economics field completions relative to 2010 (by degree type)")
 fig.tight_layout()
+fig.savefig(f"{OUTFIG_PATH}/ipeds_ma_econ_completions_by_year.png")
 
 # Finance / Math / Statistics comparison
-tabfield = 'cnralt'  # can switch to 'ctotalt' for total completions instead of intl
+tabfield = 'ctotalt'  # can switch to 'ctotalt' for total completions instead of intl
 fin_math = ipeds[ipeds["awlevel_group"] != "Other"].copy()
 fin_math["field_group"] = fin_math["cip_str"].apply(_assign_fin_math_group)
 fin_math = fin_math[fin_math["field_group"].notna()]
@@ -318,24 +615,32 @@ fin_grouped["rel_to_2010"] = fin_grouped["completions"] / fin_grouped["base_2010
 
 fin_grouped = fin_grouped[fin_grouped['awlevel_group']=="Master"]
 
-fig2, axes2 = plt.subplots(1, len(fin_grouped["awlevel_group"].unique()), figsize=(8, 6), sharey=True)
+fig2, axes2 = plt.subplots(1, len(fin_grouped["awlevel_group"].unique()), figsize=(11, 6), sharey=True)
 if not isinstance(axes2, np.ndarray):
     axes2 = np.array([axes2])
 for ax, degree in zip(axes2, sorted(fin_grouped["awlevel_group"].unique())):
     subset = fin_grouped[fin_grouped["awlevel_group"] == degree]
     for group_name, grp in subset.groupby("field_group"):
         ax.plot(grp["year"], grp["completions"], marker="o", label=group_name)
-    ax.set_title(degree)
+    ax.axvline(2014, color = 'red', linestyle='--', linewidth=1)
+    # add grey box between 2014 and 2016
+    ax.axvspan(2014, 2016, color='gray', alpha=0.3)
+    ax.axvline(2016, color = 'red', linestyle='--', linewidth=1)
     ax.axhline(1, color="gray", linestyle="--", linewidth=1)
-    ax.set_ylabel("Completions (relative to 2010)")
+    ax.set_ylabel("Total Master's Degrees")
     ax.set_xlabel("Year")
     ax.legend()
-fig2.suptitle("Finance/Math/Statistics completions relative to 2010 (by degree type)")
 fig2.tight_layout()
-
+fig2.savefig(f"{OUTFIG_PATH}/ipeds_ma_fin_math_completions_by_year.png")
+    
 
 ### random
 con = ddb.connect()
 FOIA_PATH = f"{root}/data/int/foia_sevp_combined_raw.parquet"
-foia_raw = con.read_parquet(FOIA_PATH)
-foia_clean = 
+foia_raw = con.read_parquet(FOIA_PATH).df()
+
+### among those with program end year = year, histogram of program length in months
+foia_raw['program_length_months'] = (pd.to_datetime(foia_raw['program_end_date']) - pd.to_datetime(foia_raw['program_start_date'])).dt.days / 30.44
+foia_programs = foia_raw[foia_raw['program_end_year']==foia_raw['year']].copy()
+plt.figure()
+g4_1 = sns.histplot(data=foia_programs, x='program_length_months', bins=50, kde=False)
