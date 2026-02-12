@@ -1,109 +1,213 @@
-# File Description: Using NameTrace Package to get region and gender from names
-# Author: Amy Kim
-# Date Created: July 8, 2025 (see rev_indiv_name2nat.py)
+"""Using NameTrace to infer gender probability and subregion from names."""
 
-# Imports and Paths
+import datetime
 import duckdb as ddb
 from nametrace import NameTracer
-import time
-import sys
-import pandas as pd 
+import json
 import os
+import sys
+import time
+import pandas as pd
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import * 
-
-# helper functions
-sys.path.append('02_revelio_indiv_clean/')
-import h1bworkers.code.helpers as help
+sys.path.append(os.path.dirname(__file__))
+from config import *
+import rev_indiv_config as rcfg
 
 con = ddb.connect()
+my_nt = NameTracer()
+print(f"Using config: {rcfg.ACTIVE_CONFIG_PATH}")
+
+# toggles
+test = rcfg.NAMETRACE_TEST
+testn = rcfg.NAMETRACE_TESTN
+
+# data locations
+wrds_users_file = rcfg.WRDS_USERS_PARQUET
+legacy_chunk_files = rcfg.LEGACY_WRDS_USER_MERGE_SHARDS
+
+
+def load_wrds_users():
+    """Load the latest consolidated WRDS users file; fallback to old shards."""
+    if os.path.exists(wrds_users_file):
+        print(f"Loading consolidated users file: {wrds_users_file}")
+        return con.read_parquet(wrds_users_file)
+
+    print("Consolidated users file not found. Falling back to legacy rev_user_merge shards.")
+    rev_raw = con.read_parquet(legacy_chunk_files[0])
+    for j in range(1, 10):
+        rev_raw = con.sql(
+            f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{legacy_chunk_files[j]}'"
+        )
+    return rev_raw
+
+
+def get_female_score(pred):
+    gender = pred.get("gender")
+    if isinstance(gender, list):
+        for label, score in gender:
+            if label == "female":
+                return score
+    return None
+
+
+def get_region(pred):
+    region_probs = pred.get("subregion")
+    if isinstance(region_probs, list):
+        return region_probs
+    return []
+
+
+def nametrace_run(df, nt=my_nt):
+    if df.empty:
+        return df
+
+    df_out = df.copy()
+    batch_size = max(1, min(100000, df_out.shape[0]))
+    pred = nt.predict(df_out["fullname_clean"].to_list(), batch_size=batch_size, topk=5)
+    df_out["nametrace_json"] = pred
+    df_out["f_prob_nt"] = df_out["nametrace_json"].apply(get_female_score)
+    # Serialize nested region output so parquet chunk writes are stable.
+    df_out["region_probs_json"] = df_out["nametrace_json"].apply(
+        lambda x: json.dumps(get_region(x))
+    )
+    return df_out[["fullname_clean", "f_prob_nt", "region_probs_json"]]
+
+
+t0 = time.time()
+print(f"Current Time: {datetime.datetime.now()}")
 
 ####################
 ## IMPORTING DATA ##
 ####################
-# Importing Data (From WRDS Server)
-rev_raw = con.read_parquet(f"{wrds_out}/rev_user_merge0.parquet")
+rev_raw = load_wrds_users()
 
-for j in range(1,10):
-    rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{wrds_out}/rev_user_merge{j}.parquet'")
-    print(rev_raw.shape)
-
-# getting name2nat function and saving as duckdb function
-con.create_function("name2nat", lambda x: help.name2nat_fun(x), ['VARCHAR'], 'VARCHAR')
-
-#title case function
-con.create_function("title", lambda x: x.title(), ['VARCHAR'], 'VARCHAR')
+# title-case function used inside fullname cleaner
+con.create_function("title", lambda x: x.title(), ["VARCHAR"], "VARCHAR")
 
 ####################
 ## GETTING NAMES ##
 ####################
-testn = 200000
 rev_clean = con.sql(
-f"""
-    SELECT 
-    fullname, university_country, university_location, degree, user_id,
-    {help.degree_clean_regex_sql()} AS degree_clean,
-    {help.inst_clean_regex_sql('university_raw')} AS univ_raw_clean,
-    CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
-    degree_raw, field_raw, university_raw
-    FROM rev_raw -- LIMIT {testn}
+    f"""
+    SELECT
+        fullname,
+        university_country,
+        university_location,
+        degree,
+        user_id,
+        {help.degree_clean_regex_sql()} AS degree_clean,
+        {help.inst_clean_regex_sql('university_raw')} AS univ_raw_clean,
+        CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
+        degree_raw,
+        field_raw,
+        university_raw
+    FROM rev_raw
 """
 )
 
-# collapsing to name level
-rev_names = con.sql("SELECT *, ROW_NUMBER() OVER(ORDER BY fullname_clean) AS rownum FROM (SELECT fullname_clean FROM rev_clean WHERE fullname_clean != '' GROUP BY fullname_clean)")
-n = rev_names.shape[0]
+if test:
+    rev_clean = con.sql(f"SELECT * FROM rev_clean LIMIT {testn}")
 
-my_nt = NameTracer()
-
-def get_female_score(d):
-    gender = d.get('gender')
-    if isinstance(gender, list):
-        for label, score in gender:
-            if label == 'female':
-                return score
-    return None 
-
-def nametrace_subdiv(i, n_tot, df, nt = my_nt):
-    t0 = time.time()
-    df_out = df.loc[df['rownum'] % n_tot == i].copy(deep=True)
-    df_out['nametrace_json'] = nt.predict(df_out['fullname_clean'].to_list(), batch_size = n, topk = 5)
-    df_out['f_prob_nt'] = df_out['nametrace_json'].apply(get_female_score)
-    df_out['region_probs'] = df_out['nametrace_json'].apply(lambda x: x['subregion'])
-
-    # df_out.to_parquet(f'{root}/data/int/name2nat_revelio/rev_names_withnat_jun26_{i}of{n_tot}.parquet')
-    t1 = time.time()
-    print(f"Time to complete iteration {i}: {round((t1-t0)/60,5)} min")
-
-    return df_out[['fullname_clean', 'f_prob_nt', 'region_probs']]
-
-# subdividing into 100k-observation units
-n_subdiv = int(n/100000)
-t0 = time.time()
-print("TEST: SUBDIV, PANDAS")
-print(f"Running name2nat on {n} names")
+# collapse to name level
+rev_names = con.sql(
+    """
+    SELECT *, ROW_NUMBER() OVER(ORDER BY fullname_clean) AS rownum
+    FROM (
+        SELECT fullname_clean
+        FROM rev_clean
+        WHERE fullname_clean != ''
+        GROUP BY fullname_clean
+    )
+"""
+)
 
 rev_names_df = rev_names.df()
-df_out_all = []
-for i in range(n_subdiv):
-    temp = nametrace_subdiv(i, n_subdiv, rev_names_df)
-    df_out_all = df_out_all + [temp]
+n = rev_names_df.shape[0]
+print(f"Running rev_indiv_nametrace on {n} unique names")
+print("-------------------------")
+
+if n == 0:
+    run_tag = "test" if test else rcfg.RUN_TAG
+    wide_outfile = f"{root}/data/int/rev_names_nametrace_{run_tag}.parquet"
+    long_outfile = f"{root}/data/int/rev_names_nametrace_long_{run_tag}.parquet"
+    pd.DataFrame(columns=["fullname_clean", "f_prob_nt"]).to_parquet(wide_outfile)
+    pd.DataFrame(columns=["fullname_clean", "f_prob_nt", "region", "prob"]).to_parquet(
+        long_outfile
+    )
+    print("No names to score; wrote empty outputs.")
+    print(f"Saved: {wide_outfile}")
+    print(f"Saved: {long_outfile}")
+    print(f"Script Ended: {datetime.datetime.now()}")
+    raise SystemExit(0)
+
+#############################
+## QUERYING + SAVING CHUNKS ##
+#############################
+run_tag = "test" if test else rcfg.RUN_TAG
+chunk_dir = rcfg.NAMETRACE_CHUNK_DIR
+os.makedirs(chunk_dir, exist_ok=True)
+
+saveloc = f"{chunk_dir}/nametrace_revelio_{run_tag}_"
+j = rcfg.NAMETRACE_CHUNKS
+d = rcfg.NAMETRACE_CHUNK_SIZE
+j_eff = max(1, min(j, rev_names_df.shape[0]))
+
+print("Querying and saving individual chunks...")
+help.chunk_query(
+    rev_names_df,
+    j=j_eff,
+    fun=nametrace_run,
+    d=d,
+    verbose=True,
+    extraverbose=test,
+    outpath=saveloc,
+)
+
+df_out_all_concat = help.chunk_merge(saveloc, j=j_eff, verbose=True)
+
+if df_out_all_concat is None or df_out_all_concat.empty:
+    raise ValueError("No NameTrace output was produced.")
+
+#############################
+## RESHAPING + FINAL SAVES ##
+#############################
+df_out_all_concat["region_probs"] = df_out_all_concat["region_probs_json"].apply(
+    lambda x: json.loads(x) if isinstance(x, str) and x != "" else []
+)
+df_exp = df_out_all_concat.explode("region_probs")
+df_exp_notnull = df_exp.loc[df_exp["region_probs"].notna()].copy()
+df_exp_notnull["region"] = df_exp_notnull["region_probs"].apply(
+    lambda x: x[0] if isinstance(x, (list, tuple)) and len(x) > 0 else None
+)
+df_exp_notnull["prob"] = df_exp_notnull["region_probs"].apply(
+    lambda x: x[1] if isinstance(x, (list, tuple)) and len(x) > 1 else None
+)
+df_exp_notnull = df_exp_notnull.loc[df_exp_notnull["region"].notna()].copy()
+
+base_names = df_out_all_concat[["fullname_clean", "f_prob_nt"]].drop_duplicates()
+regions_wide = (
+    df_exp_notnull.pivot_table(
+        index="fullname_clean", columns="region", values="prob", aggfunc="max"
+    )
+    .reset_index()
+)
+
+out_wide = base_names.merge(regions_wide, how="left", on="fullname_clean")
+out_long = base_names.merge(
+    df_exp_notnull[["fullname_clean", "region", "prob"]],
+    how="left",
+    on="fullname_clean",
+)
+
+wide_outfile = f"{root}/data/int/rev_names_nametrace_{run_tag}.parquet"
+long_outfile = f"{root}/data/int/rev_names_nametrace_long_{run_tag}.parquet"
+
+out_wide.to_parquet(wide_outfile)
+out_long.to_parquet(long_outfile)
 
 t1 = time.time()
-print(f"Done! Time to complete: {round((t1-t0)/60,5)} min")
-
-# concatenating df
-df_out_all_concat = pd.concat(df_out_all)
-
-# mutating region probs to individual indicators per region
-df_exp = df_out_all_concat.explode('region_probs')
-df_exp_notnull = df_exp.loc[df_exp['region_probs'].isna() == False]
-df_exp_notnull['region'] = df_exp_notnull['region_probs'].apply(lambda x: x[0])
-df_exp_notnull['prob'] = df_exp_notnull['region_probs'].apply(lambda x: x[1])
-
-# merging back to main and saving (pivoting)
-pd.merge(df_out_all_concat[['fullname_clean','f_prob_nt']], df_exp_notnull.pivot(columns = 'region', values = 'prob'),how = 'left', left_index = True, right_index = True).to_parquet(f'{root}/data/int/rev_names_nametrace_jul8.parquet')
-
-# merging back to main and saving (unpivoted)
-pd.merge(df_out_all_concat[['fullname_clean','f_prob_nt']], df_exp_notnull[['region','prob']], how = 'left', left_index = True, right_index = True).to_parquet(f'{root}/data/int/rev_names_nametrace_long_jul8.parquet')
+print(f"Saved: {wide_outfile}")
+print(f"Saved: {long_outfile}")
+print(f"Done! Time Elapsed: {round((t1 - t0) / 3600, 2)} hours")
+print(f"Script Ended: {datetime.datetime.now()}")

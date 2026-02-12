@@ -12,14 +12,17 @@ import os
 from name2nat import Name2nat
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import * 
+sys.path.append(os.path.dirname(__file__))
+from config import *
+import rev_indiv_config as rcfg
 
 con = ddb.connect()
 my_nanat = Name2nat()
+print(f"Using config: {rcfg.ACTIVE_CONFIG_PATH}")
 
 # test toggle
-test = False
-testn = 1000
+test = rcfg.NAME2NAT_TEST
+testn = rcfg.NAME2NAT_TESTN
 
 if test:
     print("TEST VERSION")
@@ -28,10 +31,16 @@ if test:
 ## IMPORTING DATA ##
 ####################
 # Importing Data (From WRDS Server)
-rev_raw = con.read_parquet(f"{wrds_out}/rev_user_merge0.parquet")
-
-for j in range(1,10):
-    rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{wrds_out}/rev_user_merge{j}.parquet'")
+if os.path.exists(rcfg.WRDS_USERS_PARQUET):
+    print(f"Loading consolidated users file: {rcfg.WRDS_USERS_PARQUET}")
+    rev_raw = con.read_parquet(rcfg.WRDS_USERS_PARQUET)
+else:
+    print("Consolidated users file not found. Falling back to legacy rev_user_merge shards.")
+    rev_raw = con.read_parquet(rcfg.LEGACY_WRDS_USER_MERGE_SHARDS[0])
+    for j in range(1, len(rcfg.LEGACY_WRDS_USER_MERGE_SHARDS)):
+        rev_raw = con.sql(
+            f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{rcfg.LEGACY_WRDS_USER_MERGE_SHARDS[j]}'"
+        )
 
 #title case function
 con.create_function("title", lambda x: x.title(), ['VARCHAR'], 'VARCHAR')
@@ -71,13 +80,12 @@ def name2nat_run(df):
 
 ## declaring constants
 if test:
-    saveloc = f"{root}/data/int/name2nat_revelio/test"
-
+    saveloc = rcfg.NAME2NAT_CHUNK_STUB_TEST
 else:
-    saveloc = f"{root}/data/int/name2nat_revelio/name2nat_revelio"
+    saveloc = rcfg.NAME2NAT_CHUNK_STUB
 
-j = 20
-d = 100000
+j = rcfg.NAME2NAT_CHUNKS
+d = rcfg.NAME2NAT_CHUNK_SIZE
 
 ## running code
 t0 = time.time()
@@ -85,21 +93,27 @@ print(f"Current Time: {datetime.datetime.now()}")
 
 rev_names_df = rev_names.df()
 # rev_names_df_list = [name for name in rev_names_df['fullname_clean']]
+j_eff = max(1, min(j, rev_names_df.shape[0]))
 
 print(f"Running rev_indiv_name2nat on {rev_names_df.shape[0]} userids")
+print(f"Using {j_eff} chunks")
 print("-------------------------")
+
+if rev_names_df.shape[0] == 0:
+    print("No names found for the current configuration; skipping query and merge.")
+    print(f"Script Ended: {datetime.datetime.now()}")
+    raise SystemExit(0)
 
 # running chunks and saving 
 print("Querying and saving individual chunks...")
-help.chunk_query(rev_names_df, j = j, fun = name2nat_run, d = d, verbose = True, extraverbose = test, outpath = saveloc)
+help.chunk_query(rev_names_df, j = j_eff, fun = name2nat_run, d = d, verbose = True, extraverbose = test, outpath = saveloc)
 
 t1 = time.time()
 print(f"Done! Time Elapsed: {round((t1-t0)/3600,2)} hours")
 
 # getting merged chunks
-if test:
-    out = help.chunk_merge(saveloc, j = j, verbose = True)
-else:
-    out = help.chunk_merge(saveloc, j = j, outfile = f"{root}/data/int/name2nat_aug1.parquet", verbose = True)
+outfile = rcfg.NAME2NAT_PARQUET_TEST if test else rcfg.NAME2NAT_PARQUET
+out = help.chunk_merge(saveloc, j = j_eff, outfile = outfile, verbose = True)
+print(f"Saved merged output: {outfile}")
 
 print(f"Script Ended: {datetime.datetime.now()}")

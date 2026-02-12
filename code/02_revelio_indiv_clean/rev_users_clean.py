@@ -1,25 +1,50 @@
 # File Description: Cleaning and Merging User and Position Data from Reveliio
 # Author: Amy Kim
-# Date Created: Wed Apr 9 (Updated June 26 2025)
+# Date Created: Wed Apr 9 (Updated Feb 12 2026)
 
 # Imports and Paths
 import duckdb as ddb
 import json
 import sys 
 import os 
+import re
+import subprocess
+import time
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import * 
+sys.path.append(os.path.dirname(__file__))
+from config import *
+import rev_indiv_config as rcfg
 
 # CONSTANTS
 CUTOFF_SHARE_MULTIREG=0
 CUTOFF_N_APPS_TOT=10
 
 # TOGGLE FOR TESTING
-test = False
-test_user = 322249231.0
+test = rcfg.REV_USERS_CLEAN_TEST
+test_user = rcfg.REV_USERS_CLEAN_TEST_USER
+run_tag = rcfg.RUN_TAG
 
 con = ddb.connect()
+t_script0 = time.time()
+print(f"Using config: {rcfg.ACTIVE_CONFIG_PATH}")
+
+
+def _parse_role_col(col):
+    m = re.match(r"^role_k(\d+)(?:_v(\d+))?$", col)
+    if not m:
+        return None
+    occnum = int(m.group(1))
+    version = int(m.group(2)) if m.group(2) else 0
+    return (version, occnum, col)
+
+
+def _detect_role_col(cols):
+    parsed = [p for p in (_parse_role_col(c) for c in cols) if p is not None]
+    if not parsed:
+        return None
+    parsed.sort()
+    return parsed[-1][2]
 
 # Importing Country Codes Crosswalk
 with open(f"{root}/data/crosswalks/country_dict.json", "r") as json_file:
@@ -44,36 +69,370 @@ con.create_function("get_country_subregion", lambda x: help.get_country_subregio
 #####################################
 print('Loading all data sources...')
 ## duplicate rcids (companies that appear more than once in linkedin data)
-dup_rcids = con.read_csv(f"{root}/data/int/dup_rcids_mar20.csv")
+dup_rcids = con.read_csv(rcfg.DUP_RCIDS_CSV)
 
-## matched company data from R
-rmerge = con.read_csv(f"{root}/data/int/good_match_ids_mar20.csv")
+## matched company data from LLM-reviewed crosswalk
+llm_crosswalk = con.read_csv(
+    rcfg.LLM_CROSSWALK_CSV,
+    strict_mode=False,
+    ignore_errors=True,
+    all_varchar=True,
+)
+good_matches = con.read_csv(
+    rcfg.GOOD_MATCH_IDS_CSV,
+    strict_mode=False,
+    ignore_errors=True,
+    all_varchar=True,
+)
 
 ## raw FOIA bloomberg data
 foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all.csv")
 
-## joining raw FOIA data with merged data to get foia_ids in raw foia data
-foia_with_ids = con.sql("SELECT *, CASE WHEN matched IS NULL THEN 0 ELSE matched END AS matchind FROM ((SELECT * FROM foia_raw_file WHERE NOT FEIN = '(b)(3) (b)(6) (b)(7)(c)') AS a LEFT JOIN (SELECT lottery_year, FEIN, foia_id, 1 AS matched FROM rmerge GROUP BY lottery_year, FEIN, foia_id) AS b ON a.lottery_year = b.lottery_year AND a.FEIN = b.FEIN)")
+## Normalize raw LLM crosswalk first (used for bridge/lookup tables).
+con.sql(
+"""
+CREATE OR REPLACE TABLE llm_crosswalk_prepped AS
+SELECT
+    foia_firm_uid,
+    CASE
+        WHEN REGEXP_REPLACE(COALESCE(CAST(fein_clean AS VARCHAR), ''), '[^0-9]', '', 'g') = '' THEN NULL
+        ELSE COALESCE(
+            NULLIF(
+                REGEXP_REPLACE(
+                    REGEXP_REPLACE(COALESCE(CAST(fein_clean AS VARCHAR), ''), '[^0-9]', '', 'g'),
+                    '^0+',
+                    ''
+                ),
+                ''
+            ),
+            '0'
+        )
+    END AS fein_norm,
+    TRY_CAST(fein_year AS INTEGER) AS lottery_year,
+    TRY_CAST(rcid AS DOUBLE) AS rcid_raw,
+    LOWER(TRIM(crosswalk_validity_label)) AS crosswalk_validity_label,
+    LOWER(TRIM(firm_status)) AS firm_status,
+    TRY_CAST(score AS DOUBLE) AS score_num,
+    TRY_CAST(confidence AS DOUBLE) AS confidence_num
+FROM llm_crosswalk
+"""
+)
+
+## LLM match subset mapped to foia_firm_uid x rcid (allowing multiple rcids per firm uid)
+con.sql(
+"""
+CREATE OR REPLACE TABLE llm_crosswalk_unique AS
+SELECT
+    foia_firm_uid,
+    fein_norm,
+    lottery_year,
+    rcid_raw AS rcid,
+    CASE WHEN firm_status = 'exact match' THEN 1 ELSE 3 END AS category_priority,
+    score_num,
+    confidence_num
+FROM llm_crosswalk_prepped
+WHERE foia_firm_uid IS NOT NULL
+  AND TRIM(foia_firm_uid) != ''
+  AND rcid_raw IS NOT NULL
+  AND lottery_year IS NOT NULL
+  AND crosswalk_validity_label = 'valid_match'
+"""
+)
+
+con.sql(
+"""
+CREATE OR REPLACE TABLE llm_uid_bridge AS
+SELECT foia_firm_uid, fein_norm, lottery_year
+FROM llm_crosswalk_prepped
+WHERE foia_firm_uid IS NOT NULL
+  AND TRIM(foia_firm_uid) != ''
+  AND fein_norm IS NOT NULL
+  AND lottery_year IS NOT NULL
+GROUP BY foia_firm_uid, fein_norm, lottery_year
+"""
+)
+
+con.sql(
+"""
+CREATE OR REPLACE TABLE good_matches_mapped AS
+SELECT
+    b.foia_firm_uid,
+    CASE
+        WHEN REGEXP_REPLACE(COALESCE(CAST(a.FEIN AS VARCHAR), ''), '[^0-9]', '', 'g') = '' THEN NULL
+        ELSE COALESCE(
+            NULLIF(
+                REGEXP_REPLACE(
+                    REGEXP_REPLACE(COALESCE(CAST(a.FEIN AS VARCHAR), ''), '[^0-9]', '', 'g'),
+                    '^0+',
+                    ''
+                ),
+                ''
+            ),
+            '0'
+        )
+    END AS fein_norm,
+    TRY_CAST(a.lottery_year AS INTEGER) AS lottery_year,
+    TRY_CAST(a.rcid AS DOUBLE) AS rcid,
+    TRIM(a.foia_id) AS legacy_foia_id
+FROM good_matches AS a
+LEFT JOIN llm_uid_bridge AS b
+    ON (
+        CASE
+            WHEN REGEXP_REPLACE(COALESCE(CAST(a.FEIN AS VARCHAR), ''), '[^0-9]', '', 'g') = '' THEN NULL
+            ELSE COALESCE(
+                NULLIF(
+                    REGEXP_REPLACE(
+                        REGEXP_REPLACE(COALESCE(CAST(a.FEIN AS VARCHAR), ''), '[^0-9]', '', 'g'),
+                        '^0+',
+                        ''
+                    ),
+                    ''
+                ),
+                '0'
+            )
+        END
+    ) = b.fein_norm
+   AND TRY_CAST(a.lottery_year AS INTEGER) = b.lottery_year
+WHERE TRY_CAST(a.rcid AS DOUBLE) IS NOT NULL
+  AND TRY_CAST(a.lottery_year AS INTEGER) IS NOT NULL
+"""
+)
+good_unmapped_n = con.sql(
+    """
+    SELECT COUNT(*) FROM (
+        SELECT legacy_foia_id, fein_norm, lottery_year
+        FROM good_matches_mapped
+        WHERE foia_firm_uid IS NULL
+        GROUP BY legacy_foia_id, fein_norm, lottery_year
+    )
+    """
+).df().iloc[0, 0]
+print(f"Legacy good matches with no mapped foia_firm_uid: {good_unmapped_n}")
+
+con.sql(
+"""
+CREATE OR REPLACE TABLE good_matches_unique AS
+SELECT
+    foia_firm_uid,
+    fein_norm,
+    lottery_year,
+    rcid,
+    2 AS category_priority,
+    NULL::DOUBLE AS score_num,
+    NULL::DOUBLE AS confidence_num
+FROM good_matches_mapped
+WHERE foia_firm_uid IS NOT NULL
+GROUP BY foia_firm_uid, fein_norm, lottery_year, rcid
+"""
+)
+
+con.sql(
+"""
+CREATE OR REPLACE TABLE foia_rcid_union AS
+SELECT
+    foia_firm_uid,
+    fein_norm,
+    lottery_year,
+    rcid,
+    'llm' AS source,
+    category_priority,
+    score_num,
+    confidence_num
+FROM llm_crosswalk_unique
+UNION
+SELECT
+    foia_firm_uid,
+    fein_norm,
+    lottery_year,
+    rcid,
+    'legacy_good' AS source,
+    category_priority,
+    score_num,
+    confidence_num
+FROM good_matches_unique
+"""
+)
+con.sql(
+"""
+CREATE OR REPLACE TABLE foia_rcid_union_collapsed AS
+SELECT
+    x.foia_firm_uid,
+    x.fein_norm,
+    x.lottery_year,
+    x.rcid,
+    CASE
+        WHEN s.has_llm = 1 AND s.has_legacy = 1 THEN 'both'
+        WHEN s.has_llm = 1 THEN 'llm'
+        ELSE 'legacy_good'
+    END AS source,
+    CASE
+        WHEN x.category_priority = 1 THEN 'exact_llm'
+        WHEN x.category_priority = 2 THEN 'legacy_good'
+        ELSE 'llm'
+    END AS match_priority_bucket,
+    x.category_priority,
+    x.score_num,
+    x.confidence_num,
+    ROW_NUMBER() OVER (
+        PARTITION BY x.rcid
+        ORDER BY
+            x.category_priority ASC,
+            x.score_num DESC NULLS LAST,
+            x.confidence_num DESC NULLS LAST,
+            x.foia_firm_uid ASC
+    ) AS rcid_priority_rank
+FROM (
+    -- keep one best row per foia_firm_uid x rcid across FEIN/year variants
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY foia_firm_uid, rcid
+            ORDER BY
+                category_priority ASC,
+                score_num DESC NULLS LAST,
+                confidence_num DESC NULLS LAST,
+                fein_norm ASC,
+                lottery_year ASC,
+                foia_firm_uid ASC
+        ) AS foia_rcid_best_rank
+    FROM foia_rcid_union
+) AS x
+JOIN (
+    SELECT
+        foia_firm_uid,
+        rcid,
+        MAX(CASE WHEN source = 'llm' THEN 1 ELSE 0 END) AS has_llm,
+        MAX(CASE WHEN source = 'legacy_good' THEN 1 ELSE 0 END) AS has_legacy
+    FROM foia_rcid_union
+    GROUP BY foia_firm_uid, rcid
+) AS s
+    ON x.foia_firm_uid = s.foia_firm_uid
+   AND x.rcid = s.rcid
+WHERE x.foia_rcid_best_rank = 1
+"""
+)
+llm_uid_n = con.sql(
+    "SELECT COUNT(DISTINCT foia_firm_uid) FROM llm_crosswalk_unique"
+).df().iloc[0, 0]
+llm_uid_rcid_n = con.sql("SELECT COUNT(*) FROM llm_crosswalk_unique").df().iloc[0, 0]
+legacy_uid_n = con.sql(
+    "SELECT COUNT(DISTINCT foia_firm_uid) FROM good_matches_unique"
+).df().iloc[0, 0]
+legacy_uid_rcid_n = con.sql("SELECT COUNT(*) FROM good_matches_unique").df().iloc[0, 0]
+union_uid_n = con.sql(
+    "SELECT COUNT(DISTINCT foia_firm_uid) FROM foia_rcid_union_collapsed"
+).df().iloc[0, 0]
+union_uid_rcid_n = con.sql("SELECT COUNT(*) FROM foia_rcid_union_collapsed").df().iloc[0, 0]
+print(
+    f"Loaded matches: llm={llm_uid_n} uids/{llm_uid_rcid_n} uid-rcid rows, "
+    f"legacy={legacy_uid_n} uids/{legacy_uid_rcid_n} uid-rcid rows, "
+    f"union={union_uid_n} uids/{union_uid_rcid_n} uid-rcid rows "
+)
+
+con.sql(
+"""
+CREATE OR REPLACE TABLE foia_uid_lookup AS
+SELECT foia_firm_uid, fein_norm, lottery_year
+FROM llm_uid_bridge
+GROUP BY foia_firm_uid, fein_norm, lottery_year
+"""
+)
+
+## joining raw FOIA data to LLM crosswalk with foia_firm_uid
+foia_with_ids = con.sql(
+"""
+SELECT
+    a.*,
+    b.foia_firm_uid
+FROM (
+    SELECT
+        *,
+        CASE
+            WHEN REGEXP_REPLACE(COALESCE(CAST(FEIN AS VARCHAR), ''), '[^0-9]', '', 'g') = '' THEN NULL
+            ELSE COALESCE(
+                NULLIF(
+                    REGEXP_REPLACE(
+                        REGEXP_REPLACE(COALESCE(CAST(FEIN AS VARCHAR), ''), '[^0-9]', '', 'g'),
+                        '^0+',
+                        ''
+                    ),
+                    ''
+                ),
+                '0'
+            )
+        END AS fein_norm,
+        TRY_CAST(lottery_year AS INTEGER) AS lottery_year_int
+    FROM foia_raw_file
+    WHERE FEIN != '(b)(3) (b)(6) (b)(7)(c)'
+) AS a
+LEFT JOIN foia_uid_lookup AS b
+    ON a.fein_norm = b.fein_norm
+   AND a.lottery_year_int = b.lottery_year
+"""
+)
 
 # Importing User x Education-level Data (From WRDS Server)
-rev_raw = con.read_parquet(f"{root}/data/int/wrds_users_sep2.parquet") #con.read_parquet(f"{wrds_out}/rev_user_merge0.parquet")
-
-# for j in range(1,10):
-#     rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{wrds_out}/rev_user_merge{j}.parquet'")
+wrds_users_file = rcfg.WRDS_USERS_PARQUET
+wrds_users_legacy = rcfg.WRDS_USERS_PARQUET_LEGACY
+if os.path.exists(wrds_users_file):
+    print(f"Loading users file: {wrds_users_file}")
+    rev_raw = con.read_parquet(wrds_users_file)
+else:
+    print(f"Missing {wrds_users_file}; using legacy {wrds_users_legacy}")
+    rev_raw = con.read_parquet(wrds_users_legacy)
 
 # Importing Institution x Country Matches
-inst_country_cw = con.read_parquet(f"{root}/data/int/rev_inst_countries_jun30.parquet")
+inst_country_file = rcfg.REV_INST_COUNTRIES_PARQUET
+inst_country_legacy = rcfg.REV_INST_COUNTRIES_PARQUET_LEGACY
+if os.path.exists(inst_country_file):
+    print(f"Loading institution-country file: {inst_country_file}")
+    inst_country_cw = con.read_parquet(inst_country_file)
+else:
+    print(f"Missing {inst_country_file}; using legacy {inst_country_legacy}")
+    inst_country_cw = con.read_parquet(inst_country_legacy)
 
 # Importing Name x Country Matches
-nanats = con.read_parquet(f"{root}/data/int/name2nat_aug1.parquet")
+nanats_file = rcfg.NAME2NAT_PARQUET
+nanats = con.read_parquet(nanats_file)
 
-nts_long = con.read_parquet(f'{root}/data/int/rev_names_nametrace_long_jul8.parquet')
+nametrace_long_file = rcfg.NAMETRACE_LONG_PARQUET
+nametrace_long_legacy = rcfg.NAMETRACE_LONG_PARQUET_LEGACY
+if os.path.exists(nametrace_long_file):
+    print(f"Loading NameTrace long file: {nametrace_long_file}")
+    nts_long = con.read_parquet(nametrace_long_file)
+else:
+    print(f"Missing {nametrace_long_file}; using legacy {nametrace_long_legacy}")
+    nts_long = con.read_parquet(nametrace_long_legacy)
 
 # Importing User x Position-level Data (all positions)
-merged_pos = con.read_parquet(f"{root}/data/int/wrds_positions_aug1.parquet")
+wrds_positions_file = rcfg.WRDS_POSITIONS_PARQUET
+wrds_positions_legacy = rcfg.WRDS_POSITIONS_PARQUET_LEGACY
+if os.path.exists(wrds_positions_file):
+    print(f"Loading positions file: {wrds_positions_file}")
+    merged_pos = con.read_parquet(wrds_positions_file)
+else:
+    print(f"Missing {wrds_positions_file}; using legacy {wrds_positions_legacy}")
+    merged_pos = con.read_parquet(wrds_positions_legacy)
 
 # Occupation crosswalk
 occ_cw = con.read_csv(f"{root}/data/crosswalks/rev_occ_to_foia_freq.csv")
+role_col = _detect_role_col(merged_pos.columns)
+if role_col is None:
+    raise ValueError("No role_k[occnum][versionnum] column found in merged_pos.")
+
+if role_col not in occ_cw.columns:
+    print(
+        f"Column {role_col} not found in rev_occ_to_foia_freq.csv; "
+        "regenerating occupation crosswalk..."
+    )
+    create_occ_script = os.path.join(root, "h1bworkers", "code", "10_misc", "create_occ_cw.py")
+    subprocess.run([sys.executable, create_occ_script], check=True)
+    occ_cw = con.read_csv(f"{root}/data/crosswalks/rev_occ_to_foia_freq.csv")
+    if role_col not in occ_cw.columns:
+        raise ValueError(
+            f"Occupation crosswalk regenerated but still missing column {role_col}."
+        )
+print(f"Using occupation role column: {role_col}")
 
 print('Done!')
 
@@ -81,42 +440,92 @@ print('Done!')
 # DEFINING MAIN SAMPLE OF USERS (RCID IN MAIN SAMP AND START DATE AFTER 2015)
 #####################################
 print('Defining Main Sample of H-1B Companies...')
-# id crosswalk between revelio and h1b companies
-id_merge = con.sql("""
--- collapse matched IDs to be unique at the rcid x FEIN x lottery_year level
-SELECT lottery_year, main_rcid, foia_id
-FROM rmerge 
-GROUP BY foia_id, lottery_year, main_rcid
-""")
-
 # IDing outsourcing/staffing companies (defining share of applications that are multiple registrations ['duplicates']; counting total number of apps)
-foia_main_samp_unfilt = con.sql("SELECT FEIN, lottery_year, COUNT(CASE WHEN ben_multi_reg_ind = 1 THEN 1 END)/COUNT(*) AS share_multireg, COUNT(*) AS n_apps_tot, COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END) AS n_success, COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END)/COUNT(*) AS win_rate FROM foia_with_ids GROUP BY FEIN, lottery_year")
+foia_main_samp_unfilt = con.sql(
+"""
+SELECT
+    foia_firm_uid,
+    lottery_year,
+    COUNT(CASE WHEN ben_multi_reg_ind = 1 THEN 1 END) / COUNT(*) AS share_multireg,
+    COUNT(*) AS n_apps_tot,
+    COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END) AS n_success,
+    COUNT(CASE WHEN status_type = 'SELECTED' THEN 1 END) / COUNT(*) AS win_rate
+FROM foia_with_ids
+WHERE foia_firm_uid IS NOT NULL
+GROUP BY foia_firm_uid, lottery_year
+"""
+)
 
-# counts (verbose)
+# # counts (verbose)
 # n = con.sql('SELECT COUNT(*) FROM foia_main_samp_unfilt').df().iloc[0,0]
 # print(f"Total Employer x Years: {n}")
 # print(f'Employer x Years with Fewer than 50 Apps: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE n_apps_tot < 50").df().iloc[0,0]}')
 # print(f'Employer x Years with Fewer than 50% Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg < 0.5").df().iloc[0,0]}')
 # print(f'Employer x Years with No Duplicates: {con.sql("SELECT COUNT(*) FROM foia_main_samp_unfilt WHERE share_multireg = 0").df().iloc[0,0]}')
 
-# main sample (conservative): companies with fewer than 50 applications and no duplicate registrations TODO: declare these as constants at top
+# # main sample (conservative): companies with fewer than 50 applications and no duplicate registrations TODO: declare these as constants at top
 # foia_main_samp = con.sql(f'SELECT * FROM foia_main_samp_unfilt WHERE n_apps_tot <= {CUTOFF_N_APPS_TOT} AND share_multireg <= {CUTOFF_SHARE_MULTIREG}')
 # print(f"Preferred Sample: {foia_main_samp.df().shape[0]} ({round(100*foia_main_samp.df().shape[0]/n)}%)")
 
 # computing win rate by sample
 foia_main_samp_def = con.sql(f"SELECT *, CASE WHEN n_apps_tot <= {CUTOFF_N_APPS_TOT} AND share_multireg <= {CUTOFF_SHARE_MULTIREG} THEN 'insamp' ELSE 'outsamp' END AS sampgroup FROM foia_main_samp_unfilt")
-con.sql("SELECT sampgroup, SUM(n_success)/SUM(n_apps_tot) AS total_win_rate FROM foia_main_samp_def GROUP BY sampgroup")
+# con.sql("SELECT sampgroup, SUM(n_success)/SUM(n_apps_tot) AS total_win_rate FROM foia_main_samp_def GROUP BY sampgroup")
 
-# creating crosswalk between foia id and rcid (joining list of FEINs in and out of sample with foia data with foia ids and joining that to id crosswalk, then joining to dup_rcids)
-samp_to_rcid = con.sql("SELECT a.FEIN, a.lottery_year, sampgroup, b.foia_id, c.main_rcid, CASE WHEN rcid IS NULL THEN c.main_rcid ELSE d.rcid END AS rcid FROM ((SELECT FEIN, lottery_year, sampgroup FROM foia_main_samp_def) AS a JOIN (SELECT FEIN, lottery_year, foia_id FROM foia_with_ids GROUP BY FEIN, lottery_year, foia_id) AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year JOIN (SELECT main_rcid, foia_id FROM id_merge) AS c ON b.foia_id = c.foia_id) LEFT JOIN (SELECT main_rcid, rcid FROM dup_rcids) AS d ON c.main_rcid = d.main_rcid")
+# Union source (LLM + legacy good matches)
+# Keeps multiple rcids per foia_firm_uid.
+samp_to_rcid = con.sql(
+"""
+SELECT
+    a.foia_firm_uid,
+    a.lottery_year,
+    a.sampgroup,
+    b.rcid,
+    b.source AS match_source,
+    b.score_num AS llm_match_score,
+    b.match_priority_bucket,
+    b.rcid_priority_rank
+FROM (
+    SELECT foia_firm_uid, lottery_year, sampgroup
+    FROM foia_main_samp_def
+    WHERE foia_firm_uid IS NOT NULL
+    GROUP BY foia_firm_uid, lottery_year, sampgroup
+) AS a
+JOIN foia_rcid_union_collapsed AS b
+    ON a.foia_firm_uid = b.foia_firm_uid
+"""
+)
+
+# Legacy version (kept for quick revert): expand via dup_rcids/main_rcid.
+# samp_to_rcid = con.sql(
+# """
+# SELECT
+#     a.foia_firm_uid,
+#     a.FEIN,
+#     a.lottery_year,
+#     a.sampgroup,
+#     b.rcid AS main_rcid,
+#     CASE WHEN d.rcid IS NULL THEN b.rcid ELSE d.rcid END AS rcid
+# FROM (
+#     SELECT foia_firm_uid, FEIN, lottery_year, sampgroup
+#     FROM foia_main_samp_def
+#     WHERE foia_firm_uid IS NOT NULL
+#     GROUP BY foia_firm_uid, FEIN, lottery_year, sampgroup
+# ) AS a
+# JOIN llm_crosswalk_unique AS b
+#     ON a.foia_firm_uid = b.foia_firm_uid
+# LEFT JOIN (SELECT DISTINCT main_rcid, rcid FROM dup_rcids) AS d
+#     ON b.rcid = d.main_rcid
+# """
+# )
 
 # writing company sample crosswalk to file
 if not test:
-    con.sql(f"COPY samp_to_rcid TO '{root}/data/int/company_merge_sample_jul10.parquet'")
+    con.sql(f"COPY samp_to_rcid TO '{rcfg.COMPANY_MERGE_SAMPLE_PARQUET}'")
 
 # selecting user ids from list of positions based on whether company in sample and start date is after 2015 (conservative bandwidth) -- TODO: declare cutoff date as constant; TODO: move startdate filter into merged_pos query, avoid pulling people who got promoted after 2015 but started working before 2015
 user_samp = con.sql("SELECT user_id FROM ((SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a JOIN (SELECT user_id, rcid FROM merged_pos WHERE country = 'United States' AND startdate >= '2015-01-01') AS b ON a.rcid = b.rcid) GROUP BY user_id")
 print('Done!')
+print(f"Total script runtime: {round((time.time() - t_script0)/3600, 2)} hours")
 
 #####################################
 ### CLEANING AND SAVING FOIA INDIVIDUAL DATA
@@ -126,7 +535,7 @@ print('Cleaning Individual-level H-1B Data...')
 # identifying companies that submit 'repeat applications' for losers
 match_rep = con.sql(
 """
-SELECT FEIN, 
+SELECT foia_firm_uid, 
 -- indicator for no losers matched over subsequent years (unless no apps at all over other years)
     CASE WHEN MEAN(share_rep) = 0 AND MEAN(n_ly) > 1 AND COUNT(*) > 1 THEN 1 ELSE 0 END AS no_rep_emp_ind,
 -- indicator for over 80 percent of losers matched over subsequent years
@@ -134,19 +543,34 @@ SELECT FEIN,
     MEAN(share_rep) AS share_rep, MEAN(n_ly) AS n_ly, COUNT(*) AS n
 FROM (
     SELECT a.lottery_year AS base_ly, 
-        a.FEIN AS FEIN, b.FEIN AS match_FEIN,
+        a.foia_firm_uid AS foia_firm_uid, b.foia_firm_uid AS match_foia_firm_uid,
         a.gender, a.ben_year_of_birth, a.country_of_nationality, a.n_ly,
-        (COUNT(match_FEIN) OVER(PARTITION BY a.FEIN, a.lottery_year))/(COUNT(*) OVER(PARTITION BY a.lottery_year, a.FEIN)) AS share_rep 
+        (COUNT(match_foia_firm_uid) OVER(PARTITION BY a.foia_firm_uid, a.lottery_year))
+            /(COUNT(*) OVER(PARTITION BY a.lottery_year, a.foia_firm_uid)) AS share_rep 
     FROM (
-        SELECT * FROM (SELECT *, COUNT(DISTINCT lottery_year) OVER(PARTITION BY FEIN) AS n_ly FROM foia_raw_file) WHERE FEIN != '(b)(3) (b)(6) (b)(7)(c)' AND lottery_year::INT < 2024 AND status_type != 'SELECTED'
+        SELECT *
+        FROM (
+            SELECT *,
+                COUNT(DISTINCT lottery_year) OVER(PARTITION BY foia_firm_uid) AS n_ly
+            FROM foia_with_ids
+            WHERE foia_firm_uid IS NOT NULL
+        )
+        WHERE lottery_year::INT < 2024
+          AND status_type != 'SELECTED'
     ) AS a 
-    LEFT JOIN (SELECT * FROM foia_raw_file WHERE FEIN != '(b)(3) (b)(6) (b)(7)(c)') AS b 
-    ON a.lottery_year::INT = b.lottery_year::INT - 1 AND a.gender = b.gender AND a.ben_year_of_birth = b.ben_year_of_birth AND a.country_of_nationality = b.country_of_nationality AND a.FEIN = b.FEIN
-) GROUP BY FEIN
+    LEFT JOIN (
+        SELECT * FROM foia_with_ids WHERE foia_firm_uid IS NOT NULL
+    ) AS b 
+    ON a.lottery_year::INT = b.lottery_year::INT - 1
+       AND a.gender = b.gender
+       AND a.ben_year_of_birth = b.ben_year_of_birth
+       AND a.country_of_nationality = b.country_of_nationality
+       AND a.foia_firm_uid = b.foia_firm_uid
+) GROUP BY foia_firm_uid
 """)
 
 foia_indiv = con.sql(
-f"""SELECT a.FEIN, a.lottery_year, country, 
+f"""SELECT a.foia_firm_uid, a.FEIN, a.lottery_year, country, 
         get_country_subregion(country) AS subregion, 
         female_ind, yob, status_type, ben_multi_reg_ind, employer_name, 
         CASE WHEN BEN_EDUCATION_CODE = 'I' THEN 'Doctor'
@@ -174,18 +598,22 @@ f"""SELECT a.FEIN, a.lottery_year, country,
             WHEN NAICS2 = '51' THEN 'Other Information'
             WHEN NAICS_CODE = 'NA' OR NAICS2 = '99' THEN NULL
             ELSE 'Other' END AS industry,
-        {help.field_clean_regex_sql('BEN_PFIELD_OF_STUDY')} AS field_clean, DOT_CODE, {help.inst_clean_regex_sql('JOB_TITLE')} AS job_title, n_apps, n_unique_country, no_rep_emp_ind, high_rep_emp_ind, foia_indiv_id, main_rcid, rcid 
+        {help.field_clean_regex_sql('BEN_PFIELD_OF_STUDY')} AS field_clean, DOT_CODE, {help.inst_clean_regex_sql('JOB_TITLE')} AS job_title, n_apps, n_unique_country, no_rep_emp_ind, high_rep_emp_ind, foia_indiv_id, rcid AS main_rcid, rcid 
     FROM (
         SELECT FEIN, lottery_year, get_std_country(country_of_nationality) AS country, 
-            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY FEIN, lottery_year) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id 
-        FROM foia_raw_file WHERE FEIN != '(b)(3) (b)(6) (b)(7)(c)'
-    ) AS a JOIN samp_to_rcid AS b ON a.FEIN = b.FEIN AND a.lottery_year = b.lottery_year
-    LEFT JOIN (SELECT FEIN, no_rep_emp_ind, high_rep_emp_ind, share_rep FROM match_rep) AS c ON a.FEIN = c.FEIN 
+            foia_firm_uid,
+            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY foia_firm_uid) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY foia_firm_uid) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id 
+        FROM foia_with_ids
+        WHERE foia_firm_uid IS NOT NULL
+    ) AS a JOIN samp_to_rcid AS b ON a.foia_firm_uid = b.foia_firm_uid
+    LEFT JOIN (
+        SELECT foia_firm_uid, no_rep_emp_ind, high_rep_emp_ind, share_rep FROM match_rep
+    ) AS c ON a.foia_firm_uid = c.foia_firm_uid 
     WHERE sampgroup = 'insamp'""")
 
 if not test:
     print("Writing FOIA indiv to file...")
-    con.sql(f"COPY foia_indiv TO '{root}/data/clean/foia_indiv.parquet'")
+    con.sql(f"COPY foia_indiv TO '{rcfg.FOIA_INDIV_PARQUET}'")
 print('Done!')
 
 #####################################
@@ -231,7 +659,15 @@ rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a
 
 # testing
 if test:
-    ids = ",".join(con.sql(help.random_ids_sql('user_id','rev_clean', n = 100)).df()['user_id'].astype(str))
+    ids = ",".join(
+        con.sql(
+            help.random_ids_sql(
+                "user_id", "rev_clean", n=rcfg.REV_USERS_CLEAN_RANDOM_USER_SAMPLE_N
+            )
+        )
+        .df()["user_id"]
+        .astype(str)
+    )
     rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a.user_id = b.user_id WHERE a.user_id IN ({ids}) OR a.user_id = {test_user}")
 
 # Cleaning name matches (long on country)
@@ -257,7 +693,7 @@ else:
 
 # Cleaning institution matches 
 inst_match_clean = con.sql(
-"""-
+"""
     SELECT *, 
         COUNT(*) OVER(PARTITION BY university_raw) AS n_country_match 
     FROM inst_country_cw
@@ -302,7 +738,7 @@ ON a.university_raw = b.university_raw
 # Saving intermediate user x inst x year data
 if not test:
     print("Saving intermediate copy of users with institutions to file...")
-    con.sql(f"COPY (SELECT * EXCLUDE (us_hs_exact, us_educ, ade_ind, ade_year)  FROM rev_users_with_inst) TO '{root}/data/int/rev_educ_long_aug8.parquet'")
+    con.sql(f"COPY (SELECT * EXCLUDE (us_hs_exact, us_educ, ade_ind, ade_year)  FROM rev_users_with_inst) TO '{rcfg.REV_EDUC_LONG_PARQUET}'")
 
 # Merging users with institution matches (long) and collapsing to user x country level, filtering out 
 inst_merge_long = con.sql(
@@ -389,11 +825,25 @@ pos_with_null_enddates = con.sql(
 """)
 
 
-merged_pos_clean = con.sql("SELECT *, CASE WHEN max_share_foia > 0 THEN 1 ELSE 0 END AS foia_occ_ind FROM merged_pos AS a LEFT JOIN (SELECT user_id, position_number, alt_enddate, pos_dup_ind FROM pos_with_null_enddates WHERE next_pos_ind = 1 OR pos_dup_ind = 1) AS b ON a.user_id = b.user_id AND a.position_number = b.position_number LEFT JOIN occ_cw AS c ON a.role_k1500 = c.role_k1500")
+merged_pos_clean = con.sql(
+    f"""
+    SELECT *,
+        CASE WHEN max_share_foia > 0 THEN 1 ELSE 0 END AS foia_occ_ind
+    FROM merged_pos AS a
+    LEFT JOIN (
+        SELECT user_id, position_number, alt_enddate, pos_dup_ind
+        FROM pos_with_null_enddates
+        WHERE next_pos_ind = 1 OR pos_dup_ind = 1
+    ) AS b
+        ON a.user_id = b.user_id AND a.position_number = b.position_number
+    LEFT JOIN occ_cw AS c
+        ON a.{role_col} = c.{role_col}
+"""
+)
 
 if not test:
     print("Saving cleaned positions to file...")
-    con.sql(f"COPY merged_pos_clean TO '{root}/data/int/merged_pos_clean_aug8.parquet'")
+    con.sql(f"COPY merged_pos_clean TO '{rcfg.MERGED_POS_CLEAN_PARQUET}'")
 
 # 8/6/25: what to do with null enddates? if last position, can impute as updated dt, but if not last position? if i take next start date, this will cut out freelance/part-time work or work preceding freelance/part-time work (e.g. if i have a FT job and start doing something on the side and hold both jobs concurrently)
 # okay for now just leave as today if null (most conservative -- downside is that enddatediff filter will be less effective)
@@ -411,7 +861,7 @@ merged_pos_user = con.sql(f"""
         MIN(CASE WHEN position_number > max_intern_position AND country = 'United States' THEN startdate ELSE NULL END) AS min_startdate_us
     FROM (
         SELECT *, MAX(CASE WHEN intern_ind = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY user_id) AS max_intern_position FROM (
-            SELECT user_id, {help.inst_clean_regex_sql('title_raw')} AS title_clean, position_number, rcid, country, startdate, enddate, role_k1500,
+            SELECT user_id, {help.inst_clean_regex_sql('title_raw')} AS title_clean, position_number, rcid, country, startdate, enddate, {role_col} AS role_k_selected,
                 CASE WHEN 
                     (lower(title_raw) ~ '(^|\\s)(intern)($|\\s)' AND 
                         DATEDIFF('month', startdate::DATETIME, enddate::DATETIME) < 12) 
@@ -504,6 +954,6 @@ ON pos.user_id = poshist.user_id
 
 if not test:
     print("Saving full rev indiv file...")
-    con.sql(f"COPY rev_indiv TO '{root}/data/clean/rev_indiv.parquet'")
+    con.sql(f"COPY rev_indiv TO '{rcfg.REV_INDIV_PARQUET}'")
 
 print('Done!')

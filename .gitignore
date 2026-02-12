@@ -14,3 +14,4 @@ code/10_misc/resources/best-model.pt
 *.pyc
 *.tmp
 *.out
+code/old/adaptive_fuzzy/.adaptive_fuzzy/*

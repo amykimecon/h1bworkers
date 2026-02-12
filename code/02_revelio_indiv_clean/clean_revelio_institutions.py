@@ -10,14 +10,30 @@ import os
 import sys
 import json
 
-sys.path.append('../')
-from config import * 
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(os.path.dirname(__file__))
+from config import *
+import rev_indiv_config as rcfg
 
 con = ddb.connect()
+run_tag = rcfg.RUN_TAG
+t_script0 = time.time()
+print(f"Using config: {rcfg.ACTIVE_CONFIG_PATH}")
+
+
+def log(msg):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+openalex_match_filt_file = rcfg.OPENALEX_MATCH_FILT_PARQUET
+dedup_match_filt_file = rcfg.DEDUP_MATCH_FILT_PARQUET
+all_token_freqs_file = rcfg.ALL_TOKEN_FREQS_PARQUET
+geonames_token_merge_file = rcfg.GEONAMES_TOKEN_MERGE_PARQUET
+final_inst_country_file = rcfg.REV_INST_COUNTRIES_PARQUET
 
 # Importing Country Codes Crosswalk
 with open(f"{root}/data/crosswalks/country_dict.json", "r") as json_file:
     country_cw_dict = json.load(json_file)
+log(f"Loaded country crosswalk with {len(country_cw_dict)} keys")
 
 ## Creating DuckDB functions from python helpers
 # country crosswalk function
@@ -29,11 +45,21 @@ con.create_function("get_gmaps_country", lambda x: help.get_gmaps_country(x, cou
 ## IMPORTING DATA ##
 ####################
 # Importing Data (From WRDS Server)
-rev_raw = con.read_parquet(f"{wrds_out}/rev_user_merge0.parquet")
+wrds_users_file = rcfg.WRDS_USERS_PARQUET
+legacy_chunk_files = rcfg.LEGACY_WRDS_USER_MERGE_SHARDS
+log("Starting data imports...")
 
-for j in range(1,10):
-    rev_raw = con.sql(f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{wrds_out}/rev_user_merge{j}.parquet'")
-    print(rev_raw.shape)
+if os.path.exists(wrds_users_file):
+    log(f"Loading consolidated users file: {wrds_users_file}")
+    rev_raw = con.read_parquet(wrds_users_file)
+else:
+    log("Consolidated users file not found. Falling back to legacy rev_user_merge shards.")
+    rev_raw = con.read_parquet(legacy_chunk_files[0])
+    for j in range(1, 10):
+        rev_raw = con.sql(
+            f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{legacy_chunk_files[j]}'"
+        )
+log(f"Loaded Revelio user data: {rev_raw.shape[0]} rows")
 
 # Importing institutions data
 institutions = con.read_csv(f"{root}/data/crosswalks/institutions.csv")
@@ -56,6 +82,7 @@ admin2codes = pd.read_csv(f"{root}/data/crosswalks/geonames/admin2Codes.txt",
 gmaps = con.sql(f"""SELECT * FROM read_parquet('{"')UNION ALL SELECT * FROM read_parquet('".join([f"{root}/data/int/gmaps_univ_locations/{f}" for f in os.listdir(f"{root}/data/int/gmaps_univ_locations/")])}')""")
 
 gmaps_clean = con.sql("SELECT top_country, top_country_n_users, university_raw, CASE WHEN gmaps_json IS NULL THEN NULL ELSE get_gmaps_country(gmaps_json.candidates[1].formatted_address) END AS univ_gmaps_country, gmaps_json.candidates[1].name AS gmaps_name, gmaps_json FROM gmaps")
+log(f"Loaded gmaps matches: {gmaps_clean.shape[0]} rows")
 
 ###################
 ## CLEANING DATA ##
@@ -76,6 +103,7 @@ f"""
     FROM rev_raw 
 """
 )
+log(f"Built rev_clean: {rev_clean.shape[0]} rows")
 
 # Collapsing to institution level (getting top non-null country)
 #   first: filter out non-degree observations, then group by user x university x country (record indicator for whether high school) to get rid of users with multiple degrees from same inst
@@ -100,6 +128,7 @@ FROM (
     ) GROUP BY university_country, university_raw, univ_raw_clean
 ) GROUP BY university_raw, univ_raw_clean ORDER BY n_users DESC)
 """)
+log("Created table univ_names")
 
 # TEMPORARY THING FOR TESTING:
 # con.sql(
@@ -137,6 +166,7 @@ CREATE OR REPLACE TABLE inst_clean AS
     GROUP BY openalexid, name, country_code, type, source
 ))
 """)
+log("Created table inst_clean")
 
 ## CLEANING GEONAMES
 cities500['pop_pctl'] = cities500['pop'].rank(pct=True)
@@ -151,14 +181,16 @@ geonames_agg = pd.concat([cities500.assign(type = 'city')[['name', 'countrycode'
            ])
 
 # standardizing country codes and merging with country names
-countries = pd.DataFrame(help.country_cw_dict.items(), columns = ['name', 'countryname']).assign(type = 'country')
+countries = pd.DataFrame(country_cw_dict.items(), columns = ['name', 'countryname']).assign(type = 'country')
 
 geonames_df = pd.concat([
-    geonames_agg.assign(countryname = geonames_agg['countrycode'].map(help.country_cw_dict)),
+    geonames_agg.assign(countryname = geonames_agg['countrycode'].map(country_cw_dict)),
     countries.assign(type = countries['type'].case_when([(countries['name'].str.match('[A-Z]{3}'), 'country_threeletter'),(countries['name'].str.match('[A-Z]{2}'), 'country_twoletter')]))[['name','countryname','type']]
 ])
+log(f"Built geonames_df in pandas: {geonames_df.shape[0]} rows")
 
 con.sql(f"CREATE OR REPLACE TABLE geonames AS SELECT *, {help.inst_clean_regex_sql('name')} AS name_clean FROM geonames_df")
+log("Created table geonames")
 
 
 #####################
@@ -172,12 +204,14 @@ rev_tokens_withparan = con.sql(help.tokenize_sql('univ_raw_clean_withparan', 'un
 
 # revelio institutions tokenized without parenthetical text
 rev_tokens_noparan = con.sql(help.tokenize_sql('univ_raw_clean', 'univ_id', 'univ_names'))
+log(f"Tokenized names: openalex={openalex_tokens.shape[0]}, rev_with_paren={rev_tokens_withparan.shape[0]}, rev_no_paren={rev_tokens_noparan.shape[0]}")
 
 # merging openalex and revelio (with paran) tokens to get agg freqs
 all_tokens = con.sql("SELECT token, (COUNT(*) OVER(PARTITION BY token))/(COUNT(*) OVER()) AS token_freq, idnum, token_id, source, COUNT(token) OVER (PARTITION BY source, idnum) AS n_tokens FROM (SELECT token, token_id, idnum, 'revelio' AS source FROM rev_tokens_withparan UNION ALL SELECT token, token_id, idnum, 'openalex' AS source FROM openalex_tokens)")
 
 # collapsing to token level
 all_token1_freqs = con.sql("SELECT token, MEAN(token_freq) AS token_freq, ROW_NUMBER() OVER(ORDER BY MEAN(token_freq) DESC) AS token_rank, MAX(CASE WHEN source = 'openalex' THEN 1 ELSE 0 END) AS openalex, MAX(CASE WHEN source = 'revelio' THEN 1 ELSE 0 END) AS revelio FROM all_tokens GROUP BY token")
+log(f"Computed token frequencies: {all_token1_freqs.shape[0]} unique tokens")
 
 ## USING TOKEN FREQUENCIES TO CORRECT SPELLING ERRORS
 # getting 500 most common long words (over 3 letters)
@@ -196,6 +230,7 @@ spell_cw_jw = con.sql(
 )
 
 con.sql("CREATE OR REPLACE TABLE spell_cw_jw AS SELECT * FROM spell_cw_jw")
+log(f"Created spell_cw_jw: {spell_cw_jw.shape[0]} rows")
 
 # getting all words over 3 letters
 spell_cw_jw_all = con.sql(
@@ -212,6 +247,7 @@ spell_cw_jw_all = con.sql(
 )
 
 con.sql("CREATE OR REPLACE TABLE spell_cw_jw_all AS SELECT * FROM spell_cw_jw_all")
+log(f"Created spell_cw_jw_all: {spell_cw_jw_all.shape[0]} rows")
 # con.sql(f"CREATE OR REPLACE TABLE univ_names_spellcorr AS {help.spell_corr_sql('spell_cw_jw','univ_names','univ_raw_clean','univ_id')}")
 
 ################################
@@ -241,9 +277,11 @@ comma_tokens = con.sql(
 univ_names_combined = con.sql(f"SELECT univ_id, university_raw, univ_text, CASE WHEN univ_text_clean = '' AND univ_text != '' THEN univ_text ELSE univ_text_clean END AS univ_text_clean, ROW_NUMBER() OVER() AS univ_combined_id FROM (SELECT *, {help.inst_clean_regex_sql('univ_text')} AS univ_text_clean FROM (SELECT * FROM univ_names_parenth_split UNION ALL SELECT comma_token AS univ_text, university_raw, univ_id FROM comma_tokens))")
 
 con.sql("CREATE OR REPLACE TABLE univ_names_combined AS (SELECT * FROM univ_names_combined)")
+log(f"Created univ_names_combined: {univ_names_combined.shape[0]} rows")
 
 # and spell-correcting (columns: univ_id, university_raw, univ_text (raw text to match on, could be from comma tokens or parenth or full university raw), univ_text_clean (cleaned text version of univ_text), univ_combined_id (unique id) = idnum, univ_text_clean_corr (cleaned and spell corrected version of univ_text))
 con.sql(f"CREATE OR REPLACE TABLE univ_names_spellcorr AS {help.spell_corr_sql('spell_cw_jw','univ_names_combined','univ_text_clean','univ_combined_id')}")
+log("Created table univ_names_spellcorr")
 
 # matching
 allmatches = con.sql(
@@ -255,6 +293,7 @@ allmatches = con.sql(
 
 # matches to keep
 exactmatches = con.sql("SELECT univ_id, openalexid AS matchid, university_raw, name AS matchname_raw, univ_text_clean_corr AS rev_clean, name_clean AS matchname_clean, country_clean AS match_country, 1 AS matchscore, 'exact_openalex' AS matchtype FROM allmatches WHERE ncountry = 1")
+log(f"Computed exactmatches: {exactmatches.shape[0]} rows")
 
 
 ##########################################
@@ -264,8 +303,16 @@ exactmatches = con.sql("SELECT univ_id, openalexid AS matchid, university_raw, n
 city_tokens = ['ba', 'to', 'in', 'of', 'and', 'university', 'academy', 'college', 'mba', 'bsc', 'the', 'st', 'area', 'center', 'universidad', 'central', 'central high', 'at', 'valley', 'jr', 'sr']
 abbrev_tokens = ['DE', 'IN', 'BE', 'AT', 'ST', 'EN']
 
-ids = ','.join(con.sql(help.random_ids_sql('univ_id','univ_names', 100)).df()['univ_id'].astype(str))
-test = False
+ids = ",".join(
+    con.sql(
+        help.random_ids_sql(
+            "univ_id", "univ_names", rcfg.CLEAN_INST_RANDOM_UNIV_SAMPLE_N
+        )
+    )
+    .df()["univ_id"]
+    .astype(str)
+)
+test = rcfg.CLEAN_INST_TEST
 
 # cleaning geographies: joining geonames data on itself to get full names of admin1 and admin2 + three-letter country codes for cities
 geo_clean = con.sql(
@@ -287,6 +334,7 @@ f"""SELECT
         ) WHERE name_clean NOT IN ('{"','".join(city_tokens)}') 
             AND LENGTH(name_clean) > 1 
             AND NOT (type = 'city_altname' AND name_clean = ({help.inst_clean_regex_sql('originalname')})) """)
+log(f"Prepared geo_clean: {geo_clean.shape[0]} rows")
 
 # iterating through to match by number of words in city/country name
 for i in range(8):
@@ -320,6 +368,7 @@ for i in range(8):
         con.sql(f"CREATE OR REPLACE TABLE geoname_matches AS SELECT *, {i} AS token_n FROM join_geonames") 
     else:
         con.sql(f"CREATE OR REPLACE TABLE geoname_matches AS SELECT * FROM geoname_matches UNION ALL SELECT *, {i} AS token_n FROM join_geonames")
+log("Finished iterative geoname matching")
 
 # goal: identify 
 # filtering matches on whether another level of geography matches (country, admin1, admin2)
@@ -424,14 +473,17 @@ SELECT *, COUNT(DISTINCT countryname) OVER(PARTITION BY univ_id) AS ncountry FRO
 """)
 
 exact_geomatches = con.sql("SELECT * FROM all_geomatches WHERE match_score >= 0.5 AND ncountry = 1")
+log(f"Computed geomatches: all={all_geomatches.shape[0]}, exact={exact_geomatches.shape[0]}")
 
 ################################
 ## MATCHING TO OPENALEX ON TOKENS ##
 ################################
 univ_names_formatch = con.sql("SELECT a.univ_id, university_raw, univ_raw_clean_withparan, CASE WHEN b.exactmatch IS NOT NULL THEN 'exactmatch' WHEN c.citymatch IS NOT NULL THEN 'citymatch' ELSE 'nomatch' END AS matchind, CASE WHEN b.exactmatch IS NOT NULL THEN 'exactmatch' WHEN c.citymatch IS NOT NULL THEN 'citymatch' WHEN top_country_n_users >= 20 THEN 'nativematch' ELSE 'nomatch' END AS dedupind FROM univ_names AS a LEFT JOIN (SELECT univ_id, 1 AS exactmatch FROM exactmatches GROUP BY univ_id) AS b ON a.univ_id = b.univ_id LEFT JOIN (SELECT univ_id, 1 AS citymatch FROM exact_geomatches GROUP BY univ_id) AS c ON a.univ_id = c.univ_id")
+log(f"Prepared univ_names_formatch: {univ_names_formatch.shape[0]} rows")
 
-tokenmatch = False
+tokenmatch = rcfg.CLEAN_INST_TOKENMATCH
 if tokenmatch: 
+    log("Starting token-level OpenAlex/dedup matching (tokenmatch=True)")
     con.sql("SELECT dedupind, COUNT(*) FROM univ_names_formatch GROUP BY dedupind")
 
     # con.sql(f"CREATE OR REPLACE TABLE revsamp AS (SELECT * FROM univ_names ORDER BY RANDOM() LIMIT 5000)")
@@ -619,9 +671,12 @@ if tokenmatch:
 
     dedup_filt = con.sql("SELECT * FROM dedup_res WHERE (min_freq AND (max_jaro_sim OR max_dl_sim)) OR namecontain")
 
-    con.sql(f"COPY match_filt TO '{root}/data/int/rev_openalex_match_filt_jun20.parquet'")
-    con.sql(f"COPY dedup_filt TO '{root}/data/int/rev_dedup_match_filt_jun25.parquet'")
-    con.sql(f"COPY all_token_freqs TO '{root}/data/int/rev_all_token_freqs_jun20.parquet'")
+    con.sql(f"COPY match_filt TO '{openalex_match_filt_file}'")
+    con.sql(f"COPY dedup_filt TO '{dedup_match_filt_file}'")
+    con.sql(f"COPY all_token_freqs TO '{all_token_freqs_file}'")
+    log(f"Saved tokenmatch outputs: {openalex_match_filt_file}, {dedup_match_filt_file}, {all_token_freqs_file}")
+else:
+    log("Skipping token-level OpenAlex/dedup matching (tokenmatch=False); will read saved files")
 
 ################################
 ## MATCHING TO LOCATION TOKENS ##
@@ -671,7 +726,7 @@ if tokenmatch:
     t0 = time.time()
     geo_merge = con.sql("SELECT a.token AS rev_token, b.token AS geo_token FROM (SELECT * FROM all_token1_freqs WHERE token_rank > 50) AS a JOIN (SELECT * FROM geonames_tokens_bytoken WHERE token_rank > 50 OR top_country_freq = 1) AS b ON jaro_similarity(a.token, b.token) >= 0.95")
 
-    con.sql(f"COPY geo_merge TO '{root}/data/int/rev_geonames_token_merge_jun20.parquet'")
+    con.sql(f"COPY geo_merge TO '{geonames_token_merge_file}'")
     t1 = time.time()
     print(f"done! time: {t1-t0}s")
 
@@ -694,10 +749,25 @@ SELECT university_raw, match_country FROM (
 ) GROUP BY university_raw, match_country
 """
 )
+log(f"Computed good_matches: {good_matches.shape[0]} rows")
 
 # other matches (token, dedup, geo, gmaps)
-match_filt = con.read_parquet(f'{root}/data/int/rev_openalex_match_filt_jun20.parquet')
-dedup_filt = con.read_parquet(f'{root}/data/int/rev_dedup_match_filt_jun25.parquet')
+legacy_openalex_match_filt_file = rcfg.OPENALEX_MATCH_FILT_PARQUET_LEGACY
+legacy_dedup_match_filt_file = rcfg.DEDUP_MATCH_FILT_PARQUET_LEGACY
+
+if os.path.exists(openalex_match_filt_file):
+    log(f"Reading token match file: {openalex_match_filt_file}")
+    match_filt = con.read_parquet(openalex_match_filt_file)
+else:
+    log(f"Missing {openalex_match_filt_file}; using legacy {legacy_openalex_match_filt_file}")
+    match_filt = con.read_parquet(legacy_openalex_match_filt_file)
+
+if os.path.exists(dedup_match_filt_file):
+    log(f"Reading dedup match file: {dedup_match_filt_file}")
+    dedup_filt = con.read_parquet(dedup_match_filt_file)
+else:
+    log(f"Missing {dedup_match_filt_file}; using legacy {legacy_dedup_match_filt_file}")
+    dedup_filt = con.read_parquet(legacy_dedup_match_filt_file)
 
 other_matches = con.sql(
 """
@@ -739,8 +809,11 @@ final_matches = con.sql(
     UNION ALL
     SELECT university_raw, match_country, matchscore, matchtype FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY university_raw, match_country ORDER BY matchscore DESC) AS rn FROM other_matches) WHERE rn = 1
 """)
+log(f"Computed final_matches: {final_matches.shape[0]} rows")
 
-con.sql(f"COPY final_matches TO '{root}/data/int/rev_inst_countries_jun30.parquet'")
+con.sql(f"COPY final_matches TO '{final_inst_country_file}'")
+log(f"Saved: {final_inst_country_file}")
+log(f"Done. Total elapsed: {round((time.time() - t_script0)/60, 2)} min")
 
 # # random sample of ids
 # ids = "','".join(con.sql(help.random_ids_sql('university_raw','other_matches', n = 100)).df()['university_raw'].astype(str))
