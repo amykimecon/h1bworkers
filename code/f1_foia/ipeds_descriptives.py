@@ -24,8 +24,85 @@ except Exception:  # pragma: no cover - optional dependency
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import *
-OUTFIG_PATH = '/Users/amykim/Documents/GitHub/h1bworkers/output/slides/slides_20251204'
+#OUTFIG_PATH = '/Users/amykim/Documents/GitHub/h1bworkers/output/slides/slides_20251204'
+OUTFIG_PATH = f"/home/yk0581/figures"
 sns.set_theme(rc={"figure.figsize": (11, 6), "figure.dpi":200, "lines.linewidth": 3}, style="ticks", font_scale=1.4)
+# Consistent IHMP styling across plots
+IHMP_COLORS = {
+    "IHMP": "#2e8b57",      # medium sea green
+    "Non-IHMP": "#e07a5f",  # terracotta
+}
+# Shared shade family (variations on the Non-IHMP terracotta) so IHMP green pops
+NON_IHMP_SHADES = {
+    "All Degrees": "#bfc5d2",
+    "Bachelor": "#4c78a8",
+    "Master": "#e07a5f",
+    "Non-IH Master": "#d99b83",
+    "Doctor": "#2f2f38",
+}
+AWLEVEL_GROUP_ORDER = ["All Degrees", "Bachelor", "Master", "Doctor"]
+AWLEVEL_GROUP_PALETTE = {
+    "All Degrees": NON_IHMP_SHADES["All Degrees"],
+    "Bachelor": NON_IHMP_SHADES["Bachelor"],
+    "Master": NON_IHMP_SHADES["Master"],
+    "Doctor": NON_IHMP_SHADES["Doctor"],
+}
+AWLEVEL_GROUP_MARKERS = {
+    "All Degrees": "X",
+    "Bachelor": "D",
+    "Master": "s",
+    "Doctor": "^",
+}
+# Neutral-forward palette for alternative award level grouping (IHMP stands out)
+AWLEVEL_GROUP_ALT_ORDER = ["All Degrees", "Bachelor", "Non-IH Master", "IHMP", "Doctor"]
+AWLEVEL_GROUP_ALT_PALETTE = {
+    "IHMP": IHMP_COLORS["IHMP"],
+    "Non-IH Master": NON_IHMP_SHADES["Non-IH Master"],
+    "Bachelor": NON_IHMP_SHADES["Bachelor"],
+    "Doctor": NON_IHMP_SHADES["Doctor"],
+    "All Degrees": NON_IHMP_SHADES["All Degrees"],
+}
+AWLEVEL_GROUP_ALT_MARKERS = {
+    "IHMP": "o",
+    "Non-IH Master": "s",
+    "Bachelor": "D",
+    "Doctor": "^",
+    "All Degrees": "X",
+}
+STEM_PALETTE = {
+    "STEM": NON_IHMP_SHADES["Doctor"],
+    "Non-STEM": NON_IHMP_SHADES["Bachelor"],
+    "All Majors": NON_IHMP_SHADES["All Degrees"],
+}
+STEM_MARKERS = {
+    "STEM": "o",
+    "Non-STEM": "s",
+    "All Majors": "X",
+}
+
+
+def flag_new_programs(df: pd.DataFrame, lookback_years: int = 5) -> pd.Series:
+    """
+    Flag program-year rows that are "new": no graduates for the same unitid x cipcode
+    in the previous `lookback_years` years.
+    """
+    required = {"unitid", "cipcode", "year"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns for new program flag: {missing}")
+
+    df_sorted = df.sort_values(["unitid", "cipcode", "year"]).copy()
+
+    def mark(group: pd.DataFrame) -> pd.Series:
+        years = group["year"].to_numpy()
+        flags = []
+        for idx, y in enumerate(years):
+            prior = group["year"].iloc[:idx]
+            has_recent = ((prior >= y - lookback_years) & (prior < y)).any()
+            flags.append(0 if has_recent else 1)
+        return pd.Series(flags, index=group.index)
+
+    return df_sorted.groupby(["unitid", "cipcode"], group_keys=False).apply(mark)
 #sns.set_context(font_scale = 2)
 
 INT_FOLDER = f"{root}/data/int/int_files_nov2025"
@@ -51,6 +128,7 @@ ipeds['intl_ihmp'] = ipeds['ihmp']*ipeds['cnralt']
 # DESCRIPTIVE ONE: Share of all degree completions by international students over time
 ipeds_by_year = ipeds[ipeds['awlevel_group'] != 'Other'].groupby(['year']).agg({'ctotalt': 'sum', 'cnralt': 'sum', 'intl_ihmp': 'sum'}).reset_index()
 ipeds_by_deg_year = ipeds[ipeds['awlevel_group'] != 'Other'].groupby(['year', 'awlevel_group']).agg({'ctotalt': 'sum', 'cnralt': 'sum', 'intl_ihmp': 'sum'}).reset_index()
+ipeds_by_deg_year_alt = ipeds[ipeds['awlevel_group_alt'] != 'Other'].groupby(['year', 'awlevel_group_alt']).agg({'ctotalt': 'sum', 'cnralt': 'sum', 'intl_ihmp': 'sum'}).reset_index()
 ipeds_by_stem_year_ma = ipeds[(ipeds['awlevel_group'] == 'Master')].groupby(['year', 'STEMOPT']).agg({'ctotalt': 'sum', 'cnralt': 'sum', 'intl_ihmp': 'sum'}).reset_index()
 ipeds_by_stem_year_all = ipeds[(ipeds['awlevel_group'] != 'Other')].groupby(['year', 'STEMOPT']).agg({'ctotalt': 'sum', 'cnralt': 'sum', 'intl_ihmp': 'sum'}).reset_index()
 
@@ -71,7 +149,7 @@ for df in [ipeds_by_year, ipeds_by_deg_year, ipeds_by_stem_year_ma, ipeds_by_ste
     dfs_out.append((df, df_norm))
 
 # PLOT 1a: Share of international students over time (all degrees)
-g = sns.lineplot(data=dfs_out[0][0], x='year', y='share_intl', color = 'gray')
+g = sns.lineplot(data=dfs_out[0][0], x='year', y='share_intl', color=NON_IHMP_SHADES["All Degrees"], marker="o")
 g.set_xlabel("Graduation Year")
 g.set_ylabel("International Bachelor+ Graduates as Share of Total")
 g.figure.savefig(f"{OUTFIG_PATH}/ipeds_share_intl_over_time_all_degrees.png")
@@ -82,7 +160,7 @@ print(f"Increase in share international (all degrees) from 2004 to 2024: {round(
 df_1b = dfs_out[0][0].copy()
 df_1b['cnralt'] = df_1b['cnralt']/1000  # rescaling
 plt.figure()
-g2 = sns.lineplot(data=df_1b, x='year', y='cnralt', color = 'gray')
+g2 = sns.lineplot(data=df_1b, x='year', y='cnralt', color=NON_IHMP_SHADES["All Degrees"], marker="o")
 g2.set_xlabel("Graduation Year")
 g2.set_ylabel("International Bachelor+ Graduates (thousands)")
 g2.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_intl_over_time_all_degrees.png")
@@ -92,7 +170,18 @@ print(f"Increase in international graduates (all degrees) from 2004 to 2024: {ro
 # PLOT 2a: Share of international students over time (by degree)
 df_2a = pd.concat([dfs_out[1][0].copy(), pd.DataFrame({'year': dfs_out[0][0]['year'], 'awlevel_group': 'All Degrees', 'share_intl': dfs_out[0][0]['share_intl']})], ignore_index=True)
 plt.figure()
-g3 = sns.lineplot(data=df_2a, x='year', y='share_intl', hue='awlevel_group')
+g3 = sns.lineplot(
+    data=df_2a,
+    x='year',
+    y='share_intl',
+    hue='awlevel_group',
+    style='awlevel_group',
+    hue_order=[g for g in AWLEVEL_GROUP_ORDER if g in df_2a['awlevel_group'].unique()],
+    style_order=[g for g in AWLEVEL_GROUP_ORDER if g in df_2a['awlevel_group'].unique()],
+    palette=AWLEVEL_GROUP_PALETTE,
+    markers=AWLEVEL_GROUP_MARKERS,
+    dashes=False,
+)
 g3.set_xlabel("Graduation Year")
 g3.set_ylabel("International Graduates as Share of Total")
 g3.legend(title='Degree Level', loc = 'upper left')
@@ -101,11 +190,44 @@ g3.figure.savefig(f"{OUTFIG_PATH}/ipeds_share_intl_over_time_by_degree.png")
 df_2b = pd.concat([dfs_out[1][0].copy(), pd.DataFrame({'year': dfs_out[0][0]['year'], 'awlevel_group': 'All Degrees', 'cnralt': dfs_out[0][0]['cnralt']})], ignore_index=True)
 df_2b['cnralt'] = df_2b['cnralt']/1000  # rescaling
 plt.figure()
-g4 = sns.lineplot(data=df_2b, x='year', y='cnralt', hue='awlevel_group')
+g4 = sns.lineplot(
+    data=df_2b,
+    x='year',
+    y='cnralt',
+    hue='awlevel_group',
+    style='awlevel_group',
+    hue_order=[g for g in AWLEVEL_GROUP_ORDER if g in df_2b['awlevel_group'].unique()],
+    style_order=[g for g in AWLEVEL_GROUP_ORDER if g in df_2b['awlevel_group'].unique()],
+    palette=AWLEVEL_GROUP_PALETTE,
+    markers=AWLEVEL_GROUP_MARKERS,
+    dashes=False,
+)
 g4.set_xlabel("Graduation Year")
 g4.set_ylabel("International Graduates (thousands)")
 g4.legend(title='Degree Level', loc = 'upper left')
 g4.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_intl_over_time_by_degree.png")
+
+# PLOT 2b (alt): Number of international students over time using awlevel_group_alt (exclude All Degrees)
+df_2b_alt = ipeds_by_deg_year_alt.copy()
+df_2b_alt = df_2b_alt[df_2b_alt['awlevel_group_alt'] != 'Other']
+df_2b_alt['cnralt'] = df_2b_alt['cnralt'] / 1000
+plt.figure()
+g4_alt = sns.lineplot(
+    data=df_2b_alt,
+    x='year',
+    y='cnralt',
+    hue='awlevel_group_alt',
+    style='awlevel_group_alt',
+    hue_order=[g for g in AWLEVEL_GROUP_ALT_ORDER if g in df_2b_alt['awlevel_group_alt'].unique()],
+    style_order=[g for g in AWLEVEL_GROUP_ALT_ORDER if g in df_2b_alt['awlevel_group_alt'].unique()],
+    palette=AWLEVEL_GROUP_ALT_PALETTE,
+    markers=AWLEVEL_GROUP_ALT_MARKERS,
+    dashes=False,
+)
+g4_alt.set_xlabel("Graduation Year")
+g4_alt.set_ylabel("International Graduates (thousands)")
+g4_alt.legend(title='Degree Level', loc='upper left')
+g4_alt.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_intl_over_time_by_degree_alt.png")
 
 # print share of all intl degrees from ma in 2024
 print(f"Share of all int'l students in MA in 2024: {round(df_2b.loc[(df_2b['year']==2024)&(df_2b['awlevel_group']=='Master'), 'cnralt'].values[0]/df_2b.loc[(df_2b['year']==2024)&(df_2b['awlevel_group']=='All Degrees'), 'cnralt'].values[0],2)}")
@@ -132,7 +254,16 @@ for masters in [True, False]:
     stemopt_df_3['STEMOPT'] = np.where(stemopt_df_3['STEMOPT']==1, 'STEM', 'Non-STEM')
     df_3 = pd.concat([stemopt_df_3, pd.DataFrame({'year': all_deg_df_3['year'], 'STEMOPT': 'All Majors', 'share_intl': all_deg_df_3['share_intl'],'cnralt': all_deg_df_3['cnralt']})], ignore_index=True)
     plt.figure()
-    g4 = sns.lineplot(data=df_3, x='year', y='share_intl', hue='STEMOPT')
+    g4 = sns.lineplot(
+        data=df_3,
+        x='year',
+        y='share_intl',
+        hue='STEMOPT',
+        style='STEMOPT',
+        palette=STEM_PALETTE,
+        markers=STEM_MARKERS,
+        dashes=False,
+    )
     g4.set_xlabel("Graduation Year")
     g4.set_ylabel("International Graduates as Share of Total" + ylab_addl)
     g4.legend(title='Major Type', loc = 'upper left')
@@ -141,7 +272,16 @@ for masters in [True, False]:
     # PLOT 3b: Number of international students over time (by STEMOPT status)
     df_3['cnralt'] = df_3['cnralt']/1000  # rescaling
     plt.figure()
-    g5 = sns.lineplot(data=df_3, x='year', y='cnralt', hue='STEMOPT')
+    g5 = sns.lineplot(
+        data=df_3,
+        x='year',
+        y='cnralt',
+        hue='STEMOPT',
+        style='STEMOPT',
+        palette=STEM_PALETTE,
+        markers=STEM_MARKERS,
+        dashes=False,
+    )
     g5.set_xlabel("Graduation Year")
     g5.set_ylabel("International Graduates (thousands)" + ylab_addl)
     g5.legend(title='Major Type', loc = 'upper left')
@@ -195,13 +335,26 @@ ipeds_by_share_decile_by_year['share_intl_decile_label'] = (
         lambda row: f"{row['share_intl_decile']} (2004: {int(row['n_programs_2004'])})",
         axis=1
     )
-)
+    )
 
-cmap = sns.color_palette("vlag", n_colors=ncuts)
+share_decile_palette = sns.light_palette(NON_IHMP_SHADES["Master"], n_colors=ncuts, reverse=True)
+share_decile_palette = [
+    IHMP_COLORS["Non-IHMP"],
+    IHMP_COLORS["IHMP"],
+][:ncuts]
 
 # PLOT 1: Number of programs over time by share_intl decile
 plt.figure()
-g2_1 = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='n_programs_norm', hue='share_intl_decile_label',style = 'share_intl_decile_label', palette=cmap)
+g2_1 = sns.lineplot(
+    data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')],
+    x='year',
+    y='n_programs_norm',
+    hue='share_intl_decile_label',
+    style='share_intl_decile_label',
+    palette=share_decile_palette,
+    markers=True,
+    dashes=False,
+)
 g2_1.set_xlabel("Graduation Year")
 g2_1.set_ylabel("Number of Programs (normalized to 2004)")
 g2_1.legend(title="Program Pct Int'l (2004 # Programs)", loc = 'upper left')
@@ -214,15 +367,91 @@ for decile in ipeds_by_share_decile_by_year['share_intl_decile'].unique():
 
 # PLOT 1b: Number of programs (not normalized)
 plt.figure()
-g2_1b = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='n_programs', hue='share_intl_decile_label',style = 'share_intl_decile_label', palette=cmap)
+g2_1b = sns.lineplot(
+    data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')],
+    x='year',
+    y='n_programs',
+    hue='share_intl_decile_label',
+    style='share_intl_decile_label',
+    palette=share_decile_palette,
+    markers=True,
+    dashes=False,
+)
 g2_1b.set_xlabel("Graduation Year")
 g2_1b.set_ylabel("Number of Master's Programs")
 g2_1b.legend(title="Program Pct Int'l (2004 # Programs)", loc = 'upper left')
 g2_1b.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_programs_by_share_intl_over_time_stem_master.png")
 
+# PLOT 1b-new: Number of new programs (no grads in prior 5 years) by share_intl decile
+prog_decile_base = ipeds[(ipeds['awlevel_group'] != 'Other') & (ipeds['ctotalt'] >= 10)].copy()
+prog_decile_base['share_intl_decile'] = pd.cut(
+    prog_decile_base['share_intl'],
+    bins=[i / ncuts for i in range(ncuts + 1)],
+    labels=[f"{round(100 * i / ncuts)}-{round(100 * (i + 1) / ncuts)}%" for i in range(ncuts)],
+    include_lowest=True,
+)
+prog_decile_base = prog_decile_base.dropna(subset=['share_intl_decile'])
+prog_decile_base['is_new_program'] = flag_new_programs(prog_decile_base, lookback_years=5)
+new_programs_by_decile = (
+    prog_decile_base.groupby(['year', 'awlevel_group', 'share_intl_decile'], as_index=False)
+    .agg(new_programs=('is_new_program', 'sum'))
+)
+
+plt.figure()
+g2_1b_new = sns.lineplot(
+    data=new_programs_by_decile[(new_programs_by_decile['awlevel_group'] == 'Master')&(new_programs_by_decile['year'].between(2006, 2023))],
+    x='year',
+    y='new_programs',
+    hue='share_intl_decile',
+    style='share_intl_decile',
+    palette=share_decile_palette,
+    markers=True,
+    dashes=False,
+)
+g2_1b_new.set_xlabel("Graduation Year")
+g2_1b_new.set_ylabel("New Master's Programs (no grads in prior 5y)")
+g2_1b_new.legend(title="Program Pct Int'l", loc='upper left')
+g2_1b_new.figure.savefig(f"{OUTFIG_PATH}/ipeds_new_programs_by_share_intl_over_time_master.png")
+
+# PLOT 1b-new-normalized: New programs normalized to 2008 levels
+normyear_new = 2008
+new_prog_master = new_programs_by_decile[new_programs_by_decile['awlevel_group'] == 'Master'].copy()
+base_new = (
+    new_prog_master[new_prog_master['year'] == normyear_new]
+    .set_index('share_intl_decile')['new_programs']
+    .rename('new_programs_2008')
+)
+new_prog_master = new_prog_master.merge(base_new, on='share_intl_decile', how='left')
+new_prog_master['new_programs_norm'] = new_prog_master['new_programs'] / new_prog_master['new_programs_2008']
+
+plt.figure()
+g2_1b_new_norm = sns.lineplot(
+    data=new_prog_master[new_prog_master['year'].between(2006, 2023)],
+    x='year',
+    y='new_programs_norm',
+    hue='share_intl_decile',
+    style='share_intl_decile',
+    palette=share_decile_palette,
+    markers=True,
+    dashes=False,
+)
+g2_1b_new_norm.set_xlabel("Graduation Year")
+g2_1b_new_norm.set_ylabel(f"New Master's Programs (normalized to {normyear_new})")
+g2_1b_new_norm.legend(title="Program Pct Int'l", loc='upper left')
+g2_1b_new_norm.figure.savefig(f"{OUTFIG_PATH}/ipeds_new_programs_by_share_intl_over_time_master_norm{normyear_new}.png")
+
 # PLOT 1c: Share of programs over time by share_intl decile
 plt.figure()
-g2_1c = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='share_programs', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+g2_1c = sns.lineplot(
+    data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')],
+    x='year',
+    y='share_programs',
+    hue='share_intl_decile',
+    style='share_intl_decile',
+    palette=share_decile_palette,
+    markers=True,
+    dashes=False,
+)
 g2_1c.set_xlabel("Graduation Year")
 g2_1c.set_ylabel("Share of Master's Programs")
 g2_1c.legend(title="Program Pct Int'l", loc = 'upper left')
@@ -230,9 +459,18 @@ g2_1c.figure.savefig(f"{OUTFIG_PATH}/ipeds_share_programs_by_share_intl_over_tim
 
 # PLOT 2: Share of students over time by share_intl decile
 plt.figure()
-#g2_2 = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='share_students', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+#g2_2 = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='share_students', hue='share_intl_decile', style = 'share_intl_decile', palette=share_decile_palette)
 
-g2_2 = sns.lineplot(data=ipeds_by_share_decile_by_year, x='year', y='share_students', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+g2_2 = sns.lineplot(
+    data=ipeds_by_share_decile_by_year,
+    x='year',
+    y='share_students',
+    hue='share_intl_decile',
+    style='share_intl_decile',
+    palette=share_decile_palette,
+    markers=True,
+    dashes=False,
+)
 g2_2.set_xlabel("Graduation Year")
 g2_2.set_ylabel("Share of International Students")
 g2_2.legend(title="Program Pct Int'l", loc = 'upper left')
@@ -245,7 +483,16 @@ for decile in ipeds_by_share_decile_by_year['share_intl_decile'].unique():
 
 # PLOT 2b: Number of students over time by share_intl decile
 plt.figure()
-g2_2b = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='cnralt', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+g2_2b = sns.lineplot(
+    data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')],
+    x='year',
+    y='cnralt',
+    hue='share_intl_decile',
+    style='share_intl_decile',
+    palette=share_decile_palette,
+    markers=True,
+    dashes=False,
+)
 g2_2b.set_xlabel("Graduation Year")
 g2_2b.set_ylabel("Number of Int'l MA STEM Students")
 g2_2b.legend(title="Program Pct Int'l", loc = 'upper left')
@@ -253,7 +500,16 @@ g2_2b.figure.savefig(f"{OUTFIG_PATH}/ipeds_n_students_by_share_intl_over_time_st
 
 # PLOT 3: Average program size over time by share_intl decile
 plt.figure()
-g3 = sns.lineplot(data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')], x='year', y='avg_program_size', hue='share_intl_decile', style = 'share_intl_decile', palette=cmap)
+g3 = sns.lineplot(
+    data=ipeds_by_share_decile_by_year[(ipeds_by_share_decile_by_year['awlevel_group']=='Master')],
+    x='year',
+    y='avg_program_size',
+    hue='share_intl_decile',
+    style='share_intl_decile',
+    palette=share_decile_palette,
+    markers=True,
+    dashes=False,
+)
 g3.set_xlabel("Graduation Year")
 g3.set_ylabel("Average Program Size")
 g3.legend(title="Program Pct Int'l", loc = 'upper left')

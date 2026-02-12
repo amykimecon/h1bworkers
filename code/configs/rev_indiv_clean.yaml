@@ -1,0 +1,79 @@
+run_tag: "feb2026"
+
+legacy_tags:
+  wrds_users: "sep2"
+  wrds_positions: "aug1"
+  inst_countries: "jun30"
+  nametrace_long: "jul8"
+
+legacy_wrds_user_merge_shard_count: 10
+
+testing:
+  wrds_users:
+    enabled: false
+    rcid_limit: 20
+    chunks: 20
+    chunk_size: 10000
+  wrds_positions:
+    enabled: false
+    rcid_limit: 10
+    chunks: 20
+    chunk_size: 10000
+  rev_indiv_name2nat:
+    enabled: false
+    testn: 1000
+    chunks: 20
+    chunk_size: 100000
+  rev_indiv_nametrace:
+    enabled: false
+    testn: 1000
+    chunks: 20
+    chunk_size: 100000
+  clean_revelio_institutions:
+    enabled: false
+    random_univ_sample_n: 100
+    tokenmatch: true
+  rev_users_clean:
+    enabled: false
+    test_user: 322249231.0
+    random_user_sample_n: 100
+
+paths:
+  dup_rcids_csv: "{root}/data/int/dup_rcids_mar20.csv"
+  good_match_ids_csv: "{root}/data/int/good_match_ids_mar20.csv"
+  llm_crosswalk_csv: "{root}/data/int/company_matching_jan28/llm_review_all_foia_to_rcid_crosswalk.csv"
+
+  wrds_users_parquet: "{root}/data/int/wrds_users_${run_tag}.parquet"
+  wrds_users_parquet_legacy: "{root}/data/int/wrds_users_${legacy_tags.wrds_users}.parquet"
+  wrds_users_chunk_stub: "{root}/data/int/wrds_users/wrds_users${run_tag}"
+
+  wrds_positions_parquet: "{root}/data/int/wrds_positions_${run_tag}.parquet"
+  wrds_positions_parquet_legacy: "{root}/data/int/wrds_positions_${legacy_tags.wrds_positions}.parquet"
+  wrds_positions_chunk_stub: "{root}/data/int/wrds_positions/wrds_positions${run_tag}"
+
+  nametrace_chunk_dir: "{root}/data/int/nametrace_revelio"
+  nametrace_chunk_stub: "${paths.nametrace_chunk_dir}/nametrace_revelio_${run_tag}_"
+  nametrace_wide_parquet: "{root}/data/int/rev_names_nametrace_${run_tag}.parquet"
+  nametrace_long_parquet: "{root}/data/int/rev_names_nametrace_long_${run_tag}.parquet"
+  nametrace_long_parquet_legacy: "{root}/data/int/rev_names_nametrace_long_${legacy_tags.nametrace_long}.parquet"
+
+  name2nat_chunk_stub: "{root}/data/int/name2nat_revelio/name2nat_revelio"
+  name2nat_chunk_stub_test: "{root}/data/int/name2nat_revelio/test"
+  name2nat_parquet: "{root}/data/int/name2nat_aug1.parquet"
+  name2nat_parquet_test: "{root}/data/int/name2nat_test.parquet"
+
+  rev_inst_countries_parquet: "{root}/data/int/rev_inst_countries_${run_tag}.parquet"
+  rev_inst_countries_parquet_legacy: "{root}/data/int/rev_inst_countries_${legacy_tags.inst_countries}.parquet"
+
+  openalex_match_filt_parquet: "{root}/data/int/rev_openalex_match_filt_${run_tag}.parquet"
+  dedup_match_filt_parquet: "{root}/data/int/rev_dedup_match_filt_${run_tag}.parquet"
+  all_token_freqs_parquet: "{root}/data/int/rev_all_token_freqs_${run_tag}.parquet"
+  geonames_token_merge_parquet: "{root}/data/int/rev_geonames_token_merge_${run_tag}.parquet"
+  openalex_match_filt_parquet_legacy: "{root}/data/int/rev_openalex_match_filt_jun20.parquet"
+  dedup_match_filt_parquet_legacy: "{root}/data/int/rev_dedup_match_filt_jun25.parquet"
+
+  rev_educ_long_parquet: "{root}/data/int/rev_educ_long_${run_tag}.parquet"
+  merged_pos_clean_parquet: "{root}/data/int/merged_pos_clean_${run_tag}.parquet"
+  company_merge_sample_parquet: "{root}/data/int/company_merge_sample_${run_tag}.parquet"
+  foia_indiv_parquet: "{root}/data/clean/foia_indiv_${run_tag}.parquet"
+  rev_indiv_parquet: "{root}/data/clean/rev_indiv_${run_tag}.parquet"

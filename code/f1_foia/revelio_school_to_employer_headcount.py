@@ -1,3 +1,4 @@
+# DEPRECATED!
 # Script: Compute employer headcounts using existing school-to-employer transitions
 # Uses rcids from a precomputed transitions parquet and queries WRDS for US
 # positions to count long-duration employees by rcid-year and rcid-rsid-year.

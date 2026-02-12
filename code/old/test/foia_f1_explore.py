@@ -97,7 +97,7 @@ def build_typed_null(alias: str) -> str:
         return f"CAST(NULL AS TIMESTAMP) AS {alias}"
     else:
         return f"CAST(NULL AS VARCHAR) AS {alias}"
-    
+
 if data_concat:
     if from_scratch:
         # reading in raw data files and concatenating each year into one parquet

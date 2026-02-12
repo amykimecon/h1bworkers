@@ -504,6 +504,7 @@ def map_rsid_to_geoname(
         univ_rsid["country_clean"] = ""
         univ_rsid["country_iso"] = np.nan
 
+    # getting exact name matches first
     exact = univ_rsid.merge(
         school_lookup,
         left_on="univ_clean",
@@ -722,32 +723,32 @@ def main() -> None:
     # TODO: FIX THIS!!!
     school_lookup = build_school_geoname_lookup(school_geo)
     rsid_geoname = map_rsid_to_geoname(univ_rsid_cw, school_lookup, city_token_lookup=city_token_lookup)
-    if not rsid_geoname.empty:
-        rsid_geoname.to_parquet(RSID_OUTPUT_PATH, index=False)
-        print(
-            f"Saved RSID to geoname crosswalk for {rsid_geoname['rsid'].nunique():,} RSIDs ({(rsid_geoname['nmatch']==1).sum():,} unique) to {RSID_OUTPUT_PATH}."
-        )
-    else:
-        print("Warning: no RSID to geoname matches were produced.")
+    # if not rsid_geoname.empty:
+    #     rsid_geoname.to_parquet(RSID_OUTPUT_PATH, index=False)
+    #     print(
+    #         f"Saved RSID to geoname crosswalk for {rsid_geoname['rsid'].nunique():,} RSIDs ({(rsid_geoname['nmatch']==1).sum():,} unique) to {RSID_OUTPUT_PATH}."
+    #     )
+    # else:
+    #     print("Warning: no RSID to geoname matches were produced.")
 
     ipeds_geo = match_city_state(ipeds_cw, "CITY", "STABBR", geoname_variants)
     ipeds_geoname = build_ipeds_geoname(ipeds_geo)
-    if not ipeds_geoname.empty:
-        ipeds_geoname.to_parquet(IPEDS_OUTPUT_PATH, index=False)
-        print(
-            f"Saved IPEDS to geoname crosswalk for {ipeds_geoname['UNITID'].nunique():,} UNITIDs to {IPEDS_OUTPUT_PATH}."
-        )
-    else:
-        print("Warning: no IPEDS to geoname matches were produced.")
+    # if not ipeds_geoname.empty:
+    #     ipeds_geoname.to_parquet(IPEDS_OUTPUT_PATH, index=False)
+    #     print(
+    #         f"Saved IPEDS to geoname crosswalk for {ipeds_geoname['UNITID'].nunique():,} UNITIDs to {IPEDS_OUTPUT_PATH}."
+    #     )
+    # else:
+    #     print("Warning: no IPEDS to geoname matches were produced.")
 
     rsid_ipeds = build_rsid_ipeds_crosswalk(univ_rsid_cw, ipeds_cw)
-    if not rsid_ipeds.empty:
-        rsid_ipeds.to_parquet(RSID_IPEDS_OUTPUT_PATH, index=False)
-        print(
-            f"Saved RSID to IPEDS crosswalk for {rsid_ipeds['rsid'].nunique():,} RSIDs ({rsid_ipeds['unitid'].nunique():,} UNITIDs) to {RSID_IPEDS_OUTPUT_PATH}."
-        )
-    else:
-        print("Warning: no RSID to IPEDS matches were produced.")
+    # if not rsid_ipeds.empty:
+    #     rsid_ipeds.to_parquet(RSID_IPEDS_OUTPUT_PATH, index=False)
+    #     print(
+    #         f"Saved RSID to IPEDS crosswalk for {rsid_ipeds['rsid'].nunique():,} RSIDs ({rsid_ipeds['unitid'].nunique():,} UNITIDs) to {RSID_IPEDS_OUTPUT_PATH}."
+    #     )
+    # else:
+    #     print("Warning: no RSID to IPEDS matches were produced.")
 
     con.close()
 

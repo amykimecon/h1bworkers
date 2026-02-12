@@ -118,10 +118,15 @@ FUZZY_NAME_BLOCK_PREFIX_LEN = 3
 F1_INST_CROSSWALK_PATH = f"{INT_FOLDER}/f1_inst_unitid_crosswalk.parquet"
 F1_EMPLOYER_FINAL_CROSSWALK_PATH = f"{INT_FOLDER}/f1_employer_final_crosswalk.parquet"
 F1_EMPLOYER_ENTITY_MAPPING_PATH = f"{INT_FOLDER}/f1_employer_entity_mapping.parquet"
-F1_INST_LOAD_FROM_CACHE = False
-F1_INST_SAVE_TO_CACHE = True
-F1_EMPLOYER_LOAD_FROM_CACHE = True
+F1_EMPLOYER_AUTH_COUNTS_PATH = f"{INT_FOLDER}/f1_employer_auth_counts.parquet"
+F1_PREFERRED_RCID_LIST_PATH = f"{INT_FOLDER}/f1_preferred_rcids_multi_year.parquet"
+F1_INST_LOAD_FROM_CACHE = True
+F1_INST_SAVE_TO_CACHE = False 
+F1_EMPLOYER_LOAD_FROM_CACHE = True 
 F1_EMPLOYER_SAVE_TO_CACHE = False
+
+INDIVIDUAL_ID_COLS = ["individual_key", "student_key", "student_id", "individual_id"]
+AUTH_START_COLS = ["authorization_start_date", "opt_authorization_start_date", "opt_employer_start_date"]
 
 ##################################
 ## FUNCTIONS FOR IMPORTING DATA ##
@@ -359,6 +364,13 @@ def build_typed_null(alias: str) -> str:
         return f"CAST(NULL AS TIMESTAMP) AS {alias}"
     else:
         return f"CAST(NULL AS VARCHAR) AS {alias}"
+
+def _first_present(cols, candidates, label):
+    cols_lower = {c.lower(): c for c in cols}
+    for cand in candidates:
+        if cand.lower() in cols_lower:
+            return cols_lower[cand.lower()]
+    raise ValueError(f"Could not find {label}. Available columns: {sorted(cols)}")
 
 def _read_revelio_companies(con, verbose = False):
     """
@@ -1034,10 +1046,10 @@ def _create_employer_crosswalk(
       FROM ranked_candidates
       WHERE candidate_rank = 1
         AND (
-          (is_subset_match AND rev_company_clean ~ '.*\\s.*' AND name_jaro_winkler >= 0.9)
-          OR ((is_zip_match OR is_city_match) AND name_jaro_winkler >= 0.9) OR
-          (is_subset_match AND (is_city_match OR is_zip_match) AND name_jaro_winkler >= 0.85)
-          OR name_jaro_winkler >= 0.98
+          (is_subset_match AND rev_company_clean ~ '.*\\s.*' AND name_jaro_winkler >= 0.97)
+          OR ((is_zip_match OR is_city_match) AND name_jaro_winkler >= 0.95) OR
+          (is_subset_match AND (is_city_match OR is_zip_match) AND name_jaro_winkler >= 0.95)
+          OR name_jaro_winkler >= 0.99
         )
     """)
     employer_second_total = con.sql("SELECT COUNT(*) AS cnt FROM employer_second_match").df().iloc[0, 0]
@@ -1281,13 +1293,95 @@ def _create_employer_crosswalk(
             print(f"💾 Saved final employer crosswalk to '{cache_path}'.")
     return "f1_employer_final_crosswalk"
 
+
+def _compute_preferred_rcid_activity(
+    con,
+    verbose: bool = False,
+    save_output: bool = False,
+    auth_counts_path: str = None,
+    rcid_list_path: str = None,
+):
+    """
+    Merge employer crosswalk back to FOIA records, restrict to rows where the
+    work authorization start year matches the FOIA reporting year, count unique
+    individuals by year and RCID, and retain RCIDs with >=10 unique individuals
+    in at least three distinct years.
+    """
+    cols = [row[1] for row in con.sql("PRAGMA table_info('allyrs_raw')").fetchall()]
+    id_col = _first_present(cols, INDIVIDUAL_ID_COLS, "individual identifier column")
+    auth_col = _first_present(cols, AUTH_START_COLS, "authorization start date column")
+    year_col = _first_present(cols, ["year"], "FOIA reporting year column")
+
+    con.sql(
+    f"""
+        CREATE OR REPLACE TEMP VIEW foia_with_auth AS
+        SELECT
+          *,
+          {_sql_clean_company_name("employer_name")} AS f1_empname_clean,
+          {_sql_normalize("employer_city")} AS f1_city_clean,
+          {_sql_state_name_to_abbr("employer_state")} AS f1_state_clean,
+          {_sql_clean_zip("employer_zip_code")} AS f1_zip_clean,
+          {_date_parse_sql(auth_col)} AS auth_start
+        FROM allyrs_raw
+        WHERE employer_name IS NOT NULL
+    """)
+
+    con.sql(
+    f"""
+        CREATE OR REPLACE TABLE f1_employer_auth_counts AS
+        SELECT
+          CAST(EXTRACT(YEAR FROM auth_start) AS INTEGER) AS auth_year,
+          preferred_company_name,
+          CAST(fcw.preferred_rcid AS INTEGER) AS preferred_rcid,
+          COUNT(DISTINCT CAST(fo.{id_col} AS VARCHAR)) AS unique_individuals
+        FROM foia_with_auth AS fo
+        JOIN f1_employer_final_crosswalk AS fcw
+          ON fo.f1_empname_clean = fcw.f1_empname_clean
+         AND COALESCE(fo.f1_city_clean, '') = COALESCE(fcw.f1_city_clean, '')
+         AND COALESCE(fo.f1_state_clean, '') = COALESCE(fcw.f1_state_clean, '')
+         AND COALESCE(fo.f1_zip_clean, '') = COALESCE(fcw.f1_zip_clean, '')
+        WHERE auth_start IS NOT NULL
+          AND fcw.preferred_rcid IS NOT NULL
+          AND CAST(EXTRACT(YEAR FROM auth_start) AS INTEGER) = CAST({year_col} AS INTEGER)
+        GROUP BY auth_year, preferred_rcid, preferred_company_name
+    """)
+
+    con.sql(
+    """
+        CREATE OR REPLACE TABLE f1_preferred_rcids_multi_year AS
+        SELECT preferred_rcid
+        FROM f1_employer_auth_counts
+        WHERE unique_individuals >= 10
+        GROUP BY preferred_rcid
+        HAVING COUNT(DISTINCT auth_year) >= 3
+    """)
+
+    if verbose:
+        auth_rows = con.sql("SELECT COUNT(*) AS cnt FROM f1_employer_auth_counts").df().iloc[0, 0]
+        rcid_rows = con.sql("SELECT COUNT(*) AS cnt FROM f1_preferred_rcids_multi_year").df().iloc[0, 0]
+        print(f"✅ Built f1_employer_auth_counts ({auth_rows:,} rows) and f1_preferred_rcids_multi_year ({rcid_rows:,} RCIDs).")
+
+    if save_output:
+        if auth_counts_path:
+            con.sql(f"COPY (SELECT * FROM f1_employer_auth_counts) TO '{auth_counts_path}' (FORMAT PARQUET)")
+            if verbose:
+                print(f"💾 Saved authorization counts to '{auth_counts_path}'.")
+        if rcid_list_path:
+            con.sql(f"COPY (SELECT * FROM f1_preferred_rcids_multi_year) TO '{rcid_list_path}' (FORMAT PARQUET)")
+            if verbose:
+                print(f"💾 Saved preferred RCID list to '{rcid_list_path}'.")
+
+    return "f1_preferred_rcids_multi_year"
+
 # SQL helper function for cleaning and normalizing names
 def _sql_normalize(colname):
     return f"""
         TRIM(
+          REGEXP_REPLACE(
             REGEXP_REPLACE(
                 REGEXP_REPLACE(
                     LOWER({colname}),
+                      '[0-9]+/[0-9]+/[0-9]+', ' ', 'g'),
                     '[^a-z0-9 ]', ' ', 'g'
                 ), 
             '\\s+', ' ', 'g'
@@ -1350,3 +1444,12 @@ employer_cw = _create_employer_crosswalk(
 )
 t2 = time.time()
 print(f"Employer crosswalk creation took {t2 - t1:.2f} seconds.")
+
+# Employer activity filter: RCIDs with >=10 unique individuals in >=3 years where auth start year matches FOIA year
+_ = _compute_preferred_rcid_activity(
+      con,
+      verbose=True,
+      save_output=True,
+      auth_counts_path=F1_EMPLOYER_AUTH_COUNTS_PATH,
+      rcid_list_path=F1_PREFERRED_RCID_LIST_PATH
+)

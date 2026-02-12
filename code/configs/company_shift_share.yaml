@@ -1,0 +1,158 @@
+# master dir
+int_dir: "{root}/data/int/int_files_feb2026"
+
+paths:
+  # FOIA FILES
+  ## general
+  foia_sevp_raw_dir: "{root}/data/raw/foia_sevp" # RAW: raw FOIA SEVP files downloaded from DHS FOIA library
+  foia_sevp_byyear_dir: "${int_dir}/foia_sevp_byyear" # directory for merged FOIA SEVP files by year, with year relabelling
+  foia_sevp_combined: "${int_dir}/foia_sevp_combined.parquet" # compiling all FOIA SEVP raw files, minimal cleaning
+  
+  ## person ID linkage
+  foia_sevp_with_person_id: "${int_dir}/foia_sevp_with_person_id.parquet" # FOIA SEVP data with unique person id linked across years; output of foia_person_id_linkage.py
+  foia_person_key_year_crosswalk: "${int_dir}/foia_person_key_year_crosswalk.parquet" # crosswalk of person_id to identifying info from original data (name, birth year, country, etc) by year; output of deps_foia_person_id_linkage.py
+  foia_person_id_tmp_dir: "${int_dir}/foia_person_linkage_tmp"
+  
+
+  ## employer
+  employer_entity_mapping: "${int_dir}/f1_employer_entity_mapping.parquet" # mapping of employer name x city to standardized entity names used for crosswalking to Revelio
+
+  # REVELIO FILES
+  revelio_company_mapping: "${int_dir}/revelio_company_mapping_full.parquet" # revelio companies from WRDS, including top metro, state, n users from positions
+  wrds_users: "{root}/data/int/wrds_users_sep2.parquet" # WRDS users data to get institution names from revelio
+  
+  ## outputs from revelio_school_to_employer
+  transitions_out: "${int_dir}/revelio_school_to_employer_transitions.parquet"
+  headcounts_out: "${int_dir}/revelio_company_headcounts.parquet"
+  transitions_occ_subset_out: "${int_dir}/revelio_school_to_employer_transitions_occ_subset_jan29.parquet"
+  headcounts_occ_subset_out: "${int_dir}/revelio_company_headcounts_occ_subset_jan29.parquet"
+
+  # IPEDS FILES
+  ipeds_completions_raw: "{root}/data/raw/ipeds_completions_all.dta" # RAW: IPEDS completions data downloaded from NCES (converted and merged locally and uploaded to Malloy)
+  ipeds_name_cw_raw: "{root}/data/raw/nces_college_scorecard/Crosswalks" # RAW: directory of IPEDS institution name crosswalk files by year
+  ipeds_zip_cw_raw: "{root}/data/raw/ipeds/directory_info_hd" # RAW: directory of IPEDS institution zip code crosswalk files by year
+  ipeds_name_to_zip_crosswalk: "${int_dir}/ipeds_name_to_zip_crosswalk.parquet" # IPEDS name/aliases to ZIP crosswalk 
+  ipeds_unitid_main_crosswalk: "${int_dir}/ipeds_unitid_main_crosswalk.parquet" # OUTPUT: original UNITID x year to canonical UNITID mapping
+  ipeds_ma_only: "{root}/data/int/ipeds_ma_only.parquet" # OUTPUT: IPEDS institutions meeting criteria for inclusion in shift-share analysis (masters-only, CIP >= 10000, year >= 2002)
+
+  # CROSSWALKS
+  geonames_dir: "{root}/data/crosswalks/geonames" # RAW: directory of geonames file
+
+  ## institutions
+  f1_inst_unitid_crosswalk: "${int_dir}/f1_inst_unitid_crosswalk.parquet" # OUTPUT (deps_foia_clean): F1 SEVP institution to IPEDS unitid crosswalk
+  revelio_ipeds_inst_crosswalk: "${int_dir}/revelio_ipeds_inst_crosswalk.parquet" # OUTPUT (deps_foia_clean): Revelio institution to IPEDS unitid crosswalk
+  revelio_foia_inst_crosswalk: "${int_dir}/revelio_foia_inst_crosswalk.parquet" # OUTPUT (deps_foia_clean): Revelio institution to FOIA inst crosswalk
+  revelio_ipeds_foia_inst_crosswalk: "${int_dir}/revelio_ipeds_foia_inst_crosswalk.parquet" # OUTPUT (deps_foia_clean): Three-way institution crosswalk
+  revelio_matched_university_raws: "${int_dir}/revelio_matched_university_raws.parquet" # OUTPUT (deps_foia_clean): university_raw values matched to FOIA or IPEDS via three-way crosswalk
+
+  ## employers
+  employer_entity_mapping: "${int_dir}/f1_employer_entity_mapping.parquet"
+  #f1_employer_revelio_rcid_crosswalk: "${int_dir}/f1_employer_revelio_rcid_crosswalk.parquet" # OUTPUT (deps_foia_clean): F1 SEVP employer to Revelio rcid crosswalk
+  employer_crosswalk: "${int_dir}/f1_employer_final_crosswalk.parquet" #"{root}/data/int/int_files_jan2026/f1_employer_final_crosswalk.parquet" #
+  employer_auth_counts: "${int_dir}/f1_employer_auth_counts.parquet"
+  preferred_rcids: "${int_dir}/f1_preferred_rcids_multi_year.parquet"
+
+  # Shift-share outputs
+  instrument_components_out: "{root}/data/out/company_shift_share/instrument_components.parquet"
+  instrument_panel_out: "{root}/data/out/company_shift_share/instrument_panel.parquet"
+  treatment_out: "{root}/data/out/company_shift_share/masters_opt_hires.parquet"
+  outcomes_out: "{root}/data/out/company_shift_share/outcomes.parquet"
+  analysis_panel_out: "{root}/data/out/company_shift_share/analysis_panel.parquet"
+  analysis_panel: "{root}/data/out/company_shift_share/analysis_panel.parquet"
+  instrument_components: "{root}/data/out/company_shift_share/instrument_components.parquet"
+  # rsid_geoname_cw: "{root}/data/int/rsid_geoname_cw.parquet"
+  # ipeds_geoname_cw: "{root}/data/int/ipeds_geoname_cw.parquet"
+  # ipeds_completions_raw: "{root}/data/raw/ipeds_completions_all.dta"
+  # ipeds_name_cw: "{root}/data/raw/ipeds_name_cw_2021.xlsx"
+  # ipeds_cw: "{root}/data/raw/ipeds_cw_2021.csv"
+  # univ_zip_cw: "{root}/data/int/univ_zip_cw.parquet"
+  # wrds_users: "{root}/data/int/wrds_users_sep2.parquet"
+  # iso_country_codes: "{root}/data/crosswalks/iso_country_codes.csv"
+
+foia_clean:
+  wrds_username: "amykimecon"
+  test: false 
+  verbose: true
+  revelio_test_limit: None # limit number of rows from Revelio companies file for testing
+  revelio_inst_test_sample_size: None # when test=true, random sample size of distinct Revelio institutions
+  ipeds_year_start: 2001
+  ipeds_year_end: 2024
+  f1_inst_substitutions: {"cuny": "city university of new york"}
+  revelio_inst_min_count: 5 # minimum number of unique individuals for revelio institution to be included in crosswalk
+  build_revelio_ipeds_crosswalk: true 
+  build_revelio_foia_crosswalk: true
+  build_revelio_three_way_crosswalk: true
+  load_inst_from_cache: false #toggle: load f1 sevp inst to ipeds unitid cw from cached file if exists (if true, skip recomputation)
+  save_inst_to_cache: true #toggle: save f1 sevp inst to ipeds unitid cw to cached file after computation (if false, skip saving)
+  load_employer_from_cache: false #toggle: load f1 sevp employer to revelio rcid cw from cached file if exists (if true, skip recomputation)
+  save_employer_to_cache: true #toggle: save f1 sevp employer to revelio rcid cw to cached file after computation (if false, skip saving)
+
+revelio_school_to_employer:
+  wrds_username: "amykimecon"
+  min_position_days: 365 # drop anything shorter than this for transitions and headcount
+  tenure_min_days: 365 # tenure threshold for n_emp snapshots (can differ from MIN_POSITION_DAYS)
+  test_rcid_limit: null # when running in test mode, cap to this many rcids for faster scans
+  test_limit: None # when running in test mode, cap to this many rows from Revelio companies file for testing
+  batch_size: 10 # rcid batch size for chunked execution (set None to disable chunking)
+  batch_out_dir: "${int_dir}/revelio_batches" # output directory for batch results (if batch_size not None)
+  query_timeout_minutes: 5 # per-SQL statement timeout; long/hung batches fail and trigger retry/split fallback
+  query_max_retries: 1 # retries per failed SQL call after reconnecting WRDS
+  split_failed_batches: true # if a multi-rcid batch fails, rerun as singleton rcid queries
+  skip_failed_batches: true # if a singleton still fails after retries, skip it and continue
+  role_filter_default: false # whether to apply role-based filtering by default (if true, apply role-based filters; if false, do not apply role-based filters; can be overridden by command-line argument)
+  occ_subset_min_year: 2010 # min year for occupation list from foia data
+  role_k50_max_cutoff: 1000
+  role_k50_mean_cutoff: 100
+  limit_education_to_positions: true
+  resume_batches: true # if false, rebuild from scratch
+  use_preferred_rcids: true # restrict sample to preferred rcids identified in employer crosswalk construction (if true, only include transitions involving these rcids; if false, include all transitions regardless of rcid; can be overridden by command-line argument)
+
+build_company_shift_share:
+  share_base_year: 2010
+  outcome_lag_start: 0
+  outcome_lag_end: 5
+  save_outputs: true
+  verbose: true
+  plot_diagnostics: true
+  use_changes: false
+  use_log_y: false
+  exclude_unitids: []
+  include_non_masters: false
+
+shift_share_regressions:
+  outcome_prefix: "y_cst_lag"
+  lag_start: 0
+  lag_end: 5
+  instrument: "z_ct"
+  dependent: "masters_opt_hires"
+  start_t: null
+  end_t: null
+  no_fe: false
+  controls: []
+  min_employees_2010: null
+  employees_lag: 0
+  diagnostics: false
+  diagnostics_top_n: 10
+  diagnostics_pre_lag_1: 1
+  diagnostics_pre_lag_2: 2
+  diagnostics_component_col: null
+  diagnostics_share_col: "share_ck"
+  enforce_balanced_panel: true
+  require_nonzero_x_all_years: false
+  fill_missing_xy_zero: false
+  median_regression: false
+  ihs_y: false
+
+employer_crosswalk:
+  wrds_username: "amykimecon"
+  load_revelio_from_wrds: true
+  entity_name_block_prefix_len: 3
+  fuzzy_name_block_prefix_len: 3
+  rematch_jw_threshold: 0.95
+  min_unique_individuals: 10
+  min_years: 3
+
+ipeds_ma_only:
+  min_year: 2002
+  min_cip: 10000
+  master_only: true
