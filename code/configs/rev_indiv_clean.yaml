@@ -59,7 +59,7 @@ paths:
 
   name2nat_chunk_stub: "{root}/data/int/name2nat_revelio/name2nat_revelio"
   name2nat_chunk_stub_test: "{root}/data/int/name2nat_revelio/test"
-  name2nat_parquet: "{root}/data/int/name2nat_aug1.parquet"
+  name2nat_parquet: "{root}/data/int/name2nat_${run_tag}.parquet"
   name2nat_parquet_test: "{root}/data/int/name2nat_test.parquet"
 
   rev_inst_countries_parquet: "{root}/data/int/rev_inst_countries_${run_tag}.parquet"

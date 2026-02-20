@@ -9,8 +9,20 @@ import numpy as np
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import * 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
+if "__file__" in globals():
+    _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+else:
+    _THIS_DIR = os.path.join(os.getcwd(), "03_indiv_merge")
+
+sys.path.append(_THIS_DIR)
+sys.path.append(os.path.dirname(_THIS_DIR))
+import helpers as help
+import indiv_merge_config as icfg
 
 con_indiv = ddb.connect()
 
@@ -18,19 +30,27 @@ con_indiv = ddb.connect()
 # IMPORTING DATA
 #####################
 ## foia
-foia_indiv = con_indiv.read_parquet(f'{root}/data/clean/foia_indiv.parquet')
+foia_indiv = con_indiv.read_parquet(
+    icfg.choose_path(icfg.FOIA_INDIV_PARQUET, icfg.FOIA_INDIV_PARQUET_LEGACY)
+)
 
 ## revelio
-rev_indiv = con_indiv.read_parquet(f'{root}/data/clean/rev_indiv.parquet')
+rev_indiv = con_indiv.read_parquet(
+    icfg.choose_path(icfg.REV_INDIV_PARQUET, icfg.REV_INDIV_PARQUET_LEGACY)
+)
 
 ## revelio education data
-rev_educ = con_indiv.read_parquet(f'{root}/data/int/rev_educ_long_aug8.parquet')
+rev_educ = con_indiv.read_parquet(
+    icfg.choose_path(icfg.REV_EDUC_LONG_PARQUET, icfg.REV_EDUC_LONG_PARQUET_LEGACY)
+)
 
 # collapsing to user x institution (for now use country with top score)
 rev_educ_clean = con_indiv.sql("SELECT *, ed_startdate AS startdate, ed_enddate AS enddate FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY user_id, education_number ORDER BY matchscore DESC) AS match_order FROM rev_educ WHERE degree_clean != 'Non-Degree') WHERE match_order = 1")
 
 # Importing User x Position-level Data (all positions, cleaned and deduplicated)
-merged_pos = con_indiv.read_parquet(f'{root}/data/int/merged_pos_clean_aug8.parquet')
+merged_pos = con_indiv.read_parquet(
+    icfg.choose_path(icfg.MERGED_POS_CLEAN_PARQUET, icfg.MERGED_POS_CLEAN_PARQUET_LEGACY)
+)
 
 # removing duplicates, setting alt enddate as enddate if missing
 merged_pos_clean = con_indiv.sql("SELECT * EXCLUDE (enddate), CASE WHEN alt_enddate IS NULL THEN enddate ELSE alt_enddate END AS enddate FROM merged_pos WHERE pos_dup_ind IS NULL OR pos_dup_ind = 0")
@@ -47,7 +67,14 @@ def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, p
     str_out = merge_filt_func(f"({merge_raw_func(rev_tab, foia_tab, foia_prefilt=foia_prefilt, subregion=subregion)})", postfilt=postfilt, MATCH_MULT_CUTOFF=MATCH_MULT_CUTOFF, REV_MULT_COEFF=REV_MULT_COEFF, COUNTRY_SCORE_CUTOFF=COUNTRY_SCORE_CUTOFF, MONTH_BUFFER=MONTH_BUFFER, YOB_BUFFER=YOB_BUFFER, F_PROB_BUFFER=F_PROB_BUFFER)
 
     if with_t_vars:
-        str_out = f"SELECT * EXCLUDE (b.foia_indiv_id, b.user_id) FROM ({str_out}) AS a LEFT JOIN ({get_rel_year_inds_wide(f"({str_out})")}) AS b ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id"
+        # Materialize base merge once to avoid recomputing a heavy subquery multiple times.
+        str_out = f"""
+        WITH base AS ({str_out})
+        SELECT * EXCLUDE (b.foia_indiv_id, b.user_id)
+        FROM base AS a
+        LEFT JOIN ({get_rel_year_inds_wide('base')}) AS b
+            ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id
+        """
     
     if verbose:
         print(f"Main H-1B Sample Size: {con.sql(f"SELECT COUNT(DISTINCT foia_indiv_id) FROM {foia_tab} {foia_prefilt}").df().iloc[0,0]} Applications")
@@ -108,13 +135,13 @@ def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV
     
     str_out = f"""
     SELECT *, total_score/(SUM(total_score) OVER(PARTITION BY foia_indiv_id)) AS weight_norm FROM (
-        SELECT foia_indiv_id, FEIN, lottery_year, rcid, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_work_in_us, n_apps, status_type, ade_ind, ade_year, last_grad_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, high_rep_emp_ind, no_rep_emp_ind, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt,
-            (COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year))/n_apps AS share_apps_matched_emp,
-            COUNT(DISTINCT user_id) OVER(PARTITION BY FEIN, lottery_year) AS n_rev_users_emp,
-            (COUNT(*) OVER(PARTITION BY FEIN, lottery_year))/(COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year)) AS match_mult_emp,
-            (COUNT(*) OVER(PARTITION BY FEIN, lottery_year))/(COUNT(DISTINCT user_id) OVER(PARTITION BY FEIN, lottery_year)) AS rev_mult_emp,
-            COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY FEIN, lottery_year) AS n_apps_matched_emp,
-            COUNT(DISTINCT status_type) OVER(PARTITION BY FEIN, lottery_year) AS n_unique_wintype_emp,
+        SELECT foia_indiv_id, foia_firm_uid, FEIN, lottery_year, rcid, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_work_in_us, n_apps, status_type, ade_ind, ade_year, last_grad_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, high_rep_emp_ind, no_rep_emp_ind, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt,
+            (COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY foia_firm_uid, lottery_year))/n_apps AS share_apps_matched_emp,
+            COUNT(DISTINCT user_id) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_rev_users_emp,
+            (COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year))/(COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY foia_firm_uid, lottery_year)) AS match_mult_emp,
+            (COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year))/(COUNT(DISTINCT user_id) OVER(PARTITION BY foia_firm_uid, lottery_year)) AS rev_mult_emp,
+            COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_apps_matched_emp,
+            COUNT(DISTINCT status_type) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_unique_wintype_emp,
         (CASE WHEN est_yob IS NULL THEN 0
             WHEN ABS(est_yob - yob::INTEGER) <= 1 THEN 1
             WHEN est_yob - yob::INTEGER <= 3 AND est_yob - yob::INTEGER >= 2 THEN 0.8
@@ -140,20 +167,56 @@ def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV
 #####################
 # LONG POSITION/EDUC MERGE
 #####################
-def get_rel_year_inds_wide(merge_tab, t0 = -1, t1 = 2):
+def get_rel_year_inds_wide(merge_tab, t0 = -1, t1 = 2, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
 
     # join position and education data, unpivot long on variable, then pivot wide on variable x t
     str_out = f"""
     PIVOT 
         (UNPIVOT     
             (SELECT * EXCLUDE(b.foia_indiv_id, b.user_id, b.t) 
-            FROM ({get_rel_year_inds_pos(merge_tab)}) AS a JOIN ({get_rel_year_inds_educ(merge_tab)}) AS b ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id AND a.t = b.t)
+            FROM ({get_rel_year_inds_pos(merge_tab, pos_tab = pos_tab, t0=t0, t1=t1)}) AS a JOIN ({get_rel_year_inds_educ(merge_tab, educ_tab = educ_tab, t0=t0, t1=t1)}) AS b ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id AND a.t = b.t)
         ON * EXCLUDE(foia_indiv_id, user_id, t) 
         INTO NAME var VALUE val)
     ON var || t USING FIRST(val)
     """
 
     return str_out
+
+
+def get_rel_year_inds_wide_by_t(merge_tab, t0 = -1, t1 = 2, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
+    """Faster wide construction via one pass + conditional aggregation."""
+    pos_cols = [
+        "no_positions", "in_us", "in_home_country", "loc_null",
+        "change_company", "change_position", "agg_compensation",
+        "n_pos", "n_pos_startafter", "frac_t",
+    ]
+    educ_cols = [
+        "no_educations", "educ_in_us", "educ_in_home_country", "masters", "doctors",
+        "new_educ_in_us", "new_educ_in_home_country", "new_masters", "new_doctors", "new_educ",
+    ]
+    wide_exprs = []
+    for t in range(t0, t1 + 1):
+        for c in pos_cols + educ_cols:
+            # Keep legacy naming convention: <var><t>, e.g. change_company1, no_positions-1
+            wide_exprs.append(f"MAX(CASE WHEN t = {t} THEN {c} END) AS \"{c}{t}\"")
+
+    return f"""
+    WITH pos AS ({get_rel_year_inds_pos(merge_tab, pos_tab = pos_tab, t0 = t0, t1 = t1)}),
+         educ AS ({get_rel_year_inds_educ(merge_tab, educ_tab = educ_tab, t0 = t0, t1 = t1)}),
+         joined AS (
+             SELECT p.foia_indiv_id, p.user_id, p.t,
+                    {", ".join([f"p.{c}" for c in pos_cols])},
+                    {", ".join([f"e.{c}" for c in educ_cols])}
+             FROM pos AS p
+             JOIN educ AS e
+               ON p.foia_indiv_id = e.foia_indiv_id
+              AND p.user_id = e.user_id
+              AND p.t = e.t
+         )
+    SELECT foia_indiv_id, user_id, {", ".join(wide_exprs)}
+    FROM joined
+    GROUP BY foia_indiv_id, user_id
+    """
 
 def get_rel_year_inds_educ(merge_tab, educ_tab = 'rev_educ_clean', t0 = -1, t1 = 5):
     """ Takes output of merge function and a table with user_id x education data and returns table at merge x t level with relevant variables (where t is relative to lottery year)
@@ -298,6 +361,113 @@ def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddat
     return help.long_by_year(tab = f'({rawmerge})', t0 = t0, t1 = t1, t_ref = 'x.ref_year', enddatenull = enddatenull, joinids = 'user_id, foia_indiv_id')
 
 
+def _sql_escape_path(path):
+    return path.replace("'", "''")
+
+
+def write_query_to_parquet(query, out_path, overwrite = False, con = con_indiv):
+    os.makedirs(os.path.dirname(out_path), exist_ok = True)
+
+    if os.path.exists(out_path):
+        if os.path.getsize(out_path) == 0:
+            print(f"Found empty file, rebuilding: {out_path}")
+            os.remove(out_path)
+        elif not overwrite:
+            print(f"Skipping existing file: {out_path}")
+            return
+        else:
+            os.remove(out_path)
+    escaped_path = _sql_escape_path(out_path)
+    con.sql(f"COPY ({query}) TO '{escaped_path}' (FORMAT parquet)")
+    print(f"Wrote: {out_path}")
+
+
+def materialize_table(table_name, query, con = con_indiv):
+    con.sql(f"CREATE OR REPLACE TABLE {table_name} AS {query}")
+    n = con.sql(f"SELECT COUNT(*) AS n FROM {table_name}").df().iloc[0, 0]
+    print(f"Materialized {table_name}: {n} rows")
+
+
+def with_t_vars_query(base_table, t0 = -1, t1 = 2, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
+    return f"""
+    SELECT * EXCLUDE (b.foia_indiv_id, b.user_id)
+    FROM {base_table} AS a
+    LEFT JOIN ({get_rel_year_inds_wide(base_table, t0=t0, t1=t1, pos_tab = pos_tab, educ_tab = educ_tab)}) AS b
+        ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id
+    """
+
+
+def with_t_vars_from_table_query(base_table, tvars_table):
+    return f"""
+    SELECT * EXCLUDE (b.foia_indiv_id, b.user_id)
+    FROM {base_table} AS a
+    LEFT JOIN {tvars_table} AS b
+        ON a.foia_indiv_id = b.foia_indiv_id AND a.user_id = b.user_id
+    """
+
+
+def build_reg_inputs(overwrite = False, con = con_indiv):
+    """Builds merge outputs consumed by 04_analysis/reg.py."""
+    print(f"Using config: {icfg.ACTIVE_CONFIG_PATH}")
+
+    prefilt = (
+        "WHERE subregion != 'Southern Asia' AND country != 'Canada' "
+        "AND country != 'United Kingdom' AND country != 'Australia' "
+        "AND country != 'China' AND country != 'Taiwan'"
+    )
+
+    print("Building baseline base...")
+    materialize_table("_merge_baseline_base", merge(with_t_vars = False, verbose = True), con = con)
+
+    print("Materializing baseline user subset...")
+    materialize_table("_merge_baseline_users", "SELECT DISTINCT user_id FROM _merge_baseline_base", con = con)
+    materialize_table(
+        "_merge_pos_subset",
+        "SELECT p.* FROM merged_pos_clean AS p JOIN _merge_baseline_users AS u ON p.user_id = u.user_id",
+        con = con,
+    )
+    materialize_table(
+        "_merge_educ_subset",
+        "SELECT e.* FROM rev_educ_clean AS e JOIN _merge_baseline_users AS u ON e.user_id = u.user_id",
+        con = con,
+    )
+
+    print("Building shared t-vars table from baseline...")
+    materialize_table(
+        "_merge_baseline_tvars",
+        get_rel_year_inds_wide_by_t(
+            "_merge_baseline_base",
+            t0 = -1,
+            t1 = 2,
+            pos_tab = "_merge_pos_subset",
+            educ_tab = "_merge_educ_subset",
+        ),
+        con = con,
+    )
+
+    outputs = [
+        ("baseline", "_merge_baseline_base", icfg.MERGE_FILT_BASELINE_PARQUET),
+        ("prefilt", merge(with_t_vars = False, foia_prefilt = prefilt, verbose = True), icfg.MERGE_FILT_PREFILT_PARQUET),
+        ("mult2", merge(with_t_vars = False, MATCH_MULT_CUTOFF = 2, postfilt = 'indiv', verbose = True), icfg.MERGE_FILT_MULT2_PARQUET),
+        ("mult4", merge(with_t_vars = False, MATCH_MULT_CUTOFF = 4, postfilt = 'indiv', verbose = True), icfg.MERGE_FILT_MULT4_PARQUET),
+        ("mult6", merge(with_t_vars = False, MATCH_MULT_CUTOFF = 6, postfilt = 'indiv', verbose = True), icfg.MERGE_FILT_MULT6_PARQUET),
+    ]
+
+    for name, base_query_or_table, out_path in outputs:
+        print(f"Building {name}...")
+        if name == "baseline":
+            base_table = "_merge_baseline_base"
+        else:
+            base_table = f"_merge_{name}_base"
+            materialize_table(base_table, base_query_or_table, con = con)
+        write_query_to_parquet(
+            with_t_vars_from_table_query(base_table, "_merge_baseline_tvars"),
+            out_path,
+            overwrite = overwrite,
+            con = con,
+        )
+
+
 # x = con_indiv.sql(merge(with_t_vars = True, MATCH_MULT_CUTOFF = 2))
 # full_df = con.sql(f"COPY ({merge(with_t_vars=True)}) TO '{root}/data/int/merge_filt_base_with_t_vars_aug21.parquet'")
 
@@ -358,3 +528,6 @@ def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddat
 # con.sql(f"COPY merge_filt_postfilt2 TO '{root}/data/int/merge_filt_postfilt_jul23.parquet'")
 # con.sql(f"COPY merge_filt_prefilt TO '{root}/data/int/merge_filt_prefilt_jul23.parquet'")
 
+# To regenerate files used by 04_analysis/reg.py, run this script directly.
+if __name__ == "__main__":
+    build_reg_inputs(overwrite = False)

@@ -14,11 +14,17 @@ import seaborn as sns
 from linearmodels.panel import compare
 import os
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from config import * 
+if "__file__" in globals():
+    _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+else:
+    _THIS_DIR = os.path.join(os.getcwd(), "04_analysis")
+
+_CODE_DIR = os.path.dirname(_THIS_DIR)
+sys.path.append(_CODE_DIR)
+sys.path.append(os.path.join(_CODE_DIR, "03_indiv_merge"))
+import indiv_merge_config as icfg
 
 # get merge functions from main file
-sys.path.append('03_indiv_merge/')
 from indiv_merge import merge, merge_df
 
 con = ddb.connect()
@@ -27,22 +33,27 @@ con = ddb.connect()
 # IMPORTING DATA
 #####################
 ## foia
-foia_indiv = con.read_parquet(f'{root}/data/clean/foia_indiv.parquet')
+foia_indiv = con.read_parquet(
+    icfg.choose_path(icfg.FOIA_INDIV_PARQUET, icfg.FOIA_INDIV_PARQUET_LEGACY)
+)
 
 ## revelio
-rev_indiv = con.read_parquet(f'{root}/data/clean/rev_indiv.parquet')
-
-## revelio user x position level data
-rev_pos = con.read_parquet(f"{root}/data/int/wrds_positions_aug1.parquet")
+rev_indiv = con.read_parquet(
+    icfg.choose_path(icfg.REV_INDIV_PARQUET, icfg.REV_INDIV_PARQUET_LEGACY)
+)
 
 ## revelio education data
-rev_educ = con.read_parquet(f'{root}/data/int/rev_educ_long_aug8.parquet')
+rev_educ = con.read_parquet(
+    icfg.choose_path(icfg.REV_EDUC_LONG_PARQUET, icfg.REV_EDUC_LONG_PARQUET_LEGACY)
+)
 
 # collapsing to user x institution (for now use country with top score)
 con.sql("CREATE OR REPLACE TABLE rev_educ_clean AS SELECT *, ed_startdate AS startdate, ed_enddate AS enddate FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY user_id, education_number ORDER BY matchscore DESC) AS match_order FROM rev_educ WHERE degree_clean != 'Non-Degree') WHERE match_order = 1")
 
 # Importing User x Position-level Data (all positions, cleaned and deduplicated)
-merged_pos = con.read_parquet(f'{root}/data/int/merged_pos_clean_aug8.parquet')
+merged_pos = con.read_parquet(
+    icfg.choose_path(icfg.MERGED_POS_CLEAN_PARQUET, icfg.MERGED_POS_CLEAN_PARQUET_LEGACY)
+)
 
 # removing duplicates, setting alt enddate as enddate if missing
 con.sql("CREATE OR REPLACE TABLE merged_pos_clean AS SELECT * EXCLUDE (enddate), CASE WHEN alt_enddate IS NULL THEN enddate ELSE alt_enddate END AS enddate FROM merged_pos WHERE pos_dup_ind IS NULL OR pos_dup_ind = 0")
@@ -53,9 +64,26 @@ con.sql("CREATE OR REPLACE TABLE merged_pos_clean AS SELECT * EXCLUDE (enddate),
 #####################
 # CLEANING DATA
 #####################
+def _with_firm_key(df):
+    out = df.copy()
+    if "foia_firm_uid" in out.columns:
+        uid = out["foia_firm_uid"].astype(str).str.strip()
+        uid = uid.where(~uid.isin(["", "None", "nan", "NaN"]))
+        if "FEIN" in out.columns:
+            fein = out["FEIN"].astype(str)
+            out["firm_key"] = uid.fillna(fein)
+        else:
+            out["firm_key"] = uid
+    elif "FEIN" in out.columns:
+        out["firm_key"] = out["FEIN"].astype(str)
+    else:
+        out["firm_key"] = ""
+    return out
+
+
 def merge_filt_clean(merge_raw, index = 'firm x year'):
     ## DEFINING VARIABLES
-    merge_filt = merge_raw.copy() 
+    merge_filt = _with_firm_key(merge_raw.copy())
 
     # indicator for winning lottery
     merge_filt['winner'] = merge_filt['status_type'] == "SELECTED"
@@ -94,10 +122,10 @@ def merge_filt_clean(merge_raw, index = 'firm x year'):
     merge_filt['promote2'] = np.where((merge_filt['change_position2'] == 1) & (merge_filt['change_company1'] == 0), 1, 0)
 
     # setting index
-    merge_filt['firm_year_fe'] = merge_filt['FEIN'].astype(str) + '_' + merge_filt['lottery_year'].astype(str)
+    merge_filt['firm_year_fe'] = merge_filt['firm_key'].astype(str) + '_' + merge_filt['lottery_year'].astype(str)
     merge_filt['lottery_year'] = merge_filt['lottery_year'].astype(int)
     merge_filt['year'] = merge_filt['lottery_year'].astype('int')
-    merge_filt['emp_id'] = merge_filt['FEIN']
+    merge_filt['emp_id'] = merge_filt['firm_key']
 
     if index == 'firm + year':
         return merge_filt.set_index(['emp_id', 'year'])
@@ -109,11 +137,17 @@ def merge_filt_clean(merge_raw, index = 'firm x year'):
 
 # collapsing merged data to application level
 def merge_collapse(merge_clean, index = 'firm x year'):
-    merge_out = merge_clean.copy().reset_index()
+    merge_out = _with_firm_key(merge_clean.copy().reset_index())
     
     ## COLLAPSING TO APPLICATION LEVEL
     outcomes = ['change_company1', 'change_company2','change_company3', 'promote1', 'promote2', 'in_us1', 'in_us2', 'ade', 'work_1yr', 'work_2yr', 'new_educ1', 'new_educ2', 'agg_compensation1', 'agg_compensation2', 'graddiff', 'in_home_country1', 'in_home_country2']#, 'loc_null1', 'loc_null2']
-    df = merge_out.groupby(['foia_indiv_id', 'FEIN', 'female_ind', 'yob', 'age', 'lottery_year', 'foia_country', 'winner', 'n_apps', 'n_unique_country', 'high_rep_emp_ind', 'no_rep_emp_ind']).agg(
+    group_cols = ['foia_indiv_id', 'firm_key', 'female_ind', 'yob', 'age', 'lottery_year', 'foia_country', 'winner', 'n_apps', 'n_unique_country', 'high_rep_emp_ind', 'no_rep_emp_ind']
+    if 'foia_firm_uid' in merge_out.columns:
+        group_cols.insert(1, 'foia_firm_uid')
+    if 'FEIN' in merge_out.columns:
+        group_cols.insert(2, 'FEIN')
+
+    df = merge_out.groupby(group_cols).agg(
         **{var: (var, 
                  lambda x, var = var: np.average(x.dropna(), weights = merge_out.loc[x.dropna().index, 'weight_norm']) if x.notna().any() else np.nan) for var in outcomes}
     ).reset_index()
@@ -121,10 +155,10 @@ def merge_collapse(merge_clean, index = 'firm x year'):
     ## MORE CLEANING
     # year, fein, const
     df['const'] = 1
-    df['firm_year_fe'] = df['FEIN'].astype(str) + '_' + df['lottery_year'].astype(str)
+    df['firm_year_fe'] = df['firm_key'].astype(str) + '_' + df['lottery_year'].astype(str)
     df['lottery_year'] = df['lottery_year'].astype(int)
     df['year'] = df['lottery_year'].astype('int')
-    df['emp_id'] = df['FEIN']
+    df['emp_id'] = df['firm_key']
 
     if index == 'firm + year':
         return df.set_index(['emp_id', 'year'])
@@ -136,9 +170,16 @@ def merge_collapse(merge_clean, index = 'firm x year'):
         return df
 
 # mergedfs_raw = [pd.read_parquet(f'{root}/data/int/merge_filt_mult{c}_sep8.parquet') for c in [2,4,6]] + [pd.read_parquet(f'{root}/data/int/merge_filt_baseline_sep8.parquet')]
-mergedfs_raw = [pd.read_parquet(f'{root}/data/int/merge_filt_mult{c}_sep8.parquet') for c in [2,4,6]]
+mergedfs_raw = [
+    pd.read_parquet(icfg.choose_path(icfg.MERGE_FILT_MULT2_PARQUET, icfg.MERGE_FILT_MULT2_PARQUET_LEGACY)),
+    pd.read_parquet(icfg.choose_path(icfg.MERGE_FILT_MULT4_PARQUET, icfg.MERGE_FILT_MULT4_PARQUET_LEGACY)),
+    pd.read_parquet(icfg.choose_path(icfg.MERGE_FILT_MULT6_PARQUET, icfg.MERGE_FILT_MULT6_PARQUET_LEGACY)),
+    pd.read_parquet(icfg.choose_path(icfg.MERGE_FILT_BASELINE_PARQUET, icfg.MERGE_FILT_BASELINE_PARQUET_LEGACY)),
+]
 
-mergedf_prefilt_raw = pd.read_parquet(f'{root}/data/int/merge_filt_prefilt_sep8.parquet')
+mergedf_prefilt_raw = pd.read_parquet(
+    icfg.choose_path(icfg.MERGE_FILT_PREFILT_PARQUET, icfg.MERGE_FILT_PREFILT_PARQUET_LEGACY)
+)
 
 mergedfs_clean = [merge_filt_clean(df) for df in mergedfs_raw]
 mergedfs = [merge_collapse(df, 'firm x year') for df in mergedfs_clean]
@@ -146,7 +187,9 @@ mergedf_clean = merge_filt_clean(mergedf_prefilt_raw)
 mergedf = merge_collapse(mergedf_clean, 'firm x year')
 mergedf2 = merge_collapse(mergedf_clean, "firm + year")
 
-mergedf_main_clean = merge_filt_clean(pd.read_parquet(f'{root}/data/int/merge_filt_baseline_sep8.parquet'))
+mergedf_main_clean = merge_filt_clean(
+    pd.read_parquet(icfg.choose_path(icfg.MERGE_FILT_BASELINE_PARQUET, icfg.MERGE_FILT_BASELINE_PARQUET_LEGACY))
+)
 mergedf_main = merge_collapse(mergedf_main_clean)
 # foia_tab = con.sql("CREATE OR REPLACE TABLE foia AS SELECT * FROM foia_indiv USING SAMPLE 100")
 # rev_tab = con.sql("CREATE OR REPLACE TABLE rev AS SELECT * FROM rev_indiv")

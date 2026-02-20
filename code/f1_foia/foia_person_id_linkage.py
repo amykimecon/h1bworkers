@@ -22,6 +22,7 @@ from config import *  # noqa: F401,F403
 FOIA_INPUT_PATH = f"{root}/data/int/foia_sevp_combined_raw.parquet"
 CROSSWALK_OUTPUT_PATH = f"{root}/data/int/foia_person_key_year_crosswalk.parquet"
 FULL_OUTPUT_PATH = f"{root}/data/int/foia_sevp_with_person_id.parquet"
+EMPLOYMENT_CORRECTED_OUTPUT_PATH = f"{root}/data/int/foia_sevp_with_person_id_employment_corrected.parquet"
 TMP_DIR = f"{root}/data/int/foia_person_linkage_tmp"
 
 def _escape(path: Path) -> str:
@@ -93,6 +94,11 @@ def _parse_args() -> argparse.Namespace:
         default=TMP_DIR,
         help="Temporary directory for intermediate parquet files.",
     )
+    parser.add_argument(
+        "--employment-corrected-out",
+        default=EMPLOYMENT_CORRECTED_OUTPUT_PATH,
+        help="Path to output parquet with post-2015 employer/spell mismatches removed when identifiable.",
+    )
     return parser.parse_args()
 
 
@@ -111,11 +117,13 @@ def run_person_id_linkage(
     input_path: str | Path = FOIA_INPUT_PATH,
     crosswalk_out_path: str | Path = CROSSWALK_OUTPUT_PATH,
     full_out_path: str | Path = FULL_OUTPUT_PATH,
+    employment_corrected_out_path: str | Path = EMPLOYMENT_CORRECTED_OUTPUT_PATH,
     tmp_dir: str | Path = TMP_DIR,
 ) -> None:
     input_path = Path(input_path)
     crosswalk_out_path = Path(crosswalk_out_path)
     full_out_path = Path(full_out_path)
+    employment_corrected_out_path = Path(employment_corrected_out_path)
     tmp_dir = Path(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -418,6 +426,133 @@ def run_person_id_linkage(
         """
     )
 
+    # Correct post-2015 FOIA employer x spell duplication where true pairings can be identified
+    # from trusted pre-2015 records within the same person_id.
+    correction_year = 2015
+    employer_key_cols = [
+        "employer_name",
+        "employer_city",
+        "employer_state",
+        "employer_zip_code",
+        "employment_description",
+    ]
+    spell_key_cols = [
+        "employment_opt_type",
+        "authorization_start_date",
+        "authorization_end_date",
+        "opt_authorization_start_date",
+        "opt_authorization_end_date",
+        "opt_employer_start_date",
+        "opt_employer_end_date",
+    ]
+
+    fw_cols = _get_columns(con, "foia_with_person")
+    fw_col_map = {c.lower(): c for c in fw_cols}
+    missing_correction_cols = [
+        c for c in employer_key_cols + spell_key_cols if c not in fw_col_map
+    ]
+    if missing_correction_cols:
+        print(
+            "Skipping employment correction because required columns are missing: "
+            + ", ".join(missing_correction_cols)
+        )
+        con.sql(
+            f"""
+            COPY (
+                SELECT *
+                FROM foia_with_person
+                ORDER BY original_row_num
+            ) TO '{_escape(employment_corrected_out_path)}' (FORMAT PARQUET)
+            """
+        )
+    else:
+        employer_expr = _build_group_key_expr(fw_col_map[c] for c in employer_key_cols)
+        spell_expr = _build_group_key_expr(fw_col_map[c] for c in spell_key_cols)
+
+        con.sql(
+            f"""
+            CREATE OR REPLACE TEMP TABLE foia_employment_keys AS
+            SELECT
+                *,
+                {employer_expr} AS employer_key,
+                {spell_expr} AS spell_key
+            FROM foia_with_person
+            """
+        )
+
+        con.sql(
+            f"""
+            CREATE OR REPLACE TEMP TABLE person_historical_pairs AS
+            SELECT DISTINCT person_id, employer_key, spell_key
+            FROM foia_employment_keys
+            WHERE person_id IS NOT NULL
+              AND year_int <= {correction_year - 1}
+            """
+        )
+        con.sql(
+            f"""
+            CREATE OR REPLACE TEMP TABLE person_historical_employers AS
+            SELECT DISTINCT person_id, employer_key
+            FROM foia_employment_keys
+            WHERE person_id IS NOT NULL
+              AND year_int <= {correction_year - 1}
+            """
+        )
+        con.sql(
+            f"""
+            CREATE OR REPLACE TEMP TABLE person_historical_spells AS
+            SELECT DISTINCT person_id, spell_key
+            FROM foia_employment_keys
+            WHERE person_id IS NOT NULL
+              AND year_int <= {correction_year - 1}
+            """
+        )
+
+        con.sql(
+            f"""
+            CREATE OR REPLACE TEMP TABLE foia_employment_fix_flags AS
+            SELECT
+                f.*,
+                CASE
+                    WHEN f.year_int >= {correction_year}
+                     AND f.person_id IS NOT NULL
+                     AND he.person_id IS NOT NULL
+                     AND hs.person_id IS NOT NULL
+                     AND hp.person_id IS NULL
+                    THEN 1 ELSE 0
+                END AS flag_incorrect_employer_spell_pair,
+                CASE
+                    WHEN f.year_int >= {correction_year}
+                     AND f.person_id IS NOT NULL
+                     AND hp.person_id IS NULL
+                     AND (he.person_id IS NULL OR hs.person_id IS NULL)
+                    THEN 1 ELSE 0
+                END AS flag_unresolved_employer_spell_pair
+            FROM foia_employment_keys f
+            LEFT JOIN person_historical_pairs hp
+                ON f.person_id = hp.person_id
+               AND f.employer_key = hp.employer_key
+               AND f.spell_key = hp.spell_key
+            LEFT JOIN person_historical_employers he
+                ON f.person_id = he.person_id
+               AND f.employer_key = he.employer_key
+            LEFT JOIN person_historical_spells hs
+                ON f.person_id = hs.person_id
+               AND f.spell_key = hs.spell_key
+            """
+        )
+
+        con.sql(
+            f"""
+            COPY (
+                SELECT *
+                FROM foia_employment_fix_flags
+                WHERE flag_incorrect_employer_spell_pair = 0
+                ORDER BY original_row_num
+            ) TO '{_escape(employment_corrected_out_path)}' (FORMAT PARQUET)
+            """
+        )
+
     crosswalk_count = con.execute("SELECT COUNT(*) FROM key_year_crosswalk").fetchone()[0]
     person_count = con.execute("SELECT COUNT(DISTINCT person_id) FROM key_year_crosswalk WHERE person_id IS NOT NULL").fetchone()[0]
     flagged_multi = con.execute(
@@ -433,6 +568,33 @@ def run_person_id_linkage(
     print(f"Person IDs: {person_count:,}")
     print(f"Flagged multi-individual years: {flagged_multi:,}")
     print(f"Flagged key-year conflicts: {flagged_conflict:,}")
+    print(f"Wrote {employment_corrected_out_path}")
+
+    if missing_correction_cols:
+        print("Employment correction status: skipped (missing required columns).")
+    else:
+        post_year_rows = con.execute(
+            f"SELECT COUNT(*) FROM foia_employment_fix_flags WHERE year_int >= {correction_year}"
+        ).fetchone()[0]
+        fixed_incorrect = con.execute(
+            "SELECT COUNT(*) FROM foia_employment_fix_flags WHERE flag_incorrect_employer_spell_pair = 1"
+        ).fetchone()[0]
+        unresolved_not_fixed = con.execute(
+            "SELECT COUNT(*) FROM foia_employment_fix_flags WHERE flag_unresolved_employer_spell_pair = 1"
+        ).fetchone()[0]
+        full_rows = con.execute("SELECT COUNT(*) FROM foia_with_person").fetchone()[0]
+        corrected_rows = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM foia_employment_fix_flags
+            WHERE flag_incorrect_employer_spell_pair = 0
+            """
+        ).fetchone()[0]
+        print(f"Post-{correction_year} rows evaluated: {post_year_rows:,}")
+        print(f"Incorrect rows fixed (dropped): {fixed_incorrect:,}")
+        print(f"Incorrect rows not fixed (insufficient pre-{correction_year} linkage): {unresolved_not_fixed:,}")
+        print(f"Rows before correction: {full_rows:,}")
+        print(f"Rows after correction: {corrected_rows:,}")
 
 
 def main() -> None:
@@ -444,9 +606,10 @@ def main() -> None:
         input_path=args.input,
         crosswalk_out_path=args.crosswalk_out,
         full_out_path=args.full_out,
+        employment_corrected_out_path=args.employment_corrected_out,
         tmp_dir=args.tmp_dir,
     )
 
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

@@ -383,6 +383,7 @@ else:
 
 # Importing Institution x Country Matches
 inst_country_file = rcfg.REV_INST_COUNTRIES_PARQUET
+inst_country_file = "/home/yk0581/data/int/rev_inst_countries_with_ipeds_feb2026.parquet"
 inst_country_legacy = rcfg.REV_INST_COUNTRIES_PARQUET_LEGACY
 if os.path.exists(inst_country_file):
     print(f"Loading institution-country file: {inst_country_file}")
@@ -602,7 +603,7 @@ f"""SELECT a.foia_firm_uid, a.FEIN, a.lottery_year, country,
     FROM (
         SELECT FEIN, lottery_year, get_std_country(country_of_nationality) AS country, 
             foia_firm_uid,
-            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY foia_firm_uid) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY foia_firm_uid) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id 
+            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY foia_firm_uid) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id 
         FROM foia_with_ids
         WHERE foia_firm_uid IS NOT NULL
     ) AS a JOIN samp_to_rcid AS b ON a.foia_firm_uid = b.foia_firm_uid
@@ -929,15 +930,15 @@ WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (
 # cleaning revelio data (collapsing to user x company x country level)
 rev_indiv = con.sql(
 """
-SELECT * FROM
+SELECT * EXCLUDE (users.user_id, poshist.user_id) FROM
 -- start with user x rcid data (get rcid-specific startdate)
-(
+(SELECT user_id, a.rcid, first_startdate, last_enddate, b.foia_firm_uid FROM
     (SELECT user_id, 
         MIN(startdate)::DATETIME AS first_startdate, 
-        MAX(CASE WHEN alt_enddate IS NULL AND enddate IS NULL THEN '2025-03-01' WHEN enddate IS NULL AND alt_enddate IS NOT NULL THEN alt_enddate ELSE enddate END)::DATETIME AS last_enddate, rcid 
+        MAX(CASE WHEN alt_enddate IS NULL AND enddate IS NULL THEN '2026-01-01' WHEN enddate IS NULL AND alt_enddate IS NOT NULL THEN alt_enddate ELSE enddate END)::DATETIME AS last_enddate, rcid 
     FROM merged_pos_clean WHERE country = 'United States' AND startdate >= '2015-01-01' GROUP BY user_id, rcid) AS a 
     JOIN 
-    (SELECT rcid FROM samp_to_rcid GROUP BY rcid) AS b 
+    (SELECT rcid, foia_firm_uid FROM samp_to_rcid GROUP BY rcid, foia_firm_uid) AS b 
     ON a.rcid = b.rcid
 ) AS pos
 

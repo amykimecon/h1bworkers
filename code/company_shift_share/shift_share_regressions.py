@@ -1698,7 +1698,7 @@ def run_from_panel_path(
 #     main()
 start_t = 2012
 end_t = 2018
-min_employees_2010 = 10 #15
+min_employees_2010 = 0 #15
 employees_lag = 0
 enforce_balanced_panel = False
 outcome_prefix = "y_cst_lag"
@@ -1708,10 +1708,10 @@ instr = "z_ct_full"
 dependent = "valid_masters_opt_hires"
 include_fixed_effects = True
 controls = []
-plot_out = "{root}/data/shift_share_plot3.png"
+plot_out = True
 plot_coef = "iv"
 plot_title = None
-latex_out = True
+latex_out = None
 latex_caption = "Shift-share regression results"
 latex_label = "tab:shift_share"
 latex_size = "\\scriptsize"

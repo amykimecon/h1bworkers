@@ -31,6 +31,7 @@ class PipelinePaths:
     revelio_ipeds_foia_inst_crosswalk: Path
     ipeds_ma_only: Path
     foia_sevp_with_person_id: Path
+    foia_sevp_with_person_id_employment_corrected: Path
     employer_crosswalk: Path
     preferred_rcids: Path
     instrument_components_out: Path
@@ -55,6 +56,7 @@ def _resolve_pipeline_paths(cfg: dict) -> PipelinePaths:
         revelio_ipeds_foia_inst_crosswalk=_resolve_path(paths_cfg, "revelio_ipeds_foia_inst_crosswalk"),
         ipeds_ma_only=_resolve_path(paths_cfg, "ipeds_ma_only"),
         foia_sevp_with_person_id=_resolve_path(paths_cfg, "foia_sevp_with_person_id"),
+        foia_sevp_with_person_id_employment_corrected=_resolve_path(paths_cfg, "foia_sevp_with_person_id_employment_corrected"),
         employer_crosswalk=_resolve_path(paths_cfg, "employer_crosswalk"),
         preferred_rcids=_resolve_path(paths_cfg, "preferred_rcids"),
         instrument_components_out=_resolve_path(paths_cfg, "instrument_components_out"),
@@ -130,7 +132,8 @@ def _register_inputs(con: ddb.DuckDBPyConnection, paths: PipelinePaths) -> None:
             "headcount": paths.headcount,
             "revelio_ipeds_foia_inst_crosswalk": paths.revelio_ipeds_foia_inst_crosswalk,
             "ipeds_ma_only": paths.ipeds_ma_only,
-            "foia_raw": paths.foia_sevp_with_person_id,
+            "foia_raw_full": paths.foia_sevp_with_person_id,
+            "foia_raw_corrected": paths.foia_sevp_with_person_id_employment_corrected,
             "employer_cw": paths.employer_crosswalk,
             "preferred_rcids": paths.preferred_rcids,
         }
@@ -159,7 +162,8 @@ def _register_inputs(con: ddb.DuckDBPyConnection, paths: PipelinePaths) -> None:
         """
     )
     con.sql(f"CREATE OR REPLACE TEMP VIEW ipeds_raw AS SELECT * FROM read_parquet('{_escape(paths.ipeds_ma_only)}')")
-    con.sql(f"CREATE OR REPLACE TEMP VIEW foia_raw AS SELECT * FROM read_parquet('{_escape(paths.foia_sevp_with_person_id)}') WHERE year_int > 2005")
+    con.sql(f"CREATE OR REPLACE TEMP VIEW foia_raw AS SELECT * FROM read_parquet('{_escape(paths.foia_sevp_with_person_id_employment_corrected)}') WHERE year_int > 2005")
+    con.sql(f"CREATE OR REPLACE TEMP VIEW foia_raw_full AS SELECT * FROM read_parquet('{_escape(paths.foia_sevp_with_person_id)}') WHERE year_int > 2005")
     con.sql(f"CREATE OR REPLACE TEMP VIEW preferred_rcids AS SELECT DISTINCT preferred_rcid FROM read_parquet('{_escape(paths.preferred_rcids)}')")
     con.sql(
         f"""
@@ -515,7 +519,14 @@ def _create_instrument_views(con: ddb.DuckDBPyConnection, shares_view: str, grow
             SUM(z_ct_full_component) AS z_ct_full,
             SUM(z_ct_all_full_component) AS z_ct_all_full,
             SUM(z_ct_intl_full_component) AS z_ct_intl_full,
-            COUNT(DISTINCT k) AS n_universities
+            COUNT(
+                DISTINCT CASE
+                    WHEN share_ck IS NOT NULL AND share_ck <> 0
+                     AND g_kt IS NOT NULL AND g_kt <> 0
+                    THEN k
+                    ELSE NULL
+                END
+            ) AS n_universities
         FROM {components}
         GROUP BY c, t
         """
@@ -643,6 +654,8 @@ def _date_parse_sql(col: str) -> str:
 
 def _create_opt_counts(
     con: ddb.DuckDBPyConnection,
+    outcome_lag_start: int,
+    outcome_lag_end: int,
     use_changes: bool = False,
     include_non_masters: bool = False,
 ) -> str:
@@ -655,16 +668,97 @@ def _create_opt_counts(
 
     con.sql(
         f"""
-        CREATE OR REPLACE TEMP VIEW foia_opt_authorizations AS
+        CREATE OR REPLACE TEMP VIEW foia_opt_authorizations_old AS
             SELECT person_id,
                 {_sql_clean_company_name('employer_name')} AS f1_empname_clean,
                 {_sql_normalize('employer_city')} AS f1_city_clean,
                 {_sql_state_name_to_abbr('employer_state')} AS f1_state_clean,
                 {_sql_clean_zip('employer_zip_code')} AS f1_zip_clean,
                 MIN(EXTRACT(YEAR FROM program_end_date)) AS gradyear,
-                MAX(CASE WHEN opt_employer_start_date >= program_end_date THEN 1 ELSE 0 END) as valid_opt_hire
-            FROM foia_raw WHERE employer_name IS NOT NULL {masters_clause}
+                MAX(CASE WHEN opt_employer_start_date >= program_end_date THEN 1 ELSE 0 END) AS valid_opt_hire
+            FROM foia_raw_full
+            WHERE employer_name IS NOT NULL {masters_clause}
             GROUP BY person_id, employer_name, employer_city, employer_state, employer_zip_code
+        """
+    )
+    con.sql(
+        """
+        CREATE OR REPLACE TEMP VIEW person_post2014_correction_status AS
+        SELECT
+            f.person_id,
+            MAX(
+                CASE
+                    WHEN f.year_int >= 2015 AND c.original_row_num IS NULL THEN 1
+                    ELSE 0
+                END
+            ) AS has_post2014_correction
+        FROM foia_raw_full AS f
+        LEFT JOIN foia_raw AS c
+          ON f.original_row_num = c.original_row_num
+        WHERE f.person_id IS NOT NULL
+        GROUP BY f.person_id
+        """
+    )
+    con.sql(
+        f"""
+        CREATE OR REPLACE TEMP VIEW foia_opt_authorizations_first_spell AS
+        WITH base AS (
+            SELECT
+                person_id,
+                {_sql_clean_company_name('employer_name')} AS f1_empname_clean,
+                {_sql_normalize('employer_city')} AS f1_city_clean,
+                {_sql_state_name_to_abbr('employer_state')} AS f1_state_clean,
+                {_sql_clean_zip('employer_zip_code')} AS f1_zip_clean,
+                EXTRACT(YEAR FROM program_end_date) AS gradyear,
+                CASE WHEN opt_employer_start_date >= program_end_date THEN 1 ELSE 0 END AS valid_opt_hire,
+                COALESCE(
+                    {_date_parse_sql('opt_employer_start_date')},
+                    {_date_parse_sql('opt_authorization_start_date')},
+                    {_date_parse_sql('authorization_start_date')}
+                ) AS spell_start_dt,
+                original_row_num
+            FROM foia_raw
+            WHERE employer_name IS NOT NULL {masters_clause}
+        ),
+        ranked AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY person_id, f1_empname_clean, f1_city_clean, f1_state_clean, f1_zip_clean
+                    ORDER BY spell_start_dt ASC NULLS LAST, original_row_num ASC
+                ) AS spell_rank
+            FROM base
+        )
+        SELECT
+            person_id,
+            f1_empname_clean,
+            f1_city_clean,
+            f1_state_clean,
+            f1_zip_clean,
+            gradyear,
+            valid_opt_hire
+        FROM ranked
+        WHERE spell_rank = 1
+        """
+    )
+    con.sql(
+        """
+        CREATE OR REPLACE TEMP VIEW foia_opt_authorizations_correction_aware AS
+        SELECT
+            o.*,
+            'old_fallback' AS correction_source
+        FROM foia_opt_authorizations_old AS o
+        LEFT JOIN person_post2014_correction_status AS pcs
+          ON o.person_id = pcs.person_id
+        WHERE COALESCE(pcs.has_post2014_correction, 0) = 0
+        UNION ALL
+        SELECT
+            f.*,
+            'first_spell' AS correction_source
+        FROM foia_opt_authorizations_first_spell AS f
+        JOIN person_post2014_correction_status AS pcs
+          ON f.person_id = pcs.person_id
+        WHERE pcs.has_post2014_correction = 1
         """
     )
     # con.sql(
@@ -684,13 +778,13 @@ def _create_opt_counts(
     
     con.sql(
         """
-        CREATE OR REPLACE TEMP VIEW opt_new_hires AS
+        CREATE OR REPLACE TEMP VIEW opt_new_hires_old AS
         SELECT
             cw.preferred_rcid AS c,
             gradyear::INT AS t,
             COUNT(DISTINCT person_id) AS masters_opt_hires,
             COUNT(DISTINCT CASE WHEN valid_opt_hire = 1 THEN person_id END) AS valid_masters_opt_hires
-        FROM foia_opt_authorizations AS f
+        FROM foia_opt_authorizations_old AS f
         JOIN employer_crosswalk AS cw
           ON f.f1_empname_clean = cw.f1_empname_clean
          AND f.f1_city_clean = cw.f1_city_clean
@@ -699,6 +793,126 @@ def _create_opt_counts(
         WHERE gradyear IS NOT NULL
           AND cw.preferred_rcid IS NOT NULL
         GROUP BY cw.preferred_rcid, gradyear::INT
+        """
+    )
+    con.sql(
+        """
+        CREATE OR REPLACE TEMP VIEW opt_new_hires_correction_aware AS
+        SELECT
+            cw.preferred_rcid AS c,
+            gradyear::INT AS t,
+            COUNT(
+                DISTINCT CASE
+                    WHEN correction_source = 'old_fallback' AND valid_opt_hire = 1 THEN person_id
+                    WHEN correction_source = 'first_spell' AND valid_opt_hire = 1 THEN person_id
+                    ELSE NULL
+                END
+            ) AS masters_opt_hires_correction_aware
+        FROM foia_opt_authorizations_correction_aware AS f
+        JOIN employer_crosswalk AS cw
+          ON f.f1_empname_clean = cw.f1_empname_clean
+         AND f.f1_city_clean = cw.f1_city_clean
+         AND f.f1_state_clean = cw.f1_state_clean
+         AND f.f1_zip_clean = cw.f1_zip_clean
+        WHERE gradyear IS NOT NULL
+          AND cw.preferred_rcid IS NOT NULL
+        GROUP BY cw.preferred_rcid, gradyear::INT
+        """
+    )
+    con.sql(
+        """
+        CREATE OR REPLACE TEMP VIEW opt_new_hires_base AS
+        SELECT
+            COALESCE(o.c, n.c) AS c,
+            COALESCE(o.t, n.t) AS t,
+            COALESCE(o.masters_opt_hires, 0) AS masters_opt_hires,
+            COALESCE(o.valid_masters_opt_hires, 0) AS valid_masters_opt_hires,
+            COALESCE(n.masters_opt_hires_correction_aware, 0) AS masters_opt_hires_correction_aware
+        FROM opt_new_hires_old AS o
+        FULL OUTER JOIN opt_new_hires_correction_aware AS n
+          ON o.c = n.c
+         AND o.t = n.t
+        """
+    )
+    lag_start = int(outcome_lag_start)
+    lag_end = int(outcome_lag_end)
+    x_lag_year_min = 2005
+    x_lag_year_max = 2022
+    x_lag_cols = ",\n            ".join(
+        [
+            (
+                f"CASE WHEN (t + {lag}) < {x_lag_year_min} OR (t + {lag}) > {x_lag_year_max} "
+                f"THEN NULL ELSE COALESCE(MAX(CASE WHEN lag = {lag} THEN x_lag END), 0) END "
+                f"AS x_cst_lag{'m' + str(abs(lag)) if lag < 0 else str(lag)}"
+            )
+            for lag in range(lag_start, lag_end + 1)
+        ]
+    )
+    con.sql(
+        f"""
+        CREATE OR REPLACE TEMP VIEW opt_new_hires AS
+        WITH base AS (
+            SELECT
+                c,
+                t,
+                COALESCE(masters_opt_hires, 0) AS masters_opt_hires,
+                COALESCE(valid_masters_opt_hires, 0) AS valid_masters_opt_hires,
+                COALESCE(masters_opt_hires_correction_aware, 0) AS masters_opt_hires_correction_aware
+            FROM opt_new_hires_base
+            WHERE c IS NOT NULL
+              AND t IS NOT NULL
+        ),
+        bounds AS (
+            SELECT
+                c,
+                MIN(t) AS min_t,
+                MAX(t) AS max_t
+            FROM base
+            GROUP BY c
+        ),
+        expanded AS (
+            SELECT
+                b.c,
+                gs.year AS t
+            FROM bounds b,
+            LATERAL generate_series(b.min_t, b.max_t) AS gs(year)
+        ),
+        filled AS (
+            SELECT
+                e.c,
+                e.t,
+                COALESCE(b.masters_opt_hires, 0) AS masters_opt_hires,
+                COALESCE(b.valid_masters_opt_hires, 0) AS valid_masters_opt_hires,
+                COALESCE(b.masters_opt_hires_correction_aware, 0) AS masters_opt_hires_correction_aware
+            FROM expanded e
+            LEFT JOIN base b
+              ON e.c = b.c
+             AND e.t = b.t
+        ),
+        long_lags AS (
+            SELECT
+                f.c,
+                f.t,
+                f.masters_opt_hires,
+                f.valid_masters_opt_hires,
+                f.masters_opt_hires_correction_aware,
+                lag.lag AS lag,
+                COALESCE(f2.masters_opt_hires_correction_aware, 0) AS x_lag
+            FROM filled AS f
+            CROSS JOIN LATERAL generate_series({lag_start}, {lag_end}) AS lag(lag)
+            LEFT JOIN filled AS f2
+              ON f.c = f2.c
+             AND f2.t = f.t + lag.lag
+        )
+        SELECT
+            c,
+            t,
+            MAX(masters_opt_hires) AS masters_opt_hires,
+            MAX(valid_masters_opt_hires) AS valid_masters_opt_hires,
+            MAX(masters_opt_hires_correction_aware) AS masters_opt_hires_correction_aware,
+            {x_lag_cols}
+        FROM long_lags
+        GROUP BY c, t
         """
     )
     return "opt_new_hires"
@@ -722,12 +936,14 @@ def _create_outcome_views(
         return f"m{abs(lag)}" if lag < 0 else str(lag)
 
     y_expr = "y_cst"
+    y_new_hires_expr = "y_new_hires"
     if use_changes:
         y_expr = "ASINH(y_cst) - ASINH(y_cst_lag)"
+        y_new_hires_expr = "ASINH(y_new_hires) - ASINH(y_new_hires_lag)"
     con.sql(
         f"""
         CREATE OR REPLACE TEMP VIEW outcomes_long AS
-        WITH base_raw AS (
+        WITH base_headcount_raw AS (
             SELECT
                 CAST(rcid AS INTEGER) AS c,
                 CAST(year AS INTEGER) AS outcome_year,
@@ -736,20 +952,49 @@ def _create_outcome_views(
             WHERE rcid IN (SELECT rcid FROM matched_rcids)
               AND year IS NOT NULL
         ),
-        base AS (
+        base_headcount AS (
             SELECT
                 c,
                 outcome_year,
                 COALESCE(MAX(y_cst), 0) AS y_cst
-            FROM base_raw
+            FROM base_headcount_raw
             GROUP BY c, outcome_year
+        ),
+        base_new_hires_raw AS (
+            SELECT
+                CAST(rcid AS INTEGER) AS c,
+                CAST(year AS INTEGER) AS outcome_year,
+                CAST(total_new_hires AS DOUBLE) AS y_new_hires
+            FROM revelio_transitions
+            WHERE rcid IN (SELECT rcid FROM matched_rcids)
+              AND year IS NOT NULL
+              AND total_new_hires IS NOT NULL
+        ),
+        base_new_hires AS (
+            SELECT
+                c,
+                outcome_year,
+                COALESCE(MAX(y_new_hires), 0) AS y_new_hires
+            FROM base_new_hires_raw
+            GROUP BY c, outcome_year
+        ),
+        base_joined AS (
+            SELECT
+                COALESCE(h.c, n.c) AS c,
+                COALESCE(h.outcome_year, n.outcome_year) AS outcome_year,
+                COALESCE(h.y_cst, 0) AS y_cst,
+                COALESCE(n.y_new_hires, 0) AS y_new_hires
+            FROM base_headcount AS h
+            FULL OUTER JOIN base_new_hires AS n
+              ON h.c = n.c
+             AND h.outcome_year = n.outcome_year
         ),
         bounds AS (
             SELECT
                 c,
                 MIN(outcome_year) AS min_year,
                 MAX(outcome_year) AS max_year
-            FROM base
+            FROM base_joined
             GROUP BY c
         ),
         expanded AS (
@@ -763,9 +1008,10 @@ def _create_outcome_views(
             SELECT
                 e.c,
                 e.outcome_year,
-                COALESCE(b.y_cst, 0) AS y_cst
+                COALESCE(b.y_cst, 0) AS y_cst,
+                COALESCE(b.y_new_hires, 0) AS y_new_hires
             FROM expanded e
-            LEFT JOIN base b
+            LEFT JOIN base_joined b
               ON e.c = b.c
              AND e.outcome_year = b.outcome_year
         ),
@@ -774,7 +1020,9 @@ def _create_outcome_views(
                 c,
                 outcome_year,
                 y_cst,
-                LAG(y_cst) OVER (PARTITION BY c ORDER BY outcome_year) AS y_cst_lag
+                y_new_hires,
+                LAG(y_cst) OVER (PARTITION BY c ORDER BY outcome_year) AS y_cst_lag,
+                LAG(y_new_hires) OVER (PARTITION BY c ORDER BY outcome_year) AS y_new_hires_lag
             FROM filled
         )
         SELECT
@@ -782,15 +1030,22 @@ def _create_outcome_views(
             b.outcome_year AS s,
             b.outcome_year - lag.lag AS t,
             {y_expr} AS y_cst,
+            {y_new_hires_expr} AS y_new_hires,
             lag.lag AS lag
         FROM with_lags AS b
         CROSS JOIN LATERAL generate_series({lag_start}, {lag_end}) AS lag(lag)
         """
     )
 
-    outcome_cols = ",\n            ".join(
+    outcome_cols_y = ",\n            ".join(
         [
             f"COALESCE(MAX(CASE WHEN lag = {lag} THEN y_cst END), 0) AS y_cst_lag{_lag_suffix(lag)}"
+            for lag in range(lag_start, lag_end + 1)
+        ]
+    )
+    outcome_cols_y_new_hires = ",\n            ".join(
+        [
+            f"COALESCE(MAX(CASE WHEN lag = {lag} THEN y_new_hires END), 0) AS y_new_hires_lag{_lag_suffix(lag)}"
             for lag in range(lag_start, lag_end + 1)
         ]
     )
@@ -800,7 +1055,8 @@ def _create_outcome_views(
         SELECT
             c,
             t,
-            {outcome_cols}
+            {outcome_cols_y},
+            {outcome_cols_y_new_hires}
         FROM outcomes_long
         WHERE t IS NOT NULL
         GROUP BY c, t
@@ -819,18 +1075,31 @@ def _create_analysis_panel(
         return f"m{abs(lag)}" if lag < 0 else str(lag)
 
     lag_range = range(int(outcome_lag_start), int(outcome_lag_end) + 1)
+    x_lag_year_min = 2005
+    x_lag_year_max = 2022
 
     outcome_cols = []
+    outcome_cols_new_hires = []
+    x_lag_cols = []
     for lag in lag_range:
         suffix = _lag_suffix(lag)
         if use_log_y:
             outcome_cols.append(f"ASINH(o.y_cst_lag{suffix}) AS y_cst_lag{suffix}")
+            outcome_cols_new_hires.append(f"ASINH(o.y_new_hires_lag{suffix}) AS y_new_hires_lag{suffix}")
         else:
             outcome_cols.append(f"o.y_cst_lag{suffix}")
+            outcome_cols_new_hires.append(f"o.y_new_hires_lag{suffix}")
+        x_lag_cols.append(
+            f"CASE WHEN (o.t + {lag}) < {x_lag_year_min} OR (o.t + {lag}) > {x_lag_year_max} "
+            f"THEN NULL ELSE COALESCE(x.x_cst_lag{suffix}, 0) END AS x_cst_lag{suffix}"
+        )
     outcome_cols = ",\n            ".join(outcome_cols)
+    outcome_cols_new_hires = ",\n            ".join(outcome_cols_new_hires)
+    x_lag_cols = ",\n            ".join(x_lag_cols)
 
     x_expr = "COALESCE(x.masters_opt_hires, 0)"
     x_valid_expr = "COALESCE(x.valid_masters_opt_hires, 0)"
+    x_corrected_expr = "COALESCE(x.masters_opt_hires_correction_aware, 0)"
     con.sql(
         f"""
         CREATE OR REPLACE TEMP VIEW analysis_panel AS
@@ -838,8 +1107,11 @@ def _create_analysis_panel(
             o.c,
             o.t,
             {outcome_cols},
+            {outcome_cols_new_hires},
             {x_expr} AS masters_opt_hires,
             {x_valid_expr} AS valid_masters_opt_hires,
+            {x_corrected_expr} AS masters_opt_hires_correction_aware,
+            {x_lag_cols},
             instr.z_ct,
             instr.z_ct_all,
             instr.z_ct_intl,
@@ -957,10 +1229,16 @@ def build_pipeline(
     )
     shares_view = _create_transition_share_view(con, share_base_year, exclude_unitids=exclude_unitids)
     _create_instrument_views(con, shares_view, growth_view)
-    _create_opt_counts(con, use_changes=use_changes, include_non_masters=include_non_masters)
     if outcome_lag_end < outcome_lag_start:
         raise ValueError("outcome_lag_end must be >= outcome_lag_start.")
     _create_outcome_views(con, outcome_lag_start, outcome_lag_end, use_changes=use_changes)
+    _create_opt_counts(
+        con,
+        outcome_lag_start=outcome_lag_start,
+        outcome_lag_end=outcome_lag_end,
+        use_changes=use_changes,
+        include_non_masters=include_non_masters,
+    )
     _create_analysis_panel(con, outcome_lag_start, outcome_lag_end, use_log_y=use_log_y)
 
     if not save_outputs:
@@ -1094,34 +1372,40 @@ paths = _resolve_pipeline_paths(cfg)
 con = ddb.connect()
 _register_inputs(con, paths)
 
-# use_changes = False
-# use_log_y = False
-# include_non_masters = False
-# exclude_unitids = None
-# share_base_year = 2010
-# outcome_lag_start = -3
-# outcome_lag_end = 6
+use_changes = False
+use_log_y = False
+include_non_masters = False
+exclude_unitids = None
+share_base_year = 2010
+outcome_lag_start = -3
+outcome_lag_end = 6
 
-# growth_view = _create_ipeds_growth_view(
-#     con,
-#     use_changes=use_changes,
-#     demean_by_school=use_log_y,
-#     exclude_unitids=exclude_unitids,
-# )
+growth_view = _create_ipeds_growth_view(
+    con,
+    use_changes=use_changes,
+    demean_by_school=use_log_y,
+    exclude_unitids=exclude_unitids,
+)
 
-# shares_view = _create_transition_share_view(con, share_base_year, exclude_unitids=exclude_unitids)
-# _create_instrument_views(con, shares_view, growth_view)
-# _create_opt_counts(con, use_changes=use_changes, include_non_masters=include_non_masters)
-# if outcome_lag_end < outcome_lag_start:
-#     raise ValueError("outcome_lag_end must be >= outcome_lag_start.")
-# _create_outcome_views(con, outcome_lag_start, outcome_lag_end, use_changes=use_changes)
-# _create_analysis_panel(con, outcome_lag_start, outcome_lag_end, use_log_y=use_log_y)
+shares_view = _create_transition_share_view(con, share_base_year, exclude_unitids=exclude_unitids)
+_create_instrument_views(con, shares_view, growth_view)
+if outcome_lag_end < outcome_lag_start:
+    raise ValueError("outcome_lag_end must be >= outcome_lag_start.")
+_create_outcome_views(con, outcome_lag_start, outcome_lag_end, use_changes=use_changes)
+_create_opt_counts(
+    con,
+    outcome_lag_start=outcome_lag_start,
+    outcome_lag_end=outcome_lag_end,
+    use_changes=use_changes,
+    include_non_masters=include_non_masters,
+)
+_create_analysis_panel(con, outcome_lag_start, outcome_lag_end, use_log_y=use_log_y)
 
 
-# _write_view(con, "company_instrument_components", paths.instrument_components_out)
-# _write_view(con, "company_instrument_panel", paths.instrument_panel_out)
-# _write_view(con, "opt_new_hires", paths.treatment_out)
-# _write_view(con, "outcomes_long", paths.outcomes_out)
-# _write_view(con, "analysis_panel", paths.analysis_panel_out)
+_write_view(con, "company_instrument_components", paths.instrument_components_out)
+_write_view(con, "company_instrument_panel", paths.instrument_panel_out)
+_write_view(con, "opt_new_hires", paths.treatment_out)
+_write_view(con, "outcomes_long", paths.outcomes_out)
+_write_view(con, "analysis_panel", paths.analysis_panel_out)
 
 #run_diagnostics(con, plot=True)

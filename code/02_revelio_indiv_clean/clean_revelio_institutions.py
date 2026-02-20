@@ -3,6 +3,7 @@
 # Date Created: Mon Jun 2 2025
 
 # Imports and Paths
+import argparse
 import duckdb as ddb
 import pandas as pd
 import time
@@ -18,17 +19,293 @@ import rev_indiv_config as rcfg
 con = ddb.connect()
 run_tag = rcfg.RUN_TAG
 t_script0 = time.time()
-print(f"Using config: {rcfg.ACTIVE_CONFIG_PATH}")
+# Ensure logs stream to nohup output without long buffering delays.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
+print(f"Using config: {rcfg.ACTIVE_CONFIG_PATH}", flush=True)
 
 
 def log(msg):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="Match Revelio institutions to countries."
+    )
+    parser.add_argument(
+        "--ipeds-only",
+        action="store_true",
+        help="Run only the IPEDS rematch step against an existing institution-country parquet.",
+    )
+    parser.add_argument(
+        "--ipeds-input",
+        default=None,
+        help="Input parquet for --ipeds-only (default: configured final output path).",
+    )
+    parser.add_argument(
+        "--ipeds-output",
+        default=None,
+        help="Output parquet for --ipeds-only (default: same as --ipeds-input).",
+    )
+    return parser.parse_args()
+
+
+def _sql_escape_path(path: str) -> str:
+    return str(path).replace("'", "''")
+
+
+def _resolve_ipeds_crosswalk_path() -> str | None:
+    candidates: list[str] = []
+    try:
+        from company_shift_share.config_loader import load_config as load_company_config
+
+        company_cfg = load_company_config()
+        company_paths = company_cfg.get("paths", {}) if isinstance(company_cfg, dict) else {}
+        cfg_path = company_paths.get("ipeds_name_to_zip_crosswalk")
+        if cfg_path:
+            candidates.append(cfg_path)
+    except Exception:
+        pass
+
+    candidates.extend(
+        [
+            f"{root}/data/int/ipeds_name_to_zip_crosswalk.parquet",
+            f"{root}/data/int/ipeds_crosswalk.parquet",
+        ]
+    )
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _build_ipeds_us_matches(
+    univ_source_sql: str,
+    *,
+    output_table: str = "ipeds_us_matches",
+    prefix: str = "rev_ipeds",
+) -> None:
+    ipeds_path = _resolve_ipeds_crosswalk_path()
+    if not ipeds_path:
+        log("IPEDS crosswalk not found; skipping IPEDS rematch step.")
+        con.sql(
+            f"""
+            CREATE OR REPLACE TABLE {output_table} AS
+            SELECT
+                NULL::BIGINT AS univ_id,
+                NULL::VARCHAR AS university_raw,
+                NULL::VARCHAR AS match_country,
+                NULL::VARCHAR AS matchtype,
+                NULL::BIGINT AS unitid
+            WHERE FALSE
+            """
+        )
+        return
+
+    try:
+        from company_shift_share import deps_foia_clean as foia_deps
+    except Exception as exc:
+        log(f"Could not import deps_foia_clean; skipping IPEDS rematch step ({exc}).")
+        con.sql(
+            f"""
+            CREATE OR REPLACE TABLE {output_table} AS
+            SELECT
+                NULL::BIGINT AS univ_id,
+                NULL::VARCHAR AS university_raw,
+                NULL::VARCHAR AS match_country,
+                NULL::VARCHAR AS matchtype,
+                NULL::BIGINT AS unitid
+            WHERE FALSE
+            """
+        )
+        return
+
+    log(f"Running IPEDS rematch using: {ipeds_path}")
+    con.sql(
+        f"""
+        CREATE OR REPLACE TABLE ipeds_crosswalk AS
+        SELECT * FROM read_parquet('{_sql_escape_path(ipeds_path)}')
+        """
+    )
+    foia_deps._create_ipeds_inst_view(con)
+    con.sql(
+        f"""
+        CREATE OR REPLACE TABLE {prefix}_left AS
+        SELECT
+            univ_id,
+            university_raw,
+            {foia_deps._sql_clean_inst_name("university_raw")} AS rev_instname_clean
+        FROM ({univ_source_sql})
+        WHERE university_raw IS NOT NULL
+        GROUP BY univ_id, university_raw
+        """
+    )
+    match_views = foia_deps._build_inst_match_views(
+        con,
+        left_view=f"{prefix}_left",
+        right_view="ipeds_inst",
+        left_id_col="univ_id",
+        right_id_col="UNITID",
+        left_name_col="rev_instname_clean",
+        right_name_col="ipeds_instname_clean",
+        left_city_col=None,
+        left_state_col=None,
+        left_zip_col=None,
+        right_city_col="ipeds_city_clean",
+        right_state_col="ipeds_state_clean",
+        right_zip_col="ipeds_zip_clean",
+        right_alias_col="ipeds_alias",
+        include_geo=False,
+        include_city_in_name=False,
+        include_subset=True,
+        include_jw=True,
+        token_fallback=True,
+        token_top_n=150,
+        token_min_len=3,
+        rematch_jw_threshold=foia_deps.REMATCH_JW_THRESHOLD,
+        prefix=prefix,
+    )
+    con.sql(
+        f"""
+        CREATE OR REPLACE TABLE {output_table} AS
+        WITH candidates AS (
+            SELECT univ_id, right_id AS unitid, 'ipeds_direct' AS matchtype, 1 AS match_order
+            FROM {match_views['good_matches']}
+            UNION ALL
+            SELECT univ_id, right_id AS unitid, 'ipeds_fuzzy' AS matchtype, 2 AS match_order
+            FROM {match_views['good_second_matches']}
+        ),
+        ranked AS (SELECT univ_id, 'United States' AS match_country, matchtype, unitid
+        FROM (
+            SELECT
+                *,
+                ROW_NUMBER() OVER(PARTITION BY univ_id ORDER BY match_order, unitid) AS rn
+            FROM candidates
+        )
+        WHERE rn = 1
+        )
+        SELECT ranked.univ_id, university_raw, ranked.match_country, ranked.matchtype, ranked.unitid FROM ranked JOIN {prefix}_left ON ranked.univ_id = {prefix}_left.univ_id
+        """
+    )
+    n_ipeds = con.sql(f"SELECT COUNT(*) AS n FROM {output_table}").df().iloc[0, 0]
+    log(f"Computed IPEDS US matches: {n_ipeds} rows")
+
+
+def _run_ipeds_only(input_path: str, output_path: str) -> int:
+    if not os.path.exists(input_path):
+        log(f"Missing input file for --ipeds-only: {input_path}")
+        return 1
+
+    con.sql(
+        f"""
+        CREATE OR REPLACE TABLE final_matches_base AS
+        SELECT * FROM read_parquet('{_sql_escape_path(input_path)}')
+        """
+    )
+    base_cols = [str(c) for c in con.sql("DESCRIBE final_matches_base").df()["column_name"].tolist()]
+    if "matchsource" not in base_cols:
+        con.sql(
+            """
+            CREATE OR REPLACE TABLE final_matches_base AS
+            SELECT *, 'pre_ipeds_only'::VARCHAR AS matchsource
+            FROM final_matches_base
+            """
+        )
+    _build_ipeds_us_matches(
+        "SELECT ROW_NUMBER() OVER(ORDER BY university_raw) AS univ_id, university_raw FROM final_matches_base GROUP BY university_raw",
+        output_table="ipeds_us_matches",
+        prefix="rev_ipeds_only",
+    )
+    base_rows = int(con.sql("SELECT COUNT(*) AS n FROM final_matches_base").df().iloc[0, 0])
+    base_univs = int(con.sql("SELECT COUNT(DISTINCT university_raw) AS n FROM final_matches_base").df().iloc[0, 0])
+    base_exact_univs = int(con.sql("SELECT COUNT(DISTINCT university_raw) AS n FROM final_matches_base WHERE matchtype = 'exact'").df().iloc[0, 0])
+    ipeds_univs = int(con.sql("SELECT COUNT(DISTINCT university_raw) AS n FROM ipeds_us_matches").df().iloc[0, 0])
+    log(
+        "IPEDS-only input summary: "
+        f"rows={base_rows}, univs={base_univs}, exact_univs={base_exact_univs}, ipeds_matched_univs={ipeds_univs}"
+    )
+    con.sql(
+        """
+        CREATE OR REPLACE TABLE final_matches AS
+        WITH exact_univs AS (
+            SELECT university_raw
+            FROM final_matches_base
+            WHERE matchtype = 'exact'
+              AND university_raw IS NOT NULL
+            GROUP BY university_raw
+        ),
+        ipeds_exact_raw AS (
+            SELECT i.university_raw, i.match_country
+            FROM ipeds_us_matches AS i
+            LEFT JOIN exact_univs AS e
+              ON i.university_raw = e.university_raw
+            WHERE e.university_raw IS NULL
+        ),
+        ipeds_exact AS (
+            SELECT
+              university_raw,
+              match_country,
+              1 AS matchscore,
+              'exact' AS matchtype,
+              'ipeds_only_exact'::VARCHAR AS matchsource
+            FROM ipeds_exact_raw
+            GROUP BY university_raw, match_country
+        ),
+        ipeds_univs AS (
+            SELECT university_raw FROM ipeds_exact GROUP BY university_raw
+        )
+        SELECT *
+        FROM final_matches_base
+        WHERE university_raw NOT IN (SELECT university_raw FROM ipeds_univs WHERE university_raw IS NOT NULL)
+           OR matchtype = 'exact'
+        UNION ALL
+        SELECT university_raw, match_country, matchscore, matchtype, matchsource FROM ipeds_exact
+        """
+    )
+    out_rows = int(con.sql("SELECT COUNT(*) AS n FROM final_matches").df().iloc[0, 0])
+    out_exact_univs = int(con.sql("SELECT COUNT(DISTINCT university_raw) AS n FROM final_matches WHERE matchtype = 'exact'").df().iloc[0, 0])
+    promoted_univs = int(
+        con.sql(
+            """
+            SELECT COUNT(DISTINCT e.university_raw) AS n
+            FROM (
+                SELECT university_raw FROM ipeds_us_matches GROUP BY university_raw
+            ) AS e
+            LEFT JOIN (
+                SELECT university_raw FROM final_matches_base WHERE matchtype = 'exact' GROUP BY university_raw
+            ) AS b USING (university_raw)
+            WHERE b.university_raw IS NULL
+            """
+        ).df().iloc[0, 0]
+    )
+    log(
+        "IPEDS-only output summary: "
+        f"rows={out_rows}, exact_univs={out_exact_univs}, newly_promoted_to_exact={promoted_univs}"
+    )
+    out_ipeds_exact = int(con.sql("SELECT COUNT(*) AS n FROM final_matches WHERE matchsource = 'ipeds_only_exact'").df().iloc[0, 0])
+    log(f"IPEDS-only tagged rows (matchsource='ipeds_only_exact'): {out_ipeds_exact}")
+    con.sql(f"COPY final_matches TO '{_sql_escape_path(output_path)}'")
+    log(f"Saved IPEDS-only rematch output: {output_path}")
+    return 0
 
 openalex_match_filt_file = rcfg.OPENALEX_MATCH_FILT_PARQUET
 dedup_match_filt_file = rcfg.DEDUP_MATCH_FILT_PARQUET
 all_token_freqs_file = rcfg.ALL_TOKEN_FREQS_PARQUET
 geonames_token_merge_file = rcfg.GEONAMES_TOKEN_MERGE_PARQUET
 final_inst_country_file = rcfg.REV_INST_COUNTRIES_PARQUET
+
+args = _parse_args()
+if args.ipeds_only:
+    ipeds_input = args.ipeds_input or final_inst_country_file
+    ipeds_output = args.ipeds_output or ipeds_input
+    rc = _run_ipeds_only(ipeds_input, ipeds_output)
+    if rc != 0:
+        raise SystemExit(rc)
+    log(f"Done (IPEDS only). Total elapsed: {round((time.time() - t_script0)/60, 2)} min")
+    raise SystemExit(0)
 
 # Importing Country Codes Crosswalk
 with open(f"{root}/data/crosswalks/country_dict.json", "r") as json_file:
@@ -362,7 +639,7 @@ for i in range(8):
         """)
 
     # at this stage, matches should be unique on the univ_id x geonameid x token level
-    print(f"Total number of matches with {i} spaces: {join_geonames.shape[0]}")
+    print(f"Total number of matches with {i} spaces: {join_geonames.shape[0]}", flush=True)
 
     if i == 0:
         con.sql(f"CREATE OR REPLACE TABLE geoname_matches AS SELECT *, {i} AS token_n FROM join_geonames") 
@@ -475,10 +752,44 @@ SELECT *, COUNT(DISTINCT countryname) OVER(PARTITION BY univ_id) AS ncountry FRO
 exact_geomatches = con.sql("SELECT * FROM all_geomatches WHERE match_score >= 0.5 AND ncountry = 1")
 log(f"Computed geomatches: all={all_geomatches.shape[0]}, exact={exact_geomatches.shape[0]}")
 
+# IPEDS institution rematch (US assignment only; follows deps_foia_clean matching utilities)
+_build_ipeds_us_matches(
+    "SELECT univ_id, university_raw FROM univ_names",
+    output_table="ipeds_us_matches",
+    prefix="rev_ipeds",
+)
+
 ################################
 ## MATCHING TO OPENALEX ON TOKENS ##
 ################################
-univ_names_formatch = con.sql("SELECT a.univ_id, university_raw, univ_raw_clean_withparan, CASE WHEN b.exactmatch IS NOT NULL THEN 'exactmatch' WHEN c.citymatch IS NOT NULL THEN 'citymatch' ELSE 'nomatch' END AS matchind, CASE WHEN b.exactmatch IS NOT NULL THEN 'exactmatch' WHEN c.citymatch IS NOT NULL THEN 'citymatch' WHEN top_country_n_users >= 20 THEN 'nativematch' ELSE 'nomatch' END AS dedupind FROM univ_names AS a LEFT JOIN (SELECT univ_id, 1 AS exactmatch FROM exactmatches GROUP BY univ_id) AS b ON a.univ_id = b.univ_id LEFT JOIN (SELECT univ_id, 1 AS citymatch FROM exact_geomatches GROUP BY univ_id) AS c ON a.univ_id = c.univ_id")
+univ_names_formatch = con.sql(
+"""
+SELECT
+    a.univ_id,
+    university_raw,
+    univ_raw_clean_withparan,
+    CASE
+        WHEN b.exactmatch IS NOT NULL THEN 'exactmatch'
+        WHEN d.ipedsmatch IS NOT NULL THEN 'ipedsmatch'
+        WHEN c.citymatch IS NOT NULL THEN 'citymatch'
+        ELSE 'nomatch'
+    END AS matchind,
+    CASE
+        WHEN b.exactmatch IS NOT NULL THEN 'exactmatch'
+        WHEN d.ipedsmatch IS NOT NULL THEN 'ipedsmatch'
+        WHEN c.citymatch IS NOT NULL THEN 'citymatch'
+        WHEN top_country_n_users >= 20 THEN 'nativematch'
+        ELSE 'nomatch'
+    END AS dedupind
+FROM univ_names AS a
+LEFT JOIN (SELECT univ_id, 1 AS exactmatch FROM exactmatches GROUP BY univ_id) AS b
+    ON a.univ_id = b.univ_id
+LEFT JOIN (SELECT univ_id, 1 AS citymatch FROM exact_geomatches GROUP BY univ_id) AS c
+    ON a.univ_id = c.univ_id
+LEFT JOIN (SELECT univ_id, 1 AS ipedsmatch FROM ipeds_us_matches GROUP BY univ_id) AS d
+    ON a.univ_id = d.univ_id
+"""
+)
 log(f"Prepared univ_names_formatch: {univ_names_formatch.shape[0]} rows")
 
 tokenmatch = rcfg.CLEAN_INST_TOKENMATCH
@@ -494,7 +805,7 @@ if tokenmatch:
     #   increment i = i - 1 and tokenize and match univ_ids not previously matched on i-word tokens (i-1 word matches will be weakly worse than i word matches)
     firstflag = 1
     for i in range(8,1,-1):
-        print(f"i = {i}")
+        print(f"i = {i}", flush=True)
         t1 = time.time()
         rev_tokens = con.sql(help.tokenize_nword_sql(col = 'univ_raw_clean_withparan', 
                                                     id = 'univ_id',
@@ -561,33 +872,33 @@ if tokenmatch:
                 a.university_raw AS left_university_raw,
                 c.university_raw AS right_university_raw 
             FROM (SELECT * FROM rev_tokens_withfreqs_{i} WHERE dedupind = 'nomatch') AS a 
-                JOIN (SELECT * FROM rev_tokens_withfreqs_{i} WHERE dedupind IN ('exactmatch', 'citymatch', 'nativematch')) AS c 
+                JOIN (SELECT * FROM rev_tokens_withfreqs_{i} WHERE dedupind IN ('exactmatch', 'ipedsmatch', 'citymatch', 'nativematch')) AS c 
                 ON jaro_similarity(a.token, c.token) >= 0.95 AND NOT a.univ_id = c.univ_id)"""
         )
 
         # updating token_match and token_freq database
         if firstflag:
             con.sql(f"CREATE OR REPLACE TABLE all_token_matches AS SELECT *, {i} AS token_n FROM token_match_{i}") 
-            print('token matches saved')
+            print('token matches saved', flush=True)
 
             con.sql(f"CREATE OR REPLACE TABLE all_dedup_matches AS SELECT *, {i} AS token_n FROM dedup_match_{i}") 
-            print('dedup matches saved')
+            print('dedup matches saved', flush=True)
 
             con.sql(f"CREATE OR REPLACE TABLE all_token_freqs AS SELECT *, {i} AS token_n FROM token_freqs") 
-            print('token freqs saved')
+            print('token freqs saved', flush=True)
 
             firstflag = 0
 
         else:
             con.sql(f"CREATE OR REPLACE TABLE all_token_matches AS SELECT * FROM all_token_matches UNION ALL SELECT *, {i} AS token_n FROM token_match_{i}")
             # print(con.sql("SELECT COUNT(*), token_n FROM all_token_matches GROUP BY token_n"))
-            print('token matches saved')
+            print('token matches saved', flush=True)
             
             con.sql(f"CREATE OR REPLACE TABLE all_dedup_matches AS SELECT * FROM all_dedup_matches UNION ALL SELECT *, {i} AS token_n FROM dedup_match_{i}")
-            print('dedup matches saved')
+            print('dedup matches saved', flush=True)
 
             con.sql(f"CREATE OR REPLACE TABLE all_token_freqs AS SELECT * FROM all_token_freqs UNION ALL SELECT *, {i} AS token_n FROM token_freqs")
-            print('token freqs saved')
+            print('token freqs saved', flush=True)
 
 
         # updating univ_names_matchind database
@@ -596,10 +907,10 @@ if tokenmatch:
         #   this version marks as matched no matter what
         con.sql(f"CREATE OR REPLACE TABLE univ_names_matchind AS (SELECT a.univ_id, university_raw, univ_raw_clean_withparan, CASE WHEN b.tokenmatch IS NOT NULL THEN 'token{i}match' ELSE matchind END AS matchind, CASE WHEN c.dedupmatch IS NOT NULL THEN 'token{i}match' ELSE dedupind END AS dedupind FROM univ_names_matchind AS a LEFT JOIN (SELECT univ_id, 1 AS tokenmatch FROM token_match_{i} GROUP BY univ_id) AS b ON a.univ_id = b.univ_id LEFT JOIN (SELECT left_univ_id, 1 AS dedupmatch FROM dedup_match_{i} GROUP BY left_univ_id) AS c ON a.univ_id = c.left_univ_id)")
 
-        print(con.sql("SELECT COUNT(*), matchind FROM univ_names_matchind GROUP BY matchind"))
+        print(con.sql("SELECT COUNT(*), matchind FROM univ_names_matchind GROUP BY matchind"), flush=True)
 
         t2 = time.time()
-        print(f"Time for iter {i}: {t2-t1}s")
+        print(f"Time for iter {i}: {t2-t1}s", flush=True)
 
     # cleaning results (grouped to get rid of duplicate tokens, then grouped again to get rev x openalex pairs with multiple token matches, flagging and taking rarer token freq)
     freq_buffer = 0.1
@@ -722,13 +1033,13 @@ rev_tokenized_forgeo = con.sql(f"SELECT * FROM ({help.tokenize_sql(col = 'univ_r
 
 # merging
 if tokenmatch:
-    print('merging geographies')
+    print('merging geographies', flush=True)
     t0 = time.time()
     geo_merge = con.sql("SELECT a.token AS rev_token, b.token AS geo_token FROM (SELECT * FROM all_token1_freqs WHERE token_rank > 50) AS a JOIN (SELECT * FROM geonames_tokens_bytoken WHERE token_rank > 50 OR top_country_freq = 1) AS b ON jaro_similarity(a.token, b.token) >= 0.95")
 
     con.sql(f"COPY geo_merge TO '{geonames_token_merge_file}'")
     t1 = time.time()
-    print(f"done! time: {t1-t0}s")
+    print(f"done! time: {t1-t0}s", flush=True)
 
 ################################
 ## COMBINING ALL MATCHES ##
@@ -739,7 +1050,9 @@ good_matches = con.sql(
 SELECT university_raw, match_country FROM (
     SELECT *, COUNT(DISTINCT match_country) OVER(PARTITION BY university_raw) AS n_countries FROM (
         SELECT *, CASE WHEN priority = (MAX(priority) OVER(PARTITION BY university_raw)) THEN 1 ELSE 0 END AS keep FROM (
-            SELECT university_raw, match_country, 0 AS priority, matchtype FROM exactmatches WHERE match_country IS NOT NULL AND match_country != 'NA' GROUP BY university_raw, match_country, matchtype 
+            SELECT university_raw, match_country, 3 AS priority, matchtype FROM exactmatches WHERE match_country IS NOT NULL AND match_country != 'NA' GROUP BY university_raw, match_country, matchtype 
+            UNION ALL
+            SELECT university_raw, 'United States' AS match_country, 2 AS priority, 'exact_ipeds' AS matchtype FROM ipeds_us_matches
             UNION ALL 
             SELECT university_raw, get_std_country(countryname) AS match_country, CASE WHEN match_score = 1 THEN 1 ELSE 0 END AS priority, 'exact_geo' AS matchtype FROM exact_geomatches
             UNION ALL 

@@ -10,6 +10,7 @@ paths:
   
   ## person ID linkage
   foia_sevp_with_person_id: "${int_dir}/foia_sevp_with_person_id.parquet" # FOIA SEVP data with unique person id linked across years; output of foia_person_id_linkage.py
+  foia_sevp_with_person_id_employment_corrected: "${int_dir}/foia_sevp_with_person_id_employment_corrected.parquet" # FOIA SEVP with post-2015 employer x spell mismatches dropped when pre-2015 linkage identifies them
   foia_person_key_year_crosswalk: "${int_dir}/foia_person_key_year_crosswalk.parquet" # crosswalk of person_id to identifying info from original data (name, birth year, country, etc) by year; output of deps_foia_person_id_linkage.py
   foia_person_id_tmp_dir: "${int_dir}/foia_person_linkage_tmp"
   
@@ -120,10 +121,12 @@ build_company_shift_share:
   include_non_masters: false
 
 shift_share_regressions:
-  outcome_prefix: "y_cst_lag"
+  outcome_prefix: "y_new_hires_lag"
   lag_start: 0
   lag_end: 5
-  instrument: "z_ct"
+  instrument: "z_ct_full"
+  use_log_instrument: true
+  treatment_col: "masters_opt_hires_correction_aware" #"x_bin_any_nonzero" #"masters_opt_hires"
   dependent: "masters_opt_hires"
   start_t: null
   end_t: null
@@ -142,6 +145,30 @@ shift_share_regressions:
   fill_missing_xy_zero: false
   median_regression: false
   ihs_y: false
+  plot_x_lag_by_year: true
+  x_lag_by_year_years: null #[2012, 2014, 2016, 2018]
+  use_instrument_x_firm_size_ventile: false
+  firm_size_ventile_n: 20
+  y_cst_lagm3_min: 100
+  y_cst_lagm3_max: 500
+  alt_event_study: true
+  alt_event_instrument_col: "z_ct_full"
+  alt_event_outcome_col: null
+  alt_event_treat_pctile: 90
+  alt_event_control_pctile: 75
+  alt_event_time_min: -3
+  alt_event_time_max: 3
+  alt_event_data_min_t: 2009
+  alt_event_data_max_t: 2021
+  alt_event_event_min_t: 2012
+  alt_event_event_max_t: 2018
+  alt_event_local_window: 2
+  alt_event_match_controls_on_y_cst_lagm3: true
+  alt_event_control_without_replacement: true
+  alt_event_use_log_y: false
+  use_log_outcome_for_reduced_form: true
+  alt_event_seed: 42
+  alt_event_plot_years: [2012, 2014, 2016]
 
 employer_crosswalk:
   wrds_username: "amykimecon"
