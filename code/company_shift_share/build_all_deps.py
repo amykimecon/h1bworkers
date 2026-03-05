@@ -26,7 +26,12 @@ def main() -> None:
     )
     parser.add_argument("--skip-foia", action="store_true", help="Skip FOIA clean pipeline.")
     parser.add_argument("--skip-rsid", action="store_true", help="Skip RSID/IPEDS geoname crosswalk.")
-    parser.add_argument("--skip-ipeds", action="store_true", help="Skip IPEDS master's-only parquet.")
+    parser.add_argument("--skip-ipeds", action="store_true", help="Skip IPEDS degree-filtered parquet(s).")
+    parser.add_argument(
+        "--build-ipeds-ma-ba",
+        action="store_true",
+        help="Also build the masters+bachelors IPEDS parquet variant.",
+    )
     parser.add_argument("--skip-revelio", action="store_true", help="Skip Revelio transitions/headcounts build.")
     args = parser.parse_args()
 
@@ -40,6 +45,16 @@ def main() -> None:
         _run(base_dir / "deps_rsid_ipeds_cw.py", config_path)
     if not args.skip_ipeds:
         _run(base_dir / "deps_ipeds_ma_only.py", config_path)
+        if args.build_ipeds_ma_ba:
+            cmd = [
+                sys.executable,
+                str(base_dir / "deps_ipeds_ma_only.py"),
+                "--config",
+                str(config_path),
+                "--include-bachelors",
+            ]
+            print(f"Running: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
     if not args.skip_revelio:
         _run(base_dir / "revelio_school_to_employer.py", config_path)
 

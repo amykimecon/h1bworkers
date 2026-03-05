@@ -1,4 +1,4 @@
-"""Build ipeds_ma_only.parquet from IPEDS completions raw data."""
+"""Build degree-filtered IPEDS parquet(s) for shift-share inputs."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ except ModuleNotFoundError:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build IPEDS master's-only parquet for shift-share inputs.")
+    parser = argparse.ArgumentParser(description="Build degree-filtered IPEDS parquet for shift-share inputs.")
     parser.add_argument(
         "--config",
         type=Path,
@@ -27,6 +27,12 @@ def main() -> None:
     )
     parser.add_argument("--input", type=Path, default=None, help="Override raw IPEDS completions .dta path.")
     parser.add_argument("--output", type=Path, default=None, help="Override output parquet path.")
+    parser.add_argument(
+        "--include-bachelors",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Include Bachelor's in addition to Master's programs (awlevel 5 and 7).",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -34,7 +40,17 @@ def main() -> None:
     ipeds_cfg = get_cfg_section(cfg, "ipeds_ma_only")
 
     input_path = args.input or paths.get("ipeds_completions_raw")
-    output_path = args.output or paths.get("ipeds_ma_only")
+    include_bachelors = (
+        args.include_bachelors
+        if args.include_bachelors is not None
+        else bool(ipeds_cfg.get("include_bachelors", False))
+    )
+    if args.output is not None:
+        output_path = args.output
+    elif include_bachelors:
+        output_path = paths.get("ipeds_ma_ba_only") or paths.get("ipeds_ma_only")
+    else:
+        output_path = paths.get("ipeds_ma_only")
     if not input_path or not output_path:
         raise ValueError("Missing input/output path; set in config or CLI args.")
 
@@ -44,20 +60,28 @@ def main() -> None:
 
     raw = pd.read_stata(str(input_path), convert_categoricals=False)
     clean = raw[(raw["majornum"] == 1) & (raw["ctotalt"] > 0) & (raw["year"] >= min_year)].copy()
-    if master_only:
+    if include_bachelors:
+        if "awlevel" in clean.columns:
+            clean = clean[clean["awlevel"].isin([5, 7])].copy()
+        elif {"master", "bachelor"}.issubset(set(clean.columns)):
+            clean = clean[(clean["master"] == 1) | (clean["bachelor"] == 1)].copy()
+        elif "master" in clean.columns:
+            # Fallback: if bachelor's indicator is unavailable, keep prior master's behavior.
+            clean = clean[clean["master"] == 1].copy()
+    elif master_only:
         clean = clean[clean["master"] == 1].copy()
-    ma_only = clean[clean["cipcode"] >= min_cip].copy()
+    degree_filtered = clean[clean["cipcode"] >= min_cip].copy()
 
-    ma_only["intlcat"] = np.where(
-        pd.isnull(ma_only["share_intl"]) == 1,
+    degree_filtered["intlcat"] = np.where(
+        pd.isnull(degree_filtered["share_intl"]) == 1,
         "null",
         np.where(
-            ma_only["share_intl"] == 0,
+            degree_filtered["share_intl"] == 0,
             "No International Students",
             np.where(
-                ma_only["share_intl"] >= 0.7,
+                degree_filtered["share_intl"] >= 0.7,
                 "70%+ International",
-                np.where(ma_only["share_intl"] >= 0.3, "30-69% International", "1-29% International"),
+                np.where(degree_filtered["share_intl"] >= 0.3, "30-69% International", "1-29% International"),
             ),
         ),
     )
@@ -74,13 +98,14 @@ def main() -> None:
         "cip2dig",
         "year",
     ]
-    missing_cols = [c for c in cols if c not in ma_only.columns]
+    missing_cols = [c for c in cols if c not in degree_filtered.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns in IPEDS data: {missing_cols}")
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    ma_only[cols].to_parquet(output_path, index=False)
-    print(f"Wrote {output_path}")
+    degree_filtered[cols].to_parquet(output_path, index=False)
+    scope = "masters+bachelors" if include_bachelors else "masters-only"
+    print(f"Wrote {output_path} ({scope})")
 
 
 if __name__ == "__main__":

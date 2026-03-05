@@ -9,7 +9,9 @@
 # occurs (year t).
 
 import os
+import re
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -32,6 +34,9 @@ INT_FOLDER = f"{root}/data/int/int_files_nov2025"
 IPEDS_PATH = f"{INT_FOLDER}/ipeds_completions_all.parquet"
 FOIA_PATH = f"{root}/data/int/foia_sevp_combined_raw.parquet"
 F1_INST_CW_PATH = f"{INT_FOLDER}/f1_inst_unitid_crosswalk.parquet"
+STEM_OPT_LONG_PATH = f"{root}/data/raw/stem_opt_cip_codes/stem_opt_cip_lists_2008_to_2024_long.csv"
+CIP_2010_CATALOG_PATH = f"{root}/data/crosswalks/cip/CIPCode2010.csv"
+CIP_2020_CATALOG_PATH = f"{root}/data/crosswalks/cip/CIPCode2020.csv"
 FIG_DIR = Path(f"{root}/figures")
 ECON_PREFIX = "4506"  # Economics 4-digit CIP prefix
 ECONOMETRICS_CIP = "450603"
@@ -139,6 +144,180 @@ RELABEL_TYPE_PREDICATES = " OR ".join(
     [f"(r.relabel_type = '{spec['name']}' AND ({_spec_cip_pred(spec)}))" for spec in RELABEL_SPECS]
 ) if RELABEL_SPECS else "FALSE"
 CONTROL_CIP_WHERE = " OR ".join([_cip_prefix_pred("cipcode", pref) for pref in CONTROL_CIP_PREFIXES]) if CONTROL_CIP_PREFIXES else "FALSE"
+
+
+def _normalize_cip6(value: object) -> Optional[str]:
+    if pd.isna(value):
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    s = s.replace('="', "").replace('"', "")
+    s = re.sub(r"[^0-9.]", "", s)
+    if not s:
+        return None
+    if "." in s:
+        left, right = s.split(".", 1)
+        if not left or not right:
+            return None
+        left = left.zfill(2)
+        right = (right + "0000")[:4]
+        digits = left + right
+    else:
+        digits = re.sub(r"[^0-9]", "", s)
+    return digits.zfill(6) if len(digits) <= 6 else None
+
+
+def _normalize_text(value: object) -> Optional[str]:
+    if pd.isna(value):
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    s = " ".join(s.split())
+    return s or None
+
+
+def _load_cip_transition_map(catalog_path: str) -> tuple[dict[str, str], set[str]]:
+    """
+    Build old->new CIP mapping from NCES catalog `Action` fields.
+
+    Returns:
+      transition_map: mapping from prior-taxonomy 6-digit CIP -> new-taxonomy 6-digit CIP
+      new_tax_codes: set of 6-digit CIPs valid in the new taxonomy
+    """
+    if not os.path.exists(catalog_path):
+        raise FileNotFoundError(f"Missing CIP catalog: {catalog_path}")
+
+    df = pd.read_csv(catalog_path, dtype=str, usecols=["CIPCode", "Action", "CIPTitle"])
+    df["cip6"] = df["CIPCode"].map(_normalize_cip6)
+    df = df[df["cip6"].notna()].copy()
+    df["action_norm"] = df["Action"].fillna("").str.strip().str.lower()
+    df["title_norm"] = df["CIPTitle"].map(_normalize_text)
+
+    transition: dict[str, str] = {}
+
+    moved_from = (
+        df[df["action_norm"] == "moved from"][["title_norm", "cip6"]]
+        .dropna()
+        .drop_duplicates()
+    )
+    moved_to = (
+        df[df["action_norm"] == "moved to"][["title_norm", "cip6"]]
+        .dropna()
+        .drop_duplicates()
+    )
+
+    from_by_title = moved_from.groupby("title_norm")["cip6"].agg(lambda s: sorted(set(s))).to_dict()
+    to_by_title = moved_to.groupby("title_norm")["cip6"].agg(lambda s: sorted(set(s))).to_dict()
+    for title, old_codes in from_by_title.items():
+        new_codes = to_by_title.get(title, [])
+        if len(old_codes) == 1 and len(new_codes) == 1:
+            transition[old_codes[0]] = new_codes[0]
+
+    old_candidates = df[~df["action_norm"].isin(["new", "moved to"])][["cip6", "action_norm"]].drop_duplicates()
+    for _, row in old_candidates.iterrows():
+        code = row["cip6"]
+        action = row["action_norm"]
+        if code in transition:
+            continue
+        if action == "deleted":
+            continue
+        transition[code] = code
+
+    new_tax_codes = set(
+        df.loc[~df["action_norm"].isin(["moved from", "deleted"]), "cip6"]
+        .dropna()
+        .tolist()
+    )
+    return transition, new_tax_codes
+
+
+@lru_cache(maxsize=1)
+def _load_stem_harmonized_tables() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load STEM list (first STEM year by CIP) and harmonize all taxonomies to 2020 CIP.
+
+    Returns:
+      cip_to_2020: columns [cip_taxonomy_year, cip6, cip2020]
+      stem_first_year: columns [cip2020, stem_first_year]
+    """
+    if not os.path.exists(STEM_OPT_LONG_PATH):
+        raise FileNotFoundError(f"Missing STEM OPT CIP list: {STEM_OPT_LONG_PATH}")
+
+    map_2000_to_2010, codes_2010 = _load_cip_transition_map(CIP_2010_CATALOG_PATH)
+    map_2010_to_2020, codes_2020 = _load_cip_transition_map(CIP_2020_CATALOG_PATH)
+
+    stem = pd.read_csv(
+        STEM_OPT_LONG_PATH,
+        dtype={"cip_code": str, "list_year": "Int64", "cip_taxonomy_year": "Int64"},
+        usecols=["cip_code", "list_year", "cip_taxonomy_year"],
+    )
+    stem["cip6"] = stem["cip_code"].map(_normalize_cip6)
+    stem["cip_taxonomy_year"] = pd.to_numeric(stem["cip_taxonomy_year"], errors="coerce").astype("Int64")
+    stem["list_year"] = pd.to_numeric(stem["list_year"], errors="coerce").astype("Int64")
+    stem = stem.dropna(subset=["cip6", "cip_taxonomy_year", "list_year"]).copy()
+    stem["cip_taxonomy_year"] = stem["cip_taxonomy_year"].astype(int)
+    stem["list_year"] = stem["list_year"].astype(int)
+
+    def to_2020(cip6: str, tax_year: int) -> Optional[str]:
+        if tax_year == 2020:
+            return cip6 if cip6 in codes_2020 else None
+        if tax_year == 2010:
+            out = map_2010_to_2020.get(cip6)
+            if out is None and cip6 in codes_2020:
+                return cip6
+            return out
+        if tax_year == 2000:
+            step_2010 = map_2000_to_2010.get(cip6)
+            if step_2010 is None and cip6 in codes_2010:
+                step_2010 = cip6
+            if step_2010 is None:
+                return None
+            out = map_2010_to_2020.get(step_2010)
+            if out is None and step_2010 in codes_2020:
+                return step_2010
+            return out
+        return None
+
+    stem["cip2020"] = stem.apply(
+        lambda r: to_2020(str(r["cip6"]), int(r["cip_taxonomy_year"])),
+        axis=1,
+    )
+    stem = stem.dropna(subset=["cip2020"]).copy()
+
+    stem_first_year = (
+        stem.groupby("cip2020", as_index=False)["list_year"]
+        .min()
+        .rename(columns={"list_year": "stem_first_year"})
+    )
+    stem_first_year["stem_first_year"] = stem_first_year["stem_first_year"].astype(int)
+
+    codes_2000 = set(stem.loc[stem["cip_taxonomy_year"] == 2000, "cip6"].tolist()) | set(map_2000_to_2010.keys())
+    codes_2010_all = set(stem.loc[stem["cip_taxonomy_year"] == 2010, "cip6"].tolist()) | set(map_2010_to_2020.keys())
+    codes_2020_all = set(stem.loc[stem["cip_taxonomy_year"] == 2020, "cip6"].tolist()) | set(codes_2020)
+
+    mapping_rows: list[dict[str, object]] = []
+    for code in sorted(codes_2000):
+        out = to_2020(code, 2000)
+        if out:
+            mapping_rows.append({"cip_taxonomy_year": 2000, "cip6": code, "cip2020": out})
+    for code in sorted(codes_2010_all):
+        out = to_2020(code, 2010)
+        if out:
+            mapping_rows.append({"cip_taxonomy_year": 2010, "cip6": code, "cip2020": out})
+    for code in sorted(codes_2020_all):
+        out = to_2020(code, 2020)
+        if out:
+            mapping_rows.append({"cip_taxonomy_year": 2020, "cip6": code, "cip2020": out})
+
+    cip_to_2020 = pd.DataFrame(mapping_rows).drop_duplicates()
+    cip_to_2020["cip_taxonomy_year"] = cip_to_2020["cip_taxonomy_year"].astype(int)
+    cip_to_2020["cip6"] = cip_to_2020["cip6"].astype(str).str.zfill(6)
+    cip_to_2020["cip2020"] = cip_to_2020["cip2020"].astype(str).str.zfill(6)
+    stem_first_year["cip2020"] = stem_first_year["cip2020"].astype(str).str.zfill(6)
+    return cip_to_2020, stem_first_year
 
 
 def detect_econ_relabels(con: ddb.DuckDBPyConnection) -> pd.DataFrame:
@@ -380,103 +559,295 @@ def detect_econ_relabels(con: ddb.DuckDBPyConnection) -> pd.DataFrame:
 
 def find_common_relabels(con: ddb.DuckDBPyConnection, top_n: int = TOP_COMMON_RELABELS) -> pd.DataFrame:
     """
-    Scan master's programs (all CIPs) for relabel-like events in 2016-2019 and report the
-    most common source->target CIP pairs where a drop in one CIP coincides with an increase
-    in another CIP at the same unit and year.
+    Scan master's programs (all CIPs) for relabel-like events in 2016-2019 and
+    report the most common source->target CIP pairs.
+
+    Improvements versus the original scan:
+    - builds a balanced unit x CIP x year panel (so zero years are explicit),
+    - requires source-drop persistence and target-gain persistence,
+    - enforces STEM transition: source non-STEM in t-1 and t, target STEM in t,
+    - pairs each source drop with only the best target within a unit-year.
     """
     con.sql(f"CREATE OR REPLACE TEMP VIEW ipeds_raw AS SELECT * FROM read_parquet('{IPEDS_PATH}')")
+    cip_to_2020_df, stem_first_year_df = _load_stem_harmonized_tables()
+    con.register("cip_to_2020_py", cip_to_2020_df)
+    con.register("stem_first_year_py", stem_first_year_df)
+    con.sql("CREATE OR REPLACE TEMP VIEW cip_to_2020 AS SELECT * FROM cip_to_2020_py")
+    con.sql("CREATE OR REPLACE TEMP VIEW stem_first_year AS SELECT * FROM stem_first_year_py")
+
+    scan_year_min = 2016
+    scan_year_max = 2019
+    panel_year_min = 2004
+    panel_year_max = 2024
+    min_share_intl = 0.5
+    min_drop_abs = 5
+    lookback_years = 3
+    lookahead_years = 2
+    min_target_offset_share = 0.5
+    max_net_loss_share = 0.5
+    source_persistence_drop_share = 0.3
+    target_persistence_gain_share = 0.3
 
     df = con.sql(
         f"""
-        WITH masters AS (
+        WITH masters_raw AS (
             SELECT
-                unitid,
+                CAST(unitid AS BIGINT) AS unitid,
                 CAST(year AS INTEGER) AS year,
-                CAST(cipcode AS INTEGER) AS cipcode,
                 LPAD(CAST(cipcode AS VARCHAR), 6, '0') AS cip6,
                 CAST(ctotalt AS DOUBLE) AS ctotalt,
-                CAST(cnralt AS DOUBLE) AS cnralt
+                CAST(cnralt AS DOUBLE) AS cnralt,
+                CAST(cipcode_lab AS VARCHAR) AS cipcode_lab
             FROM ipeds_raw
             WHERE unitid IS NOT NULL
               AND cipcode IS NOT NULL
               AND CAST(awlevel AS INTEGER) = 7
         ),
-        lagged AS (
+        cip_labels AS (
+            SELECT
+                cip6,
+                MAX(cipcode_lab) FILTER (WHERE cipcode_lab IS NOT NULL AND TRIM(cipcode_lab) <> '') AS cip_label
+            FROM masters_raw
+            GROUP BY cip6
+        ),
+        unit_cip AS (
+            SELECT DISTINCT unitid, cip6
+            FROM masters_raw
+        ),
+        years AS (
+            SELECT * FROM generate_series({panel_year_min}, {panel_year_max}) AS y(year)
+        ),
+        panel AS (
+            SELECT
+                uc.unitid,
+                y.year,
+                uc.cip6,
+                CASE
+                    WHEN y.year <= 2010 THEN 2000
+                    WHEN y.year <= 2020 THEN 2010
+                    ELSE 2020
+                END AS cip_taxonomy_year,
+                COALESCE(m.ctotalt, 0) AS ctotalt,
+                COALESCE(m.cnralt, 0) AS cnralt,
+                CASE
+                    WHEN COALESCE(m.ctotalt, 0) > 0
+                    THEN m.cnralt / m.ctotalt
+                    ELSE NULL
+                END AS share_intl
+            FROM unit_cip uc
+            CROSS JOIN years y
+            LEFT JOIN masters_raw m
+              ON m.unitid = uc.unitid
+             AND m.cip6 = uc.cip6
+             AND m.year = y.year
+        ),
+        stats_base AS (
             SELECT
                 unitid,
                 year,
                 cip6,
+                cip_taxonomy_year,
                 ctotalt,
-                cnralt,
-                cnralt/ctotalt AS share_intl,
+                share_intl,
+                LAG(share_intl) OVER (PARTITION BY unitid, cip6 ORDER BY year) AS share_prev,
                 LAG(ctotalt) OVER (PARTITION BY unitid, cip6 ORDER BY year) AS prev_total,
-                LAG(year) OVER (PARTITION BY unitid, cip6 ORDER BY year) AS prev_year,
                 AVG(ctotalt) OVER (
                     PARTITION BY unitid, cip6
                     ORDER BY year
-                    ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING
-                ) AS avg_prev5,
+                    ROWS BETWEEN {lookback_years} PRECEDING AND 1 PRECEDING
+                ) AS prev_window_avg,
                 AVG(ctotalt) OVER (
                     PARTITION BY unitid, cip6
                     ORDER BY year
-                    ROWS BETWEEN 1 FOLLOWING AND 5 FOLLOWING
-                ) AS avg_future
-            FROM masters
+                    ROWS BETWEEN 1 FOLLOWING AND {lookahead_years} FOLLOWING
+                ) AS post_window_avg
+            FROM panel
+        ),
+        stats AS (
+            SELECT
+                s.unitid,
+                s.year,
+                s.cip6,
+                s.cip_taxonomy_year,
+                s.ctotalt,
+                s.share_intl,
+                s.share_prev,
+                s.prev_total,
+                s.prev_window_avg,
+                s.post_window_avg,
+                m.cip2020,
+                CASE
+                    WHEN m.cip2020 IS NOT NULL
+                     AND sf.stem_first_year IS NOT NULL
+                     AND sf.stem_first_year <= s.year
+                    THEN 1 ELSE 0
+                END AS is_stem_curr,
+                CASE
+                    WHEN m.cip2020 IS NOT NULL
+                     AND sf.stem_first_year IS NOT NULL
+                     AND sf.stem_first_year <= s.year - 1
+                    THEN 1 ELSE 0
+                END AS is_stem_prev
+            FROM stats_base s
+            LEFT JOIN cip_to_2020 m
+              ON s.cip_taxonomy_year = m.cip_taxonomy_year
+             AND s.cip6 = m.cip6
+            LEFT JOIN stem_first_year sf
+              ON m.cip2020 = sf.cip2020
         ),
         drops AS (
             SELECT
                 unitid,
                 year,
                 cip6 AS source_cip6,
-                ctotalt AS curr_total,
-                avg_prev5,
-                CASE WHEN avg_prev5 IS NOT NULL AND avg_prev5 > 0 THEN (avg_prev5 - ctotalt) / avg_prev5 ELSE NULL END AS drop_pct,
-                CASE WHEN avg_prev5 IS NOT NULL THEN avg_prev5 - ctotalt ELSE NULL END AS drop_count
-            FROM lagged
-            WHERE avg_prev5 >= {MIN_PREV_TOTAL}
-              AND prev_total - ctotalt > 0
-              AND (avg_prev5 - ctotalt) / avg_prev5 >= {SINGLE_YEAR_DROP_PCT} AND share_intl >= 0.5
-              AND year BETWEEN 2016 AND 2019
-        ),
-        increases AS (
-            SELECT
-                unitid,
-                year,
-                cip6 AS target_cip6,
-                ctotalt AS target_curr,
-                avg_prev5 AS target_prev_avg
-            FROM lagged
-            WHERE year BETWEEN 2016 AND 2019
+                cip2020 AS source_cip2020,
+                ctotalt AS source_curr,
+                COALESCE(prev_total, 0) AS source_prev,
+                GREATEST(COALESCE(prev_total, 0) - ctotalt, 0) AS source_drop,
+                CASE
+                    WHEN COALESCE(prev_total, 0) > 0
+                    THEN (COALESCE(prev_total, 0) - ctotalt) / prev_total
+                    ELSE NULL
+                END AS source_drop_pct,
+                COALESCE(prev_window_avg, prev_total, 0) AS source_baseline,
+                COALESCE(post_window_avg, ctotalt, 0) AS source_post,
+                is_stem_curr AS source_is_stem_curr,
+                is_stem_prev AS source_is_stem_prev
+            FROM stats
+            WHERE year BETWEEN {scan_year_min} AND {scan_year_max}
+              AND COALESCE(share_prev, share_intl, 0) >= {min_share_intl}
+              AND COALESCE(prev_window_avg, prev_total, 0) >= {MIN_PREV_TOTAL}
+              AND GREATEST(COALESCE(prev_total, 0) - ctotalt, 0) >= {min_drop_abs}
+              AND CASE
+                    WHEN COALESCE(prev_total, 0) > 0
+                    THEN (COALESCE(prev_total, 0) - ctotalt) / prev_total
+                    ELSE 0
+                  END >= {SINGLE_YEAR_DROP_PCT}
+              AND COALESCE(post_window_avg, ctotalt, 0) <= COALESCE(prev_window_avg, prev_total, 0) * (1 - {source_persistence_drop_share})
+              AND COALESCE(is_stem_prev, 0) = 0
+              AND COALESCE(is_stem_curr, 0) = 0
+              AND cip2020 IS NOT NULL
         ),
         paired AS (
             SELECT
                 d.unitid,
                 d.year,
                 d.source_cip6,
-                i.target_cip6,
-                d.drop_count,
-                d.drop_pct,
+                d.source_cip2020,
+                s.cip6 AS target_cip6,
+                s.cip2020 AS target_cip2020,
+                d.source_curr,
+                d.source_prev,
+                d.source_drop,
+                d.source_drop_pct,
+                s.ctotalt AS target_curr,
+                COALESCE(s.prev_total, 0) AS target_prev,
+                COALESCE(s.prev_window_avg, s.prev_total, 0) AS target_baseline,
+                COALESCE(s.post_window_avg, s.ctotalt, 0) AS target_post,
+                s.ctotalt - COALESCE(s.prev_total, 0) AS target_increase,
                 CASE
-                    WHEN COALESCE(i.target_prev_avg, 0) > 0
-                    THEN (COALESCE(i.target_curr, 0) - COALESCE(i.target_prev_avg, 0)) / i.target_prev_avg
+                    WHEN COALESCE(s.prev_total, 0) > 0
+                    THEN (s.ctotalt - COALESCE(s.prev_total, 0)) / s.prev_total
                     ELSE NULL
                 END AS target_increase_pct,
-                COALESCE(i.target_curr, 0) - COALESCE(i.target_prev_avg, 0) AS target_increase
+                (d.source_curr + s.ctotalt) - (d.source_prev + COALESCE(s.prev_total, 0)) AS net_change_pair,
+                COALESCE(s.post_window_avg, s.ctotalt, 0) - COALESCE(s.prev_window_avg, s.prev_total, 0) AS target_post_gain,
+                (
+                    COALESCE((s.ctotalt - COALESCE(s.prev_total, 0)) / NULLIF(d.source_drop, 0), 0)
+                    + 0.5 * COALESCE(
+                        (
+                            COALESCE(s.post_window_avg, s.ctotalt, 0)
+                            - COALESCE(s.prev_window_avg, s.prev_total, 0)
+                        ) / NULLIF(d.source_drop, 0),
+                        0
+                    )
+                    + 0.5 * COALESCE(
+                        (
+                            COALESCE(d.source_baseline, d.source_prev, 0)
+                            - COALESCE(d.source_post, d.source_curr, 0)
+                        ) / NULLIF(d.source_drop, 0),
+                        0
+                    )
+                    - 0.5 * COALESCE(
+                        (-LEAST((d.source_curr + s.ctotalt) - (d.source_prev + COALESCE(s.prev_total, 0)), 0))
+                        / NULLIF(d.source_drop, 0),
+                        0
+                    )
+                ) AS relabel_score
             FROM drops d
-            JOIN increases i
-              ON d.unitid = i.unitid AND d.year = i.year
-            WHERE COALESCE(i.target_curr, 0) - COALESCE(i.target_prev_avg, 0) >= 0.5 * d.drop_count
-              AND d.source_cip6 <> i.target_cip6
+            JOIN stats s
+              ON d.unitid = s.unitid
+             AND d.year = s.year
+             AND d.source_cip6 <> s.cip6
+            WHERE s.ctotalt - COALESCE(s.prev_total, 0) >= {min_target_offset_share} * d.source_drop
+              AND COALESCE(s.is_stem_curr, 0) = 1
+              AND s.cip2020 IS NOT NULL
+              AND (d.source_curr + s.ctotalt) - (d.source_prev + COALESCE(s.prev_total, 0))
+                  >= -{max_net_loss_share} * d.source_drop
+              AND COALESCE(s.post_window_avg, s.ctotalt, 0)
+                  >= COALESCE(s.prev_window_avg, s.prev_total, 0) + {target_persistence_gain_share} * d.source_drop
+        ),
+        best_target_per_source AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY unitid, year, source_cip6
+                    ORDER BY relabel_score DESC, target_increase DESC, target_post_gain DESC, target_cip6
+                ) AS rn_source
+            FROM paired
+        ),
+        best_pair_per_unit_year AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY unitid, year
+                    ORDER BY source_drop DESC, relabel_score DESC, target_increase DESC
+                ) AS rn_unit_year
+            FROM best_target_per_source
+            WHERE rn_source = 1
+        ),
+        pair_stats AS (
+            SELECT
+                source_cip6,
+                source_cip2020,
+                target_cip6,
+                target_cip2020,
+                COUNT(*) AS event_count,
+                COUNT(DISTINCT unitid) AS unit_count,
+                AVG(source_drop_pct) AS avg_drop_pct,
+                AVG(target_increase_pct) AS avg_target_increase_pct,
+                AVG(source_drop) AS avg_drop_count,
+                AVG(target_increase) AS avg_target_increase,
+                AVG(relabel_score) AS avg_relabel_score
+            FROM best_pair_per_unit_year
+            WHERE rn_unit_year = 1
+            GROUP BY source_cip6, source_cip2020, target_cip6, target_cip2020
         )
         SELECT
-            source_cip6,
-            target_cip6,
-            COUNT(*) AS event_count,
-            AVG(drop_pct) AS avg_drop_pct,
-            AVG(target_increase_pct) AS avg_target_increase_pct
-        FROM paired
-        GROUP BY source_cip6, target_cip6
-        ORDER BY event_count DESC, avg_drop_pct DESC, avg_target_increase_pct DESC
+            ps.source_cip6,
+            ps.source_cip2020,
+            COALESCE(sl.cip_label, 'Unknown CIP') AS source_cip_label,
+            ps.target_cip6,
+            ps.target_cip2020,
+            COALESCE(tl.cip_label, 'Unknown CIP') AS target_cip_label,
+            ps.event_count,
+            ps.unit_count,
+            ps.avg_drop_pct,
+            ps.avg_target_increase_pct,
+            ps.avg_drop_count,
+            ps.avg_target_increase,
+            ps.avg_relabel_score
+        FROM pair_stats ps
+        LEFT JOIN cip_labels sl
+          ON ps.source_cip6 = sl.cip6
+        LEFT JOIN cip_labels tl
+          ON ps.target_cip6 = tl.cip6
+        ORDER BY
+            ps.event_count DESC,
+            ps.unit_count DESC,
+            ps.avg_relabel_score DESC,
+            ps.avg_drop_pct DESC,
+            ps.avg_target_increase_pct DESC
         LIMIT {top_n}
         """
     ).df()

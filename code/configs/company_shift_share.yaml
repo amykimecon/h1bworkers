@@ -35,6 +35,7 @@ paths:
   ipeds_name_to_zip_crosswalk: "${int_dir}/ipeds_name_to_zip_crosswalk.parquet" # IPEDS name/aliases to ZIP crosswalk 
   ipeds_unitid_main_crosswalk: "${int_dir}/ipeds_unitid_main_crosswalk.parquet" # OUTPUT: original UNITID x year to canonical UNITID mapping
   ipeds_ma_only: "{root}/data/int/ipeds_ma_only.parquet" # OUTPUT: IPEDS institutions meeting criteria for inclusion in shift-share analysis (masters-only, CIP >= 10000, year >= 2002)
+  ipeds_ma_ba_only: "{root}/data/int/ipeds_ma_ba_only.parquet" # OUTPUT: IPEDS institutions meeting criteria for inclusion (masters + bachelors, CIP >= 10000, year >= 2002)
 
   # CROSSWALKS
   geonames_dir: "{root}/data/crosswalks/geonames" # RAW: directory of geonames file
@@ -59,7 +60,9 @@ paths:
   treatment_out: "{root}/data/out/company_shift_share/masters_opt_hires.parquet"
   outcomes_out: "{root}/data/out/company_shift_share/outcomes.parquet"
   analysis_panel_out: "{root}/data/out/company_shift_share/analysis_panel.parquet"
+  analysis_panel_out_ma_ba: "{root}/data/out/company_shift_share/analysis_panel_ma_ba.parquet"
   analysis_panel: "{root}/data/out/company_shift_share/analysis_panel.parquet"
+  analysis_panel_ma_ba: "{root}/data/out/company_shift_share/analysis_panel_ma_ba.parquet"
   instrument_components: "{root}/data/out/company_shift_share/instrument_components.parquet"
   # rsid_geoname_cw: "{root}/data/int/rsid_geoname_cw.parquet"
   # ipeds_geoname_cw: "{root}/data/int/ipeds_geoname_cw.parquet"
@@ -110,7 +113,7 @@ revelio_school_to_employer:
 
 build_company_shift_share:
   share_base_year: 2010
-  outcome_lag_start: 0
+  outcome_lag_start: -5
   outcome_lag_end: 5
   save_outputs: true
   verbose: true
@@ -119,14 +122,22 @@ build_company_shift_share:
   use_log_y: false
   exclude_unitids: []
   include_non_masters: false
+  include_bachelors: false
+  opt_shifts: true
+  opt_shifts_normalization: none # options: ipeds_graduates, foia_students, none
+  opt_shifts_normalize_by_graduates: false
+  opt_shifts_degree_scope: bachelors_masters
 
 shift_share_regressions:
-  outcome_prefix: "y_new_hires_lag"
+  slides_out_dir: "{root}/h1bworkers/output/slides/slides_20260303"
+  outcome_prefix: "y_cst_lag" #"y_new_hires_lag"
   lag_start: 0
   lag_end: 5
   instrument: "z_ct_full"
-  use_log_instrument: true
-  treatment_col: "masters_opt_hires_correction_aware" #"x_bin_any_nonzero" #"masters_opt_hires"
+  use_log_instrument: false
+  instrument_interact_post2016: true
+  instrument_interact_post_year: 2016
+  treatment_col: "x_bin_any_nonzero" #"masters_opt_hires_correction_aware" #"x_bin_any_nonzero" #"masters_opt_hires"
   dependent: "masters_opt_hires"
   start_t: null
   end_t: null
@@ -149,19 +160,22 @@ shift_share_regressions:
   x_lag_by_year_years: null #[2012, 2014, 2016, 2018]
   use_instrument_x_firm_size_ventile: false
   firm_size_ventile_n: 20
-  y_cst_lagm3_min: 100
-  y_cst_lagm3_max: 500
+  y_cst_lagm3_min: null
+  y_cst_lagm3_max: null
   alt_event_study: true
   alt_event_instrument_col: "z_ct_full"
+  opt_event_outcome_cols: ["x_bin_any_nonzero", "y_cst_lag0"] # opt_event_study_2016.py runs one pass per outcome
+  opt_event_outcome_col: "x_bin_any_nonzero" # used by opt_event_study_2016.py; falls back to alt_event_outcome_col, then alt_event_x_source_col
+  opt_event_x_source_col: null # source column for derived binary outcomes in opt_event_study_2016.py; falls back to alt_event_x_source_col
   alt_event_outcome_col: null
   alt_event_treat_pctile: 90
   alt_event_control_pctile: 75
   alt_event_time_min: -3
   alt_event_time_max: 3
-  alt_event_data_min_t: 2009
-  alt_event_data_max_t: 2021
-  alt_event_event_min_t: 2012
-  alt_event_event_max_t: 2018
+  alt_event_data_min_t: 2010
+  alt_event_data_max_t: 2020
+  alt_event_event_min_t: 2013
+  alt_event_event_max_t: 2019
   alt_event_local_window: 2
   alt_event_match_controls_on_y_cst_lagm3: true
   alt_event_control_without_replacement: true
@@ -169,6 +183,17 @@ shift_share_regressions:
   use_log_outcome_for_reduced_form: true
   alt_event_seed: 42
   alt_event_plot_years: [2012, 2014, 2016]
+  include_bachelors_sample: false
+  use_state_year_fe: false
+  absorbing_use_event_time_twfe: true
+  absorbing_event_time_ref: -1
+  absorbing_plot_raw_means_by_event_time: true
+  absorbing_binary_instrument: true
+  absorbing_event_shock_metric: auto # auto: pct_change by default, first_difference when build_company_shift_share.opt_shifts=true
+  absorbing_event_min_shock_quantile: null # when null and opt_shifts=true, defaults to 0.90; set to 0.0 to disable quantile floor
+  absorbing_event_min_shock_abs: null # optional absolute minimum event shock floor (in chosen metric units)
+  absorbing_event_local_window: 3
+  absorbing_neighbor_shock_ratio: 0.5
 
 employer_crosswalk:
   wrds_username: "amykimecon"
@@ -183,3 +208,4 @@ ipeds_ma_only:
   min_year: 2002
   min_cip: 10000
   master_only: true
+  include_bachelors: false

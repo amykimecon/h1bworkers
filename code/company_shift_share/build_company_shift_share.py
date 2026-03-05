@@ -29,7 +29,9 @@ class PipelinePaths:
     transitions: Path
     headcount: Path
     revelio_ipeds_foia_inst_crosswalk: Path
+    f1_inst_unitid_crosswalk: Path | None
     ipeds_ma_only: Path
+    ipeds_ma_ba_only: Path | None
     foia_sevp_with_person_id: Path
     foia_sevp_with_person_id_employment_corrected: Path
     employer_crosswalk: Path
@@ -39,6 +41,7 @@ class PipelinePaths:
     treatment_out: Path
     outcomes_out: Path
     analysis_panel_out: Path
+    analysis_panel_out_ma_ba: Path | None
 
 
 def _resolve_path(paths_cfg: dict, key: str) -> Path:
@@ -48,13 +51,22 @@ def _resolve_path(paths_cfg: dict, key: str) -> Path:
     return Path(value)
 
 
+def _resolve_optional_path(paths_cfg: dict, key: str) -> Path | None:
+    value = paths_cfg.get(key)
+    if value is None or str(value).strip().lower() in {"", "none", "null"}:
+        return None
+    return Path(value)
+
+
 def _resolve_pipeline_paths(cfg: dict) -> PipelinePaths:
     paths_cfg = get_cfg_section(cfg, "paths")
     return PipelinePaths(
         transitions=_resolve_path(paths_cfg, "transitions_out"),
         headcount=_resolve_path(paths_cfg, "headcounts_out"),
         revelio_ipeds_foia_inst_crosswalk=_resolve_path(paths_cfg, "revelio_ipeds_foia_inst_crosswalk"),
+        f1_inst_unitid_crosswalk=_resolve_optional_path(paths_cfg, "f1_inst_unitid_crosswalk"),
         ipeds_ma_only=_resolve_path(paths_cfg, "ipeds_ma_only"),
+        ipeds_ma_ba_only=_resolve_optional_path(paths_cfg, "ipeds_ma_ba_only"),
         foia_sevp_with_person_id=_resolve_path(paths_cfg, "foia_sevp_with_person_id"),
         foia_sevp_with_person_id_employment_corrected=_resolve_path(paths_cfg, "foia_sevp_with_person_id_employment_corrected"),
         employer_crosswalk=_resolve_path(paths_cfg, "employer_crosswalk"),
@@ -64,6 +76,7 @@ def _resolve_pipeline_paths(cfg: dict) -> PipelinePaths:
         treatment_out=_resolve_path(paths_cfg, "treatment_out"),
         outcomes_out=_resolve_path(paths_cfg, "outcomes_out"),
         analysis_panel_out=_resolve_path(paths_cfg, "analysis_panel_out"),
+        analysis_panel_out_ma_ba=_resolve_optional_path(paths_cfg, "analysis_panel_out_ma_ba"),
     )
 
 
@@ -80,10 +93,10 @@ def _parse_unitids(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def _sql_in_list(values: list[str]) -> str:
+def _sql_in_list(values: list[object]) -> str:
     if not values:
         return "()"
-    escaped = [v.replace("'", "''") for v in values]
+    escaped = [str(v).replace("'", "''") for v in values]
     return "(" + ",".join(f"'{v}'" for v in escaped) + ")"
 
 def _check_paths(paths: dict[str, Path]) -> None:
@@ -108,36 +121,172 @@ def _has_column(con: ddb.DuckDBPyConnection, view: str, column: str) -> bool:
     return column.lower() in cols
 
 
-def _masters_predicate(con: ddb.DuckDBPyConnection, view: str = "foia_raw") -> Optional[str]:
-    """
-    Return a SQL predicate to filter Master's records if columns exist.
-    Prioritized checks follow common FOIA clean outputs.
-    """
-    if _has_column(con, view, "student_edu_level_desc"):
-        return "LOWER(CAST(student_edu_level_desc AS VARCHAR)) = 'master''s'"
-    if _has_column(con, view, "awlevel_group"):
-        return "LOWER(CAST(awlevel_group AS VARCHAR)) = 'master'"
-    if _has_column(con, view, "awlevel"):
-        return "CAST(awlevel AS INTEGER) = 7"
-    for candidate in ("education_level", "degree_level"):
-        if _has_column(con, view, candidate):
-            return f"LOWER(CAST({candidate} AS VARCHAR)) LIKE '%master%'"
+def _first_present_column(
+    con: ddb.DuckDBPyConnection,
+    view: str,
+    candidates: list[str],
+) -> str | None:
+    rows = con.execute(f"PRAGMA table_info('{view}')").fetchall()
+    cols = {str(r[1]).lower(): str(r[1]) for r in rows}
+    for cand in candidates:
+        if cand.lower() in cols:
+            return cols[cand.lower()]
     return None
 
 
-def _register_inputs(con: ddb.DuckDBPyConnection, paths: PipelinePaths) -> None:
-    _check_paths(
-        {
-            "transitions": paths.transitions,
-            "headcount": paths.headcount,
-            "revelio_ipeds_foia_inst_crosswalk": paths.revelio_ipeds_foia_inst_crosswalk,
-            "ipeds_ma_only": paths.ipeds_ma_only,
-            "foia_raw_full": paths.foia_sevp_with_person_id,
-            "foia_raw_corrected": paths.foia_sevp_with_person_id_employment_corrected,
-            "employer_cw": paths.employer_crosswalk,
-            "preferred_rcids": paths.preferred_rcids,
-        }
+def _normalize_degree_scope(raw: str | None) -> str:
+    value = str(raw or "").strip().lower().replace("-", "_")
+    if value in {"", "both", "all", "ba_ma", "ma_ba", "bachelors_masters", "masters_bachelors"}:
+        return "bachelors_masters"
+    if value in {"bachelors", "bachelor", "ba"}:
+        return "bachelors"
+    if value in {"masters", "master", "ma", "ms"}:
+        return "masters"
+    raise ValueError(
+        "Invalid degree scope. Use one of: "
+        "bachelors_masters (default), bachelors, masters."
     )
+
+
+def _normalize_opt_shift_normalization(raw: str | None) -> str:
+    value = str(raw or "").strip().lower().replace("-", "_")
+    if value in {"", "ipeds", "ipeds_graduates", "graduates", "grads"}:
+        return "ipeds_graduates"
+    if value in {"foia", "foia_students", "total_foia_students", "foia_total_students"}:
+        return "foia_students"
+    if value in {"none", "raw", "count", "counts", "unnormalized"}:
+        return "none"
+    raise ValueError(
+        "Invalid OPT-shift normalization. Use one of: "
+        "ipeds_graduates (default), foia_students, none."
+    )
+
+
+def _degree_predicate_for_scope(
+    con: ddb.DuckDBPyConnection,
+    view: str = "foia_raw",
+    degree_scope: str = "masters",
+) -> Optional[str]:
+    degree_scope = _normalize_degree_scope(degree_scope)
+    if degree_scope == "bachelors_masters":
+        degree_word_pred = (
+            "LOWER(CAST({col} AS VARCHAR)) LIKE '%master%' "
+            "OR LOWER(CAST({col} AS VARCHAR)) LIKE '%bachelor%'"
+        )
+    elif degree_scope == "bachelors":
+        degree_word_pred = "LOWER(CAST({col} AS VARCHAR)) LIKE '%bachelor%'"
+    else:
+        degree_word_pred = "LOWER(CAST({col} AS VARCHAR)) LIKE '%master%'"
+
+    if _has_column(con, view, "student_edu_level_desc"):
+        if degree_scope == "bachelors_masters":
+            return (
+                "LOWER(CAST(student_edu_level_desc AS VARCHAR)) IN ('master''s', 'masters', 'bachelor''s', 'bachelors') "
+                "OR (LOWER(CAST(student_edu_level_desc AS VARCHAR)) LIKE '%master%' "
+                "OR LOWER(CAST(student_edu_level_desc AS VARCHAR)) LIKE '%bachelor%')"
+            )
+        if degree_scope == "bachelors":
+            return (
+                "LOWER(CAST(student_edu_level_desc AS VARCHAR)) IN ('bachelor''s', 'bachelors') "
+                "OR LOWER(CAST(student_edu_level_desc AS VARCHAR)) LIKE '%bachelor%'"
+            )
+        return (
+            "LOWER(CAST(student_edu_level_desc AS VARCHAR)) IN ('master''s', 'masters') "
+            "OR LOWER(CAST(student_edu_level_desc AS VARCHAR)) LIKE '%master%'"
+        )
+    if _has_column(con, view, "awlevel_group"):
+        if degree_scope == "bachelors_masters":
+            return (
+                "LOWER(CAST(awlevel_group AS VARCHAR)) IN ('master', 'masters', 'bachelor', 'bachelors') "
+                "OR (LOWER(CAST(awlevel_group AS VARCHAR)) LIKE '%master%' "
+                "OR LOWER(CAST(awlevel_group AS VARCHAR)) LIKE '%bachelor%')"
+            )
+        if degree_scope == "bachelors":
+            return (
+                "LOWER(CAST(awlevel_group AS VARCHAR)) IN ('bachelor', 'bachelors') "
+                "OR LOWER(CAST(awlevel_group AS VARCHAR)) LIKE '%bachelor%'"
+            )
+        return (
+            "LOWER(CAST(awlevel_group AS VARCHAR)) IN ('master', 'masters') "
+            "OR LOWER(CAST(awlevel_group AS VARCHAR)) LIKE '%master%'"
+        )
+    if _has_column(con, view, "awlevel"):
+        if degree_scope == "bachelors_masters":
+            return "CAST(awlevel AS INTEGER) IN (5, 7)"
+        if degree_scope == "bachelors":
+            return "CAST(awlevel AS INTEGER) = 5"
+        return "CAST(awlevel AS INTEGER) = 7"
+    for candidate in ("education_level", "degree_level"):
+        if _has_column(con, view, candidate):
+            return degree_word_pred.format(col=candidate)
+    return None
+
+
+def _degree_predicate(
+    con: ddb.DuckDBPyConnection,
+    view: str = "foia_raw",
+    include_bachelors: bool = False,
+) -> Optional[str]:
+    """
+    Return a SQL predicate to filter by degree scope if columns exist.
+    Prioritized checks follow common FOIA clean outputs.
+    """
+    scope = "bachelors_masters" if include_bachelors else "masters"
+    return _degree_predicate_for_scope(con, view=view, degree_scope=scope)
+
+
+def _register_inputs(
+    con: ddb.DuckDBPyConnection,
+    paths: PipelinePaths,
+    include_bachelors: bool = False,
+    opt_shifts: bool = False,
+    opt_shift_degree_scope: str = "bachelors_masters",
+    opt_shifts_normalization: str | None = None,
+    opt_shifts_normalize_by_graduates: bool = True,
+) -> None:
+    opt_shift_degree_scope = _normalize_degree_scope(opt_shift_degree_scope)
+    if opt_shifts_normalization is None:
+        opt_shifts_normalization = (
+            "ipeds_graduates" if opt_shifts_normalize_by_graduates else "none"
+        )
+    opt_shifts_normalization = _normalize_opt_shift_normalization(opt_shifts_normalization)
+    ipeds_path = paths.ipeds_ma_ba_only if include_bachelors else paths.ipeds_ma_only
+    if include_bachelors and ipeds_path is None:
+        print(
+            "[warn] include_bachelors=true but paths.ipeds_ma_ba_only is not set; "
+            "falling back to paths.ipeds_ma_only."
+        )
+        ipeds_path = paths.ipeds_ma_only
+    need_ipeds_ma_ba = include_bachelors or (
+        opt_shifts
+        and opt_shifts_normalization == "ipeds_graduates"
+        and opt_shift_degree_scope in {"bachelors_masters", "bachelors"}
+    )
+    if need_ipeds_ma_ba and paths.ipeds_ma_ba_only is None:
+        print(
+            "[warn] paths.ipeds_ma_ba_only is not set; "
+            "falling back to masters-only IPEDS where needed."
+        )
+    required_paths: dict[str, Path] = {
+        "transitions": paths.transitions,
+        "headcount": paths.headcount,
+        "revelio_ipeds_foia_inst_crosswalk": paths.revelio_ipeds_foia_inst_crosswalk,
+        "ipeds_ma_only": paths.ipeds_ma_only,
+        "foia_raw_full": paths.foia_sevp_with_person_id,
+        "foia_raw_corrected": paths.foia_sevp_with_person_id_employment_corrected,
+        "employer_cw": paths.employer_crosswalk,
+        "preferred_rcids": paths.preferred_rcids,
+    }
+    if need_ipeds_ma_ba and paths.ipeds_ma_ba_only is not None:
+        required_paths["ipeds_ma_ba_only"] = paths.ipeds_ma_ba_only
+    if opt_shifts:
+        if paths.f1_inst_unitid_crosswalk is None:
+            raise ValueError(
+                "opt_shifts=true requires paths.f1_inst_unitid_crosswalk in config."
+            )
+        required_paths["f1_inst_unitid_crosswalk"] = paths.f1_inst_unitid_crosswalk
+
+    _check_paths(required_paths)
 
     con.sql(f"CREATE OR REPLACE TEMP VIEW revelio_transitions AS SELECT * FROM read_parquet('{_escape(paths.transitions)}')")
     con.sql(f"CREATE OR REPLACE TEMP VIEW revelio_headcount AS SELECT * FROM read_parquet('{_escape(paths.headcount)}')")
@@ -161,9 +310,24 @@ def _register_inputs(con: ddb.DuckDBPyConnection, paths: PipelinePaths) -> None:
         GROUP BY university_raw_norm
         """
     )
-    con.sql(f"CREATE OR REPLACE TEMP VIEW ipeds_raw AS SELECT * FROM read_parquet('{_escape(paths.ipeds_ma_only)}')")
+    con.sql(f"CREATE OR REPLACE TEMP VIEW ipeds_raw_ma AS SELECT * FROM read_parquet('{_escape(paths.ipeds_ma_only)}')")
+    has_ipeds_ma_ba = paths.ipeds_ma_ba_only is not None and paths.ipeds_ma_ba_only.exists()
+    if has_ipeds_ma_ba:
+        con.sql(
+            f"CREATE OR REPLACE TEMP VIEW ipeds_raw_ma_ba AS "
+            f"SELECT * FROM read_parquet('{_escape(paths.ipeds_ma_ba_only)}')"
+        )
+    else:
+        con.sql("CREATE OR REPLACE TEMP VIEW ipeds_raw_ma_ba AS SELECT * FROM ipeds_raw_ma WHERE 1=0")
+    ipeds_src_view = "ipeds_raw_ma_ba" if include_bachelors and has_ipeds_ma_ba else "ipeds_raw_ma"
+    con.sql(f"CREATE OR REPLACE TEMP VIEW ipeds_raw AS SELECT * FROM {ipeds_src_view}")
     con.sql(f"CREATE OR REPLACE TEMP VIEW foia_raw AS SELECT * FROM read_parquet('{_escape(paths.foia_sevp_with_person_id_employment_corrected)}') WHERE year_int > 2005")
     con.sql(f"CREATE OR REPLACE TEMP VIEW foia_raw_full AS SELECT * FROM read_parquet('{_escape(paths.foia_sevp_with_person_id)}') WHERE year_int > 2005")
+    if paths.f1_inst_unitid_crosswalk is not None and paths.f1_inst_unitid_crosswalk.exists():
+        con.sql(
+            "CREATE OR REPLACE TEMP VIEW f1_inst_unitid_cw AS "
+            f"SELECT * FROM read_parquet('{_escape(paths.f1_inst_unitid_crosswalk)}')"
+        )
     con.sql(f"CREATE OR REPLACE TEMP VIEW preferred_rcids AS SELECT DISTINCT preferred_rcid FROM read_parquet('{_escape(paths.preferred_rcids)}')")
     con.sql(
         f"""
@@ -324,6 +488,332 @@ def _create_ipeds_growth_view(
                 {g_intl_expr} AS g_kt_intl
             FROM with_lags
             WHERE g_kt IS NOT NULL
+        ),
+        raw_out AS (
+            SELECT * FROM base_out
+        )
+        {demean_cte}
+        SELECT
+            k,
+            t,
+            g_kt,
+            g_kt_all,
+            g_kt_intl
+        FROM {final_view}
+        """
+    )
+    return view_name
+
+
+def _create_opt_shift_growth_view(
+    con: ddb.DuckDBPyConnection,
+    use_changes: bool = False,
+    demean_by_school: bool = False,
+    degree_scope: str = "bachelors_masters",
+    normalization: str | None = None,
+    normalize_by_graduates: bool = True,
+    exclude_unitids: list[str] | None = None,
+) -> str:
+    """
+    Build g_kt from FOIA OPT usage by school-year.
+    Normalization modes:
+      - ipeds_graduates: opt_users / IPEDS graduates
+      - foia_students: opt_users / FOIA students
+      - none: raw opt_users
+    t is the FOIA program end year.
+    """
+    view_name = "ipeds_unit_growth"
+    degree_scope = _normalize_degree_scope(degree_scope)
+    if normalization is None:
+        normalization = "ipeds_graduates" if normalize_by_graduates else "none"
+    normalization = _normalize_opt_shift_normalization(normalization)
+    print(
+        "[info] Building OPT-based shifts with "
+        f"degree_scope={degree_scope}; "
+        f"normalization={normalization}."
+    )
+
+    end_col = _first_present_column(
+        con,
+        "foia_raw_full",
+        ["program_end_date", "program_completion_date", "program_end_dt", "program_complete_date"],
+    )
+    if end_col is None:
+        raise ValueError(
+            "opt_shifts=true requires a FOIA program end date column "
+            "(program_end_date/program_completion_date/program_end_dt/program_complete_date)."
+        )
+    end_expr = _date_parse_sql(end_col)
+
+    opt_date_cols = [
+        col
+        for col in (
+            "opt_employer_start_date",
+            "opt_authorization_start_date",
+            "authorization_start_date",
+        )
+        if _has_column(con, "foia_raw_full", col)
+    ]
+    if opt_date_cols:
+        parsed_opt_dates = ", ".join(_date_parse_sql(col) for col in opt_date_cols)
+        opt_activity_expr = f"CASE WHEN COALESCE({parsed_opt_dates}) IS NOT NULL THEN 1 ELSE 0 END"
+    else:
+        opt_activity_expr = "0"
+        print(
+            "[warn] Could not find OPT date columns in FOIA input. "
+            "OPT-shift numerator will evaluate to zero."
+        )
+
+    degree_pred = _degree_predicate_for_scope(con, view="foia_raw_full", degree_scope=degree_scope)
+    degree_clause = ""
+    if degree_pred:
+        degree_clause = f"AND ({degree_pred})"
+    else:
+        print(
+            "[warn] Could not infer FOIA degree column for opt_shifts; "
+            "using all degree levels in FOIA numerator."
+        )
+
+    exclude_unitids = exclude_unitids or []
+    exclude_foia_clause = ""
+    exclude_ipeds_clause = ""
+    if exclude_unitids:
+        in_list = _sql_in_list(exclude_unitids)
+        exclude_foia_clause = f"AND cw.k NOT IN {in_list}"
+        exclude_ipeds_clause = f"AND CAST(unitid AS VARCHAR) NOT IN {in_list}"
+
+    post_opt_counts_ctes = """
+        school_years AS (
+            SELECT k, t FROM opt_counts
+        ),
+    """
+    filled_metric_select = """
+                CAST(NULL AS DOUBLE) AS total_graduates,
+                COALESCE(o.opt_students, 0) AS opt_metric_kt
+    """
+    filled_join_clause = """
+            LEFT JOIN opt_counts AS o
+              ON e.k = o.k
+             AND e.t = o.t
+    """
+    if normalization == "ipeds_graduates":
+        if degree_scope == "masters":
+            denom_expr = "COALESCE(ma.total_graduates_ma, 0)"
+        elif degree_scope == "bachelors":
+            denom_expr = (
+                "GREATEST(COALESCE(maba.total_graduates_maba, 0) "
+                "- COALESCE(ma.total_graduates_ma, 0), 0)"
+            )
+        else:
+            denom_expr = "COALESCE(maba.total_graduates_maba, COALESCE(ma.total_graduates_ma, 0))"
+        post_opt_counts_ctes = f"""
+        ipeds_ma AS (
+            SELECT
+                CAST(CAST(unitid AS BIGINT) AS VARCHAR) AS k,
+                CAST(year AS INTEGER) AS t,
+                SUM(COALESCE(CAST(ctotalt AS DOUBLE), 0)) AS total_graduates_ma
+            FROM ipeds_raw_ma
+            WHERE unitid IS NOT NULL
+              AND year IS NOT NULL
+              {exclude_ipeds_clause}
+            GROUP BY 1, 2
+        ),
+        ipeds_maba AS (
+            SELECT
+                CAST(CAST(unitid AS BIGINT) AS VARCHAR) AS k,
+                CAST(year AS INTEGER) AS t,
+                SUM(COALESCE(CAST(ctotalt AS DOUBLE), 0)) AS total_graduates_maba
+            FROM ipeds_raw_ma_ba
+            WHERE unitid IS NOT NULL
+              AND year IS NOT NULL
+              {exclude_ipeds_clause}
+            GROUP BY 1, 2
+        ),
+        denominator AS (
+            SELECT
+                COALESCE(ma.k, maba.k) AS k,
+                COALESCE(ma.t, maba.t) AS t,
+                {denom_expr} AS total_graduates
+            FROM ipeds_ma AS ma
+            FULL OUTER JOIN ipeds_maba AS maba
+              ON ma.k = maba.k
+             AND ma.t = maba.t
+        ),
+        school_years AS (
+            SELECT k, t FROM denominator
+            UNION
+            SELECT k, t FROM opt_counts
+        ),
+        """
+        filled_metric_select = """
+                d.total_graduates AS total_graduates,
+                CASE
+                    WHEN d.total_graduates > 0
+                    THEN COALESCE(o.opt_students, 0) / d.total_graduates
+                    ELSE 0
+                END AS opt_metric_kt
+        """
+        filled_join_clause = """
+            LEFT JOIN opt_counts AS o
+              ON e.k = o.k
+             AND e.t = o.t
+            JOIN denominator AS d
+              ON e.k = d.k
+             AND e.t = d.t
+        """
+    elif normalization == "foia_students":
+        post_opt_counts_ctes = """
+        denominator AS (
+            SELECT
+                k,
+                t,
+                COUNT(DISTINCT person_id) AS total_foia_students
+            FROM foia_school_year_person
+            GROUP BY 1, 2
+        ),
+        school_years AS (
+            SELECT k, t FROM denominator
+            UNION
+            SELECT k, t FROM opt_counts
+        ),
+        """
+        filled_metric_select = """
+                d.total_foia_students AS total_graduates,
+                CASE
+                    WHEN d.total_foia_students > 0
+                    THEN COALESCE(o.opt_students, 0) / d.total_foia_students
+                    ELSE 0
+                END AS opt_metric_kt
+        """
+        filled_join_clause = """
+            LEFT JOIN opt_counts AS o
+              ON e.k = o.k
+             AND e.t = o.t
+            JOIN denominator AS d
+              ON e.k = d.k
+             AND e.t = d.t
+        """
+
+    g_expr = "opt_metric_kt"
+    g_all_expr = "opt_metric_kt"
+    g_intl_expr = "opt_metric_kt"
+    if use_changes:
+        g_expr = "ASINH(opt_metric_kt) - ASINH(opt_metric_kt_lag)"
+        g_all_expr = g_expr
+        g_intl_expr = g_expr
+    demean_cte = ""
+    final_view = "raw_out"
+    if demean_by_school:
+        demean_cte = """
+        ,
+        demeaned AS (
+            SELECT
+                k,
+                t,
+                g_kt - AVG(g_kt) OVER (PARTITION BY k) AS g_kt,
+                g_kt_all - AVG(g_kt_all) OVER (PARTITION BY k) AS g_kt_all,
+                g_kt_intl - AVG(g_kt_intl) OVER (PARTITION BY k) AS g_kt_intl
+            FROM raw_out
+        )
+        """
+        final_view = "demeaned"
+
+    con.sql(
+        f"""
+        CREATE OR REPLACE TEMP VIEW {view_name} AS
+        WITH cw AS (
+            SELECT
+                TRIM(CAST(school_name AS VARCHAR)) AS school_name_raw,
+                COALESCE(TRIM(CAST(f1_city_clean AS VARCHAR)), '') AS f1_city_clean,
+                COALESCE(TRIM(CAST(f1_state_clean AS VARCHAR)), '') AS f1_state_clean,
+                COALESCE(TRIM(CAST(f1_zip_clean AS VARCHAR)), '') AS f1_zip_clean,
+                CAST(CAST(MIN(UNITID) AS BIGINT) AS VARCHAR) AS k
+            FROM f1_inst_unitid_cw
+            WHERE UNITID IS NOT NULL
+              AND school_name IS NOT NULL
+            GROUP BY 1, 2, 3, 4
+        ),
+        foia_students AS (
+            SELECT
+                person_id,
+                CAST(EXTRACT(YEAR FROM {end_expr}) AS INTEGER) AS t,
+                TRIM(CAST(school_name AS VARCHAR)) AS school_name_raw,
+                COALESCE({_sql_normalize('campus_city')}, '') AS f1_city_clean,
+                COALESCE({_sql_state_name_to_abbr('campus_state')}, '') AS f1_state_clean,
+                COALESCE({_sql_clean_zip('campus_zip_code')}, '') AS f1_zip_clean,
+                {opt_activity_expr} AS has_opt
+            FROM foia_raw_full
+            WHERE person_id IS NOT NULL
+              AND school_name IS NOT NULL
+              AND {end_expr} IS NOT NULL
+              {degree_clause}
+        ),
+        foia_school_year_person AS (
+            SELECT
+                cw.k,
+                f.t,
+                f.person_id,
+                MAX(f.has_opt) AS ever_opt
+            FROM foia_students AS f
+            JOIN cw
+              ON f.school_name_raw = cw.school_name_raw
+             AND f.f1_city_clean = cw.f1_city_clean
+             AND f.f1_state_clean = cw.f1_state_clean
+             AND f.f1_zip_clean = cw.f1_zip_clean
+            WHERE f.t IS NOT NULL
+              {exclude_foia_clause}
+            GROUP BY cw.k, f.t, f.person_id
+        ),
+        opt_counts AS (
+            SELECT
+                k,
+                t,
+                COUNT(DISTINCT CASE WHEN ever_opt = 1 THEN person_id END) AS opt_students
+            FROM foia_school_year_person
+            GROUP BY k, t
+        ),
+        {post_opt_counts_ctes}
+        bounds AS (
+            SELECT
+                k,
+                MIN(t) AS min_t,
+                MAX(t) AS max_t
+            FROM school_years
+            GROUP BY k
+        ),
+        expanded AS (
+            SELECT
+                b.k,
+                gs.year AS t
+            FROM bounds b,
+            LATERAL generate_series(b.min_t, b.max_t) AS gs(year)
+        ),
+        filled AS (
+            SELECT
+                e.k,
+                e.t,
+                COALESCE(o.opt_students, 0) AS opt_students,
+                {filled_metric_select}
+            FROM expanded AS e
+            {filled_join_clause}
+        ),
+        with_lags AS (
+            SELECT
+                k,
+                t,
+                opt_metric_kt,
+                LAG(opt_metric_kt) OVER (PARTITION BY k ORDER BY t) AS opt_metric_kt_lag
+            FROM filled
+        ),
+        base_out AS (
+            SELECT
+                k,
+                t,
+                {g_expr} AS g_kt,
+                {g_all_expr} AS g_kt_all,
+                {g_intl_expr} AS g_kt_intl
+            FROM with_lags
+            WHERE opt_metric_kt IS NOT NULL
         ),
         raw_out AS (
             SELECT * FROM base_out
@@ -658,13 +1148,19 @@ def _create_opt_counts(
     outcome_lag_end: int,
     use_changes: bool = False,
     include_non_masters: bool = False,
+    include_bachelors: bool = False,
 ) -> str:
     # auth_start = f"COALESCE({_date_parse_sql('authorization_start_date')},{_date_parse_sql('opt_authorization_start_date')})"
-    masters_clause = ""
+    degree_clause = ""
+    if include_bachelors and not include_non_masters:
+        print(
+            "[info] OPT counts are filtered to Master's + Bachelor's records. "
+            "Output column names remain masters_opt_hires* for backward compatibility."
+        )
     if not include_non_masters:
-        predicate = _masters_predicate(con, view="foia_raw")
+        predicate = _degree_predicate(con, view="foia_raw", include_bachelors=include_bachelors)
         if predicate:
-            masters_clause = f"AND {predicate}"
+            degree_clause = f"AND {predicate}"
 
     con.sql(
         f"""
@@ -677,7 +1173,7 @@ def _create_opt_counts(
                 MIN(EXTRACT(YEAR FROM program_end_date)) AS gradyear,
                 MAX(CASE WHEN opt_employer_start_date >= program_end_date THEN 1 ELSE 0 END) AS valid_opt_hire
             FROM foia_raw_full
-            WHERE employer_name IS NOT NULL {masters_clause}
+            WHERE employer_name IS NOT NULL {degree_clause}
             GROUP BY person_id, employer_name, employer_city, employer_state, employer_zip_code
         """
     )
@@ -718,7 +1214,7 @@ def _create_opt_counts(
                 ) AS spell_start_dt,
                 original_row_num
             FROM foia_raw
-            WHERE employer_name IS NOT NULL {masters_clause}
+            WHERE employer_name IS NOT NULL {degree_clause}
         ),
         ranked AS (
             SELECT
@@ -772,7 +1268,7 @@ def _create_opt_counts(
     #         {auth_start} AS auth_start
     #     FROM foia_raw
     #     WHERE employer_name IS NOT NULL AND EXTRACT(YEAR FROM {auth_start}) = year
-    #       {masters_clause}
+    #       {degree_clause}
     #     """
     # )
     
@@ -1118,26 +1614,189 @@ def _create_analysis_panel(
             instr.z_ct_full,
             instr.z_ct_all_full,
             instr.z_ct_intl_full,
-            instr.n_universities
+            instr.n_universities,
+            st.company_state
         FROM (SELECT * FROM outcomes_wide WHERE t > 2005 AND t < 2025) AS o
         LEFT JOIN (SELECT * FROM opt_new_hires WHERE t > 2005 AND t < 2025) AS x USING (c, t)
         LEFT JOIN (SELECT * FROM company_instrument_panel WHERE t > 2005 AND t < 2025) AS instr USING (c, t)
+        LEFT JOIN (
+            WITH state_counts AS (
+                SELECT
+                    CAST(preferred_rcid AS INTEGER) AS c,
+                    UPPER(TRIM(CAST(f1_state_clean AS VARCHAR))) AS company_state,
+                    COUNT(*) AS n_rows
+                FROM employer_crosswalk
+                WHERE preferred_rcid IS NOT NULL
+                  AND f1_state_clean IS NOT NULL
+                  AND TRIM(CAST(f1_state_clean AS VARCHAR)) <> ''
+                GROUP BY 1, 2
+            ),
+            ranked AS (
+                SELECT
+                    c,
+                    company_state,
+                    ROW_NUMBER() OVER (PARTITION BY c ORDER BY n_rows DESC, company_state ASC) AS rn
+                FROM state_counts
+            )
+            SELECT c, company_state
+            FROM ranked
+            WHERE rn = 1
+        ) AS st USING (c)
         WHERE o.t IS NOT NULL
         """
     )
     return "analysis_panel"
 
 
-def run_diagnostics(con: ddb.DuckDBPyConnection, plot: bool = True) -> None:
+def _plot_f1_yearly_descriptives(
+    con: ddb.DuckDBPyConnection,
+    *,
+    plot: bool = True,
+    include_non_masters: bool = False,
+    include_bachelors: bool = False,
+) -> None:
+    # Match the degree filter used in treatment construction.
+    degree_clause = ""
+    if not include_non_masters:
+        degree_pred = _degree_predicate(con, view="foia_raw", include_bachelors=include_bachelors)
+        if degree_pred:
+            degree_clause = f"AND ({degree_pred})"
+
+    hires_by_year = con.sql(
+        """
+        SELECT
+            CAST(t AS INTEGER) AS year,
+            SUM(masters_opt_hires_correction_aware) AS total_opt_hires,
+            AVG(masters_opt_hires_correction_aware) AS avg_opt_hires_per_firm,
+            COUNT(DISTINCT c) AS n_hiring_firms
+        FROM opt_new_hires_correction_aware
+        GROUP BY t
+        ORDER BY t
+        """
+    ).df()
+
+    start_col = _first_present_column(
+        con,
+        "foia_raw",
+        ["program_start_date", "program_begin_date", "program_begin_dt", "program_start_dt"],
+    )
+    tuition_col = _first_present_column(
+        con,
+        "foia_raw",
+        ["tuition__fees", "tuition_fees", "tuition", "tuition_fees_usd"],
+    )
+
+    tuition_by_start_year = None
+    if start_col and tuition_col:
+        start_expr = _date_parse_sql(start_col)
+        tuition_by_start_year = con.sql(
+            f"""
+            SELECT
+                CAST(EXTRACT(YEAR FROM {start_expr}) AS INTEGER) AS program_start_year,
+                AVG(TRY_CAST({tuition_col} AS DOUBLE)) AS avg_tuition,
+                COUNT(*) AS n_records
+            FROM foia_raw
+            WHERE {start_expr} IS NOT NULL
+              AND TRY_CAST({tuition_col} AS DOUBLE) IS NOT NULL
+              {degree_clause}
+            GROUP BY 1
+            ORDER BY 1
+            """
+        ).df()
+    else:
+        missing = []
+        if not start_col:
+            missing.append("program_start_date/program_begin_date")
+        if not tuition_col:
+            missing.append("tuition")
+        print(
+            "[warn] Skipping tuition-by-program-start-year plot; missing column(s): "
+            + ", ".join(missing)
+        )
+
+    print("\n[f1_opt_hires_by_year]")
+    print(hires_by_year)
+    if tuition_by_start_year is not None:
+        print("\n[f1_avg_tuition_by_program_start_year]")
+        print(tuition_by_start_year)
+
+    if not plot:
+        return
+
+    import matplotlib.pyplot as plt
+
+    if not hires_by_year.empty:
+        hires_plot = hires_by_year.sort_values("year")
+
+        plt.figure(figsize=(9, 4.5))
+        plt.plot(hires_plot["year"], hires_plot["total_opt_hires"], marker="o", color="tab:blue")
+        plt.xlabel("Year")
+        plt.ylabel("Total OPT hires")
+        plt.title("F1 data: total OPT hires by year")
+        plt.tight_layout()
+        plt.show()
+
+        plt.figure(figsize=(9, 4.5))
+        plt.plot(hires_plot["year"], hires_plot["avg_opt_hires_per_firm"], marker="o", color="tab:orange")
+        plt.xlabel("Year")
+        plt.ylabel("Avg OPT hires per hiring firm-year")
+        plt.title("F1 data: average OPT hires per firm by year")
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("[warn] No rows in opt_new_hires_correction_aware; skipping OPT-hire year plots.")
+
+    if tuition_by_start_year is not None and not tuition_by_start_year.empty:
+        tuition_plot = tuition_by_start_year.sort_values("program_start_year")
+        plt.figure(figsize=(9, 4.5))
+        plt.plot(tuition_plot["program_start_year"], tuition_plot["avg_tuition"], marker="o", color="tab:green")
+        plt.xlabel("Program start year")
+        plt.ylabel("Average tuition")
+        plt.title("F1 data: average tuition by program start year")
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("[warn] No tuition rows after filters; skipping tuition-by-start-year plot.")
+
+
+def run_diagnostics(
+    con: ddb.DuckDBPyConnection,
+    plot: bool = True,
+    include_non_masters: bool = False,
+    include_bachelors: bool = False,
+    opt_shifts: bool = False,
+    opt_shifts_degree_scope: str = "bachelors_masters",
+    opt_shifts_normalization: str | None = None,
+    opt_shifts_normalize_by_graduates: bool = True,
+) -> None:
     """
     Run some basic diagnostics on the built outputs.
     """
+    opt_shifts_degree_scope = _normalize_degree_scope(opt_shifts_degree_scope)
+    if opt_shifts_normalization is None:
+        opt_shifts_normalization = (
+            "ipeds_graduates" if opt_shifts_normalize_by_graduates else "none"
+        )
+    opt_shifts_normalization = _normalize_opt_shift_normalization(opt_shifts_normalization)
+    print(
+        "[diagnostics] shift_source="
+        f"{'foia_opt' if opt_shifts else 'ipeds'}; "
+        f"opt_shifts_degree_scope={opt_shifts_degree_scope}; "
+        f"opt_shifts_normalization={opt_shifts_normalization}; "
+        f"include_bachelors={include_bachelors}; "
+        f"include_non_masters={include_non_masters}"
+    )
 
     # Shifts
     print("Running diagnostics on shifts...")
     print(f"---Number of unique universities: {con.sql('SELECT COUNT(DISTINCT k) FROM ipeds_unit_growth').fetchone()[0]}")
     print(f"---Year range: {con.sql('SELECT MIN(t), MAX(t) FROM ipeds_unit_growth').fetchone()}")
     print(f"---Average shifts (g_kt, g_kt_all, g_kt_intl) across all k in 2015: {con.sql('SELECT AVG(g_kt), AVG(g_kt_all), AVG(g_kt_intl) FROM ipeds_unit_growth WHERE t = 2015').fetchone()}")
+    if opt_shifts:
+        print(
+            "---Share of school-years where g_kt = g_kt_all = g_kt_intl: "
+            f"{con.sql('SELECT AVG(CASE WHEN g_kt = g_kt_all AND g_kt = g_kt_intl THEN 1.0 ELSE 0.0 END) FROM ipeds_unit_growth').fetchone()[0]}"
+        )
     
     if plot:
         sns.histplot(con.sql('SELECT g_kt AS "g_kt in 2015" FROM ipeds_unit_growth WHERE t = 2015 AND g_kt < 1000').df()['g_kt in 2015'], bins=50)
@@ -1201,6 +1860,13 @@ def run_diagnostics(con: ddb.DuckDBPyConnection, plot: bool = True) -> None:
         plt.figure()
         sns.regplot(x='z_ct_intl', y='valid_masters_opt_hires', data=fs, lowess=True, scatter_kws={'s':10}, line_kws={'color':'red'})
 
+    _plot_f1_yearly_descriptives(
+        con,
+        plot=plot,
+        include_non_masters=include_non_masters,
+        include_bachelors=include_bachelors,
+    )
+
 def build_pipeline(
     paths: PipelinePaths,
     *,
@@ -1213,20 +1879,52 @@ def build_pipeline(
     use_changes: bool = False,
     use_log_y: bool = False,
     include_non_masters: bool = False,
+    include_bachelors: bool = False,
+    opt_shifts: bool = False,
+    opt_shifts_degree_scope: str = "bachelors_masters",
+    opt_shifts_normalization: str | None = None,
+    opt_shifts_normalize_by_graduates: bool = True,
     exclude_unitids: list[str] | None = None,
 ) -> None:
     con = ddb.connect()
-    _register_inputs(con, paths)
+    opt_shifts_degree_scope = _normalize_degree_scope(opt_shifts_degree_scope)
+    if opt_shifts_normalization is None:
+        opt_shifts_normalization = (
+            "ipeds_graduates" if opt_shifts_normalize_by_graduates else "none"
+        )
+    opt_shifts_normalization = _normalize_opt_shift_normalization(opt_shifts_normalization)
+    _register_inputs(
+        con,
+        paths,
+        include_bachelors=include_bachelors,
+        opt_shifts=opt_shifts,
+        opt_shift_degree_scope=opt_shifts_degree_scope,
+        opt_shifts_normalization=opt_shifts_normalization,
+        opt_shifts_normalize_by_graduates=opt_shifts_normalize_by_graduates,
+    )
 
     if use_changes and use_log_y:
         raise ValueError("use_changes and use_log_y are mutually exclusive.")
+    if include_non_masters and include_bachelors:
+        print("[info] include_non_masters=true takes precedence; include_bachelors flag is ignored.")
 
-    growth_view = _create_ipeds_growth_view(
-        con,
-        use_changes=use_changes,
-        demean_by_school=use_log_y,
-        exclude_unitids=exclude_unitids,
-    )
+    if opt_shifts:
+        growth_view = _create_opt_shift_growth_view(
+            con,
+            use_changes=use_changes,
+            demean_by_school=use_log_y,
+            degree_scope=opt_shifts_degree_scope,
+            normalization=opt_shifts_normalization,
+            normalize_by_graduates=opt_shifts_normalize_by_graduates,
+            exclude_unitids=exclude_unitids,
+        )
+    else:
+        growth_view = _create_ipeds_growth_view(
+            con,
+            use_changes=use_changes,
+            demean_by_school=use_log_y,
+            exclude_unitids=exclude_unitids,
+        )
     shares_view = _create_transition_share_view(con, share_base_year, exclude_unitids=exclude_unitids)
     _create_instrument_views(con, shares_view, growth_view)
     if outcome_lag_end < outcome_lag_start:
@@ -1238,6 +1936,7 @@ def build_pipeline(
         outcome_lag_end=outcome_lag_end,
         use_changes=use_changes,
         include_non_masters=include_non_masters,
+        include_bachelors=include_bachelors,
     )
     _create_analysis_panel(con, outcome_lag_start, outcome_lag_end, use_log_y=use_log_y)
 
@@ -1249,10 +1948,22 @@ def build_pipeline(
     _write_view(con, "company_instrument_panel", paths.instrument_panel_out)
     _write_view(con, "opt_new_hires", paths.treatment_out)
     _write_view(con, "outcomes_long", paths.outcomes_out)
+    # Keep default output behavior; optionally also write to a dedicated MA+BA panel path.
     _write_view(con, "analysis_panel", paths.analysis_panel_out)
+    if include_bachelors and paths.analysis_panel_out_ma_ba is not None:
+        _write_view(con, "analysis_panel", paths.analysis_panel_out_ma_ba)
     
     if verbose:
-        run_diagnostics(con, plot=plot_diagnostics)
+        run_diagnostics(
+            con,
+            plot=plot_diagnostics,
+            include_non_masters=include_non_masters,
+            include_bachelors=include_bachelors,
+            opt_shifts=opt_shifts,
+            opt_shifts_degree_scope=opt_shifts_degree_scope,
+            opt_shifts_normalization=opt_shifts_normalization,
+            opt_shifts_normalize_by_graduates=opt_shifts_normalize_by_graduates,
+        )
         
 
 
@@ -1295,6 +2006,12 @@ def _parse_args(args: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Use all FOIA records (skip master's-only filter).",
     )
     parser.add_argument(
+        "--include-bachelors",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use Master's + Bachelor's records (instead of Master's-only) in IPEDS/FOIA filters.",
+    )
+    parser.add_argument(
         "--no-write",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -1313,10 +2030,63 @@ def _parse_args(args: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Transform outcomes with inverse hyperbolic sine: y=asinh(y).",
     )
     parser.add_argument(
+        "--opt-shifts",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Build g_kt from FOIA OPT usage.",
+    )
+    parser.add_argument(
+        "--opt-shifts-normalize-by-graduates",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "When --opt-shifts is enabled, normalize school-year OPT-user counts "
+            "by IPEDS graduates."
+        ),
+    )
+    parser.add_argument(
+        "--opt-shifts-normalization",
+        type=str,
+        default=None,
+        help=(
+            "Normalization mode when --opt-shifts is enabled. "
+            "Options: ipeds_graduates (default), foia_students, none."
+        ),
+    )
+    parser.add_argument(
+        "--opt-shifts-degree-scope",
+        type=str,
+        default=None,
+        help=(
+            "Degree scope for FOIA/IPEDS when --opt-shifts is enabled. "
+            "Options: bachelors_masters (default), bachelors, masters."
+        ),
+    )
+    parser.add_argument(
         "--exclude-unitids",
         default="",
         help="Comma-separated UNITIDs to exclude from both growth and transition shares.",
     )
+    if args is None:
+        # In IPython/Jupyter, sys.argv often contains kernel args like "-f ...".
+        # Ignore unknown args only in that interactive context so main() is usable.
+        argv0 = Path(sys.argv[0]).name.lower() if sys.argv else ""
+        has_kernel_argv = (
+            len(sys.argv) >= 3
+            and sys.argv[1] == "-f"
+            and str(sys.argv[2]).lower().endswith(".json")
+        )
+        in_ipython = (
+            "IPython" in sys.modules
+            or "ipykernel" in sys.modules
+            or "ipykernel_launcher" in argv0
+            or has_kernel_argv
+        )
+        if in_ipython:
+            parsed, unknown = parser.parse_known_args()
+            if unknown:
+                print(f"[info] Ignoring unknown IPython args: {unknown}")
+            return parsed
     return parser.parse_args(args)
 
 def main(cli_args: Optional[Iterable[str]] = None) -> None:
@@ -1333,6 +2103,11 @@ def main(cli_args: Optional[Iterable[str]] = None) -> None:
         if args.include_non_masters is not None
         else pipeline_cfg.get("include_non_masters", False)
     )
+    include_bachelors = (
+        args.include_bachelors
+        if args.include_bachelors is not None
+        else pipeline_cfg.get("include_bachelors", False)
+    )
     save_outputs = (
         not args.no_write
         if args.no_write is not None
@@ -1340,6 +2115,30 @@ def main(cli_args: Optional[Iterable[str]] = None) -> None:
     )
     use_changes = args.use_changes if args.use_changes is not None else pipeline_cfg.get("use_changes", False)
     use_log_y = args.use_log_y if args.use_log_y is not None else pipeline_cfg.get("use_log_y", pipeline_cfg.get("use_log_rate", False))
+    opt_shifts = args.opt_shifts if args.opt_shifts is not None else pipeline_cfg.get("opt_shifts", False)
+    opt_shifts_degree_scope = _normalize_degree_scope(
+        args.opt_shifts_degree_scope
+        if args.opt_shifts_degree_scope is not None
+        else pipeline_cfg.get("opt_shifts_degree_scope", "bachelors_masters")
+    )
+    opt_shifts_normalize_by_graduates = (
+        args.opt_shifts_normalize_by_graduates
+        if args.opt_shifts_normalize_by_graduates is not None
+        else pipeline_cfg.get("opt_shifts_normalize_by_graduates", True)
+    )
+    opt_shifts_normalization_raw = (
+        args.opt_shifts_normalization
+        if args.opt_shifts_normalization is not None
+        else pipeline_cfg.get("opt_shifts_normalization")
+    )
+    if opt_shifts_normalization_raw is None:
+        opt_shifts_normalization = (
+            "ipeds_graduates" if opt_shifts_normalize_by_graduates else "none"
+        )
+    else:
+        opt_shifts_normalization = _normalize_opt_shift_normalization(
+            opt_shifts_normalization_raw
+        )
     exclude_unitids = _parse_unitids(args.exclude_unitids) if args.exclude_unitids else pipeline_cfg.get("exclude_unitids", [])
     if args.outcome_lag is not None:
         outcome_lag_start = args.outcome_lag
@@ -1353,59 +2152,20 @@ def main(cli_args: Optional[Iterable[str]] = None) -> None:
         outcome_lag_end=outcome_lag_end,
         share_base_year=share_base_year,
         save_outputs=save_outputs,
-        verbose=pipeline_cfg.get("verbose", True),
+        verbose = True,
+        #verbose=pipeline_cfg.get("verbose", True),
         plot_diagnostics=pipeline_cfg.get("plot_diagnostics", True),
         use_changes=use_changes,
         use_log_y=use_log_y,
         include_non_masters=include_non_masters,
+        include_bachelors=include_bachelors,
+        opt_shifts=opt_shifts,
+        opt_shifts_degree_scope=opt_shifts_degree_scope,
+        opt_shifts_normalization=opt_shifts_normalization,
+        opt_shifts_normalize_by_graduates=opt_shifts_normalize_by_graduates,
         exclude_unitids=exclude_unitids,
     )
 
 
-# if __name__ == "__main__":
-#     main()
-
-# TEMP -- ipython
-cfg = load_config(DEFAULT_CONFIG_PATH)
-paths = _resolve_pipeline_paths(cfg)
-
-con = ddb.connect()
-_register_inputs(con, paths)
-
-use_changes = False
-use_log_y = False
-include_non_masters = False
-exclude_unitids = None
-share_base_year = 2010
-outcome_lag_start = -3
-outcome_lag_end = 6
-
-growth_view = _create_ipeds_growth_view(
-    con,
-    use_changes=use_changes,
-    demean_by_school=use_log_y,
-    exclude_unitids=exclude_unitids,
-)
-
-shares_view = _create_transition_share_view(con, share_base_year, exclude_unitids=exclude_unitids)
-_create_instrument_views(con, shares_view, growth_view)
-if outcome_lag_end < outcome_lag_start:
-    raise ValueError("outcome_lag_end must be >= outcome_lag_start.")
-_create_outcome_views(con, outcome_lag_start, outcome_lag_end, use_changes=use_changes)
-_create_opt_counts(
-    con,
-    outcome_lag_start=outcome_lag_start,
-    outcome_lag_end=outcome_lag_end,
-    use_changes=use_changes,
-    include_non_masters=include_non_masters,
-)
-_create_analysis_panel(con, outcome_lag_start, outcome_lag_end, use_log_y=use_log_y)
-
-
-_write_view(con, "company_instrument_components", paths.instrument_components_out)
-_write_view(con, "company_instrument_panel", paths.instrument_panel_out)
-_write_view(con, "opt_new_hires", paths.treatment_out)
-_write_view(con, "outcomes_long", paths.outcomes_out)
-_write_view(con, "analysis_panel", paths.analysis_panel_out)
-
-#run_diagnostics(con, plot=True)
+if __name__ == "__main__":
+    main()
