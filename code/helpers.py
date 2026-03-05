@@ -264,19 +264,23 @@ def get_est_yob():
     return str_out
 
 # given table with list of some position/education type thing with start and enddate, returns sql string long on year x position for year t in (t_ref + t0, t_ref + t1) if t falls between startyr and endyr EXCLUDE({','.join([f"x.{joinid.strip()}, time.{joinid.strip()}" for joinid in joinids.split(',')])}),  
-def long_by_year(tab, t0, t1, t_ref, enddatenull, startdatecol = 'startdate', enddatecol = 'enddate', joinids = 'user_id'):
+def long_by_year(tab, t0, t1, t_ref, enddatenull, startdatecol = 'startdate', enddatecol = 'enddate', joinids = 'user_id', distinct_ids_tab = None):
+    # When distinct_ids_tab is provided, use it for the time-grid CROSS JOIN instead
+    # of tab itself.  This avoids scanning a large event table just to get distinct
+    # (foia_indiv_id, user_id) pairs, which can be read from the smaller merge table.
+    ids_src = distinct_ids_tab if distinct_ids_tab is not None else tab
 
     str_out = f"""
         SELECT {', '.join([f"CASE WHEN time.{joinid.strip()} IS NULL THEN x.{joinid.strip()} ELSE time.{joinid.strip()} END AS {joinid.strip()}" for joinid in joinids.split(',')])}, *,
         -- variable for fraction of year covered by position
             (LEAST(({t_ref} + time.t || '-12-31')::DATE, {enddatecol}::DATE) - GREATEST(({t_ref} + time.t || '-01-01')::DATE, {startdatecol}::DATE) + 1)/(({t_ref} + time.t || '-12-31')::DATE - ({t_ref} + time.t || '-01-01')::DATE + 1)
             AS frac_t
-        FROM (SELECT generate_series AS t, {joinids} FROM generate_series({t0}, {t1}) CROSS JOIN (SELECT {joinids} FROM {tab} GROUP BY {joinids})) AS time
+        FROM (SELECT generate_series AS t, {joinids} FROM generate_series({t0}, {t1}) CROSS JOIN (SELECT {joinids} FROM {ids_src} GROUP BY {joinids})) AS time
         FULL OUTER JOIN
         (SELECT *,
-            SUBSTRING({startdatecol}, 1, 4)::INT AS startyr, 
+            SUBSTRING({startdatecol}, 1, 4)::INT AS startyr,
             CASE WHEN {enddatecol} IS NULL THEN {enddatenull} ELSE SUBSTRING({enddatecol}, 1, 4)::INT END AS endyr FROM {tab}
-        ) AS x 
+        ) AS x
         ON {t_ref} + time.t BETWEEN x.startyr AND x.endyr AND {' AND '.join([f"time.{joinid.strip()} = x.{joinid.strip()}" for joinid in joinids.split(',')])}
     """
     return str_out
