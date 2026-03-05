@@ -29,11 +29,11 @@ build:
   strict_max_n_match_filt: null      # optional cap on # filtered candidates; null = no cap
 
 testing:
-  enabled: true
+  enabled: false
   sample_matches: 5
   random_seed: 0
-  firm_uid: "FOIAFIRM-3bd7ea6efa0a"
-  lottery_year: 2023
+  firm_uid: null
+  lottery_year: null
   materialize_intermediate_tables: true
   table_prefix: "imt"
 
