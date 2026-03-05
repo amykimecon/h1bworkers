@@ -77,6 +77,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
 CFG = load_config()
 PATHS = CFG.get("paths", {})
 TESTING = CFG.get("testing", {})
+BUILD_CFG = CFG.get("build", {})
 
 
 def _test_cfg(section: str) -> dict[str, Any]:
@@ -184,6 +185,9 @@ _REV_USERS_CLEAN_TEST = _test_cfg("rev_users_clean")
 REV_USERS_CLEAN_TEST = bool(_REV_USERS_CLEAN_TEST.get("enabled", False))
 REV_USERS_CLEAN_TEST_USER = float(_REV_USERS_CLEAN_TEST.get("test_user", 322249231.0))
 REV_USERS_CLEAN_RANDOM_USER_SAMPLE_N = int(_REV_USERS_CLEAN_TEST.get("random_user_sample_n", 100))
+
+
+BUILD_DUP_PROFILE_DEDUP = bool(BUILD_CFG.get("dup_profile_dedup", True))
 
 
 def choose_path(primary: str, fallback: str | None = None) -> str:

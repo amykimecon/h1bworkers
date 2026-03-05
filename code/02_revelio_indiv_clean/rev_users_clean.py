@@ -19,6 +19,19 @@ import rev_indiv_config as rcfg
 # CONSTANTS
 CUTOFF_SHARE_MULTIREG=0
 CUTOFF_N_APPS_TOT=10
+ANGLO_COUNTRIES = (
+    "United States",
+    "United Kingdom",
+    "Canada",
+    "Australia",
+    "New Zealand",
+)
+NANAT_ANGLO_PRESSURE_CUTOFF = 0.35
+NANAT_W_DEFAULT_FULL = 0.55
+NANAT_W_DEFAULT_LAST = 0.35
+NANAT_W_CROWDED_FULL = 0.30
+NANAT_W_CROWDED_LAST = 0.60
+NANAT_W_FIRST = 0.10
 
 # TOGGLE FOR TESTING
 test = rcfg.REV_USERS_CLEAN_TEST
@@ -28,6 +41,19 @@ run_tag = rcfg.RUN_TAG
 con = ddb.connect()
 t_script0 = time.time()
 print(f"Using config: {rcfg.ACTIVE_CONFIG_PATH}")
+
+
+def _configure_duckdb_runtime(connection):
+    threads = max(1, os.cpu_count() or 1)
+    connection.sql(f"PRAGMA threads={threads}")
+    connection.sql("PRAGMA preserve_insertion_order=false")
+    tmp_dir = os.path.join(root, ".tmp", "duckdb")
+    os.makedirs(tmp_dir, exist_ok=True)
+    escaped_tmp = tmp_dir.replace("'", "''")
+    connection.sql(f"PRAGMA temp_directory='{escaped_tmp}'")
+
+
+_configure_duckdb_runtime(con)
 
 
 def _parse_role_col(col):
@@ -58,11 +84,17 @@ with open(f"{root}/data/crosswalks/subregion_dict.json", "r") as json_file:
 #title case function
 con.create_function("title", lambda x: x.title(), ['VARCHAR'], 'VARCHAR')
 
-# country crosswalk function
+# country crosswalk function (kept for any legacy callers; SQL code uses _country_cw table instead)
 con.create_function("get_std_country", lambda x: help.get_std_country(x, country_cw_dict), ['VARCHAR'], 'VARCHAR')
 
-# region crosswalk function
+# region crosswalk function (kept for any legacy callers; SQL code uses _subregion_cw table instead)
 con.create_function("get_country_subregion", lambda x: help.get_country_subregion(x, country_cw_dict, subregion_dict), ['VARCHAR'], 'VARCHAR')
+
+# Load crosswalk dicts into DuckDB tables for vectorized lookups (avoids row-by-row Python UDF calls)
+con.execute("CREATE OR REPLACE TABLE _country_cw (raw_country VARCHAR, std_country VARCHAR)")
+con.executemany("INSERT INTO _country_cw VALUES (?, ?)", list(country_cw_dict.items()))
+con.execute("CREATE OR REPLACE TABLE _subregion_cw (std_country VARCHAR, subregion VARCHAR)")
+con.executemany("INSERT INTO _subregion_cw VALUES (?, ?)", list(subregion_dict.items()))
 
 #####################################
 ## IMPORTING DATA
@@ -274,7 +306,7 @@ SELECT
     x.score_num,
     x.confidence_num,
     ROW_NUMBER() OVER (
-        PARTITION BY x.rcid
+        PARTITION BY x.rcid, x.lottery_year
         ORDER BY
             x.category_priority ASC,
             x.score_num DESC NULLS LAST,
@@ -282,11 +314,11 @@ SELECT
             x.foia_firm_uid ASC
     ) AS rcid_priority_rank
 FROM (
-    -- keep one best row per foia_firm_uid x rcid across FEIN/year variants
+    -- keep one best row per foia_firm_uid x lottery_year x rcid across FEIN variants
     SELECT
         *,
         ROW_NUMBER() OVER (
-            PARTITION BY foia_firm_uid, rcid
+            PARTITION BY foia_firm_uid, lottery_year, rcid
             ORDER BY
                 category_priority ASC,
                 score_num DESC NULLS LAST,
@@ -300,13 +332,15 @@ FROM (
 JOIN (
     SELECT
         foia_firm_uid,
+        lottery_year,
         rcid,
         MAX(CASE WHEN source = 'llm' THEN 1 ELSE 0 END) AS has_llm,
         MAX(CASE WHEN source = 'legacy_good' THEN 1 ELSE 0 END) AS has_legacy
     FROM foia_rcid_union
-    GROUP BY foia_firm_uid, rcid
+    GROUP BY foia_firm_uid, lottery_year, rcid
 ) AS s
     ON x.foia_firm_uid = s.foia_firm_uid
+   AND x.lottery_year = s.lottery_year
    AND x.rcid = s.rcid
 WHERE x.foia_rcid_best_rank = 1
 """
@@ -339,8 +373,9 @@ GROUP BY foia_firm_uid, fein_norm, lottery_year
 )
 
 ## joining raw FOIA data to LLM crosswalk with foia_firm_uid
-foia_with_ids = con.sql(
+con.sql(
 """
+CREATE OR REPLACE TEMP TABLE foia_with_ids AS
 SELECT
     a.*,
     b.foia_firm_uid
@@ -383,7 +418,6 @@ else:
 
 # Importing Institution x Country Matches
 inst_country_file = rcfg.REV_INST_COUNTRIES_PARQUET
-inst_country_file = "/home/yk0581/data/int/rev_inst_countries_with_ipeds_feb2026.parquet"
 inst_country_legacy = rcfg.REV_INST_COUNTRIES_PARQUET_LEGACY
 if os.path.exists(inst_country_file):
     print(f"Loading institution-country file: {inst_country_file}")
@@ -442,8 +476,9 @@ print('Done!')
 #####################################
 print('Defining Main Sample of H-1B Companies...')
 # IDing outsourcing/staffing companies (defining share of applications that are multiple registrations ['duplicates']; counting total number of apps)
-foia_main_samp_unfilt = con.sql(
+con.sql(
 """
+CREATE OR REPLACE TEMP TABLE foia_main_samp_unfilt AS
 SELECT
     foia_firm_uid,
     lottery_year,
@@ -469,13 +504,25 @@ GROUP BY foia_firm_uid, lottery_year
 # print(f"Preferred Sample: {foia_main_samp.df().shape[0]} ({round(100*foia_main_samp.df().shape[0]/n)}%)")
 
 # computing win rate by sample
-foia_main_samp_def = con.sql(f"SELECT *, CASE WHEN n_apps_tot <= {CUTOFF_N_APPS_TOT} AND share_multireg <= {CUTOFF_SHARE_MULTIREG} THEN 'insamp' ELSE 'outsamp' END AS sampgroup FROM foia_main_samp_unfilt")
+con.sql(
+    f"""
+    CREATE OR REPLACE TEMP TABLE foia_main_samp_def AS
+    SELECT *,
+        CASE
+            WHEN n_apps_tot <= {CUTOFF_N_APPS_TOT} AND share_multireg <= {CUTOFF_SHARE_MULTIREG}
+                THEN 'insamp'
+            ELSE 'outsamp'
+        END AS sampgroup
+    FROM foia_main_samp_unfilt
+    """
+)
 # con.sql("SELECT sampgroup, SUM(n_success)/SUM(n_apps_tot) AS total_win_rate FROM foia_main_samp_def GROUP BY sampgroup")
 
 # Union source (LLM + legacy good matches)
-# Keeps multiple rcids per foia_firm_uid.
-samp_to_rcid = con.sql(
+# Keeps multiple rcids per foia_firm_uid x lottery_year.
+con.sql(
 """
+CREATE OR REPLACE TEMP TABLE samp_to_rcid AS
 SELECT
     a.foia_firm_uid,
     a.lottery_year,
@@ -493,6 +540,7 @@ FROM (
 ) AS a
 JOIN foia_rcid_union_collapsed AS b
     ON a.foia_firm_uid = b.foia_firm_uid
+   AND TRY_CAST(a.lottery_year AS INTEGER) = TRY_CAST(b.lottery_year AS INTEGER)
 """
 )
 
@@ -524,7 +572,28 @@ if not test:
     con.sql(f"COPY samp_to_rcid TO '{rcfg.COMPANY_MERGE_SAMPLE_PARQUET}'")
 
 # selecting user ids from list of positions based on whether company in sample and start date is after 2015 (conservative bandwidth) -- TODO: declare cutoff date as constant; TODO: move startdate filter into merged_pos query, avoid pulling people who got promoted after 2015 but started working before 2015
-user_samp = con.sql("SELECT user_id FROM ((SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a JOIN (SELECT user_id, rcid FROM merged_pos WHERE country = 'United States' AND startdate >= '2015-01-01') AS b ON a.rcid = b.rcid) GROUP BY user_id")
+con.sql(
+    """
+    CREATE OR REPLACE TEMP TABLE user_samp AS
+    SELECT user_id
+    FROM (
+        (SELECT rcid FROM samp_to_rcid WHERE sampgroup = 'insamp' GROUP BY rcid) AS a
+        JOIN
+        (SELECT user_id, rcid FROM merged_pos WHERE country = 'United States' AND startdate >= '2015-01-01') AS b
+        ON a.rcid = b.rcid
+    )
+    GROUP BY user_id
+    """
+)
+con.sql(
+    """
+    CREATE OR REPLACE TEMP TABLE merged_pos_scope AS
+    SELECT p.*
+    FROM merged_pos AS p
+    JOIN user_samp AS u
+        ON p.user_id = u.user_id
+    """
+)
 print('Done!')
 print(f"Total script runtime: {round((time.time() - t_script0)/3600, 2)} hours")
 
@@ -534,46 +603,96 @@ print(f"Total script runtime: {round((time.time() - t_script0)/3600, 2)} hours")
 print('Cleaning Individual-level H-1B Data...')
 
 # identifying companies that submit 'repeat applications' for losers
-match_rep = con.sql(
+# Uses grouped counts to avoid a large row-level self-join on FOIA rows.
+con.sql(
 """
-SELECT foia_firm_uid, 
--- indicator for no losers matched over subsequent years (unless no apps at all over other years)
-    CASE WHEN MEAN(share_rep) = 0 AND MEAN(n_ly) > 1 AND COUNT(*) > 1 THEN 1 ELSE 0 END AS no_rep_emp_ind,
--- indicator for over 80 percent of losers matched over subsequent years
-    CASE WHEN MEAN(share_rep) >= 0.8 THEN 1 ELSE 0 END AS high_rep_emp_ind,
-    MEAN(share_rep) AS share_rep, MEAN(n_ly) AS n_ly, COUNT(*) AS n
-FROM (
-    SELECT a.lottery_year AS base_ly, 
-        a.foia_firm_uid AS foia_firm_uid, b.foia_firm_uid AS match_foia_firm_uid,
-        a.gender, a.ben_year_of_birth, a.country_of_nationality, a.n_ly,
-        (COUNT(match_foia_firm_uid) OVER(PARTITION BY a.foia_firm_uid, a.lottery_year))
-            /(COUNT(*) OVER(PARTITION BY a.lottery_year, a.foia_firm_uid)) AS share_rep 
-    FROM (
-        SELECT *
-        FROM (
-            SELECT *,
-                COUNT(DISTINCT lottery_year) OVER(PARTITION BY foia_firm_uid) AS n_ly
-            FROM foia_with_ids
-            WHERE foia_firm_uid IS NOT NULL
-        )
-        WHERE lottery_year::INT < 2024
-          AND status_type != 'SELECTED'
-    ) AS a 
-    LEFT JOIN (
-        SELECT * FROM foia_with_ids WHERE foia_firm_uid IS NOT NULL
-    ) AS b 
-    ON a.lottery_year::INT = b.lottery_year::INT - 1
-       AND a.gender = b.gender
-       AND a.ben_year_of_birth = b.ben_year_of_birth
-       AND a.country_of_nationality = b.country_of_nationality
-       AND a.foia_firm_uid = b.foia_firm_uid
-) GROUP BY foia_firm_uid
-""")
+CREATE OR REPLACE TEMP TABLE match_rep AS
+WITH foia_base AS (
+    SELECT *
+    FROM foia_with_ids
+    WHERE foia_firm_uid IS NOT NULL
+),
+firm_years AS (
+    SELECT
+        foia_firm_uid,
+        COUNT(DISTINCT TRY_CAST(lottery_year AS INTEGER)) AS n_ly
+    FROM foia_base
+    GROUP BY foia_firm_uid
+),
+losers_grp AS (
+    SELECT
+        foia_firm_uid,
+        TRY_CAST(lottery_year AS INTEGER) AS base_ly,
+        gender,
+        ben_year_of_birth,
+        country_of_nationality,
+        COUNT(*) AS n_losers
+    FROM foia_base
+    WHERE TRY_CAST(lottery_year AS INTEGER) < 2024
+      AND status_type != 'SELECTED'
+    GROUP BY
+        foia_firm_uid,
+        TRY_CAST(lottery_year AS INTEGER),
+        gender,
+        ben_year_of_birth,
+        country_of_nationality
+),
+next_grp AS (
+    SELECT
+        foia_firm_uid,
+        TRY_CAST(lottery_year AS INTEGER) AS next_ly,
+        gender,
+        ben_year_of_birth,
+        country_of_nationality,
+        COUNT(*) AS n_next
+    FROM foia_base
+    GROUP BY
+        foia_firm_uid,
+        TRY_CAST(lottery_year AS INTEGER),
+        gender,
+        ben_year_of_birth,
+        country_of_nationality
+),
+rep_totals AS (
+    SELECT
+        l.foia_firm_uid,
+        SUM(l.n_losers * COALESCE(n.n_next, 0))::DOUBLE AS n_rep_rows,
+        SUM(
+            l.n_losers * CASE WHEN COALESCE(n.n_next, 0) > 0 THEN n.n_next ELSE 1 END
+        )::DOUBLE AS n_total_rows
+    FROM losers_grp AS l
+    LEFT JOIN next_grp AS n
+        ON l.foia_firm_uid = n.foia_firm_uid
+       AND l.base_ly = n.next_ly - 1
+       AND l.gender = n.gender
+       AND l.ben_year_of_birth = n.ben_year_of_birth
+       AND l.country_of_nationality = n.country_of_nationality
+    GROUP BY l.foia_firm_uid
+)
+SELECT
+    r.foia_firm_uid,
+    CASE
+        WHEN r.n_rep_rows = 0 AND f.n_ly > 1 AND r.n_total_rows > 1 THEN 1
+        ELSE 0
+    END AS no_rep_emp_ind,
+    CASE
+        WHEN (r.n_rep_rows / NULLIF(r.n_total_rows, 0)) >= 0.8 THEN 1
+        ELSE 0
+    END AS high_rep_emp_ind,
+    r.n_rep_rows / NULLIF(r.n_total_rows, 0) AS share_rep,
+    f.n_ly,
+    r.n_total_rows AS n
+FROM rep_totals AS r
+LEFT JOIN firm_years AS f
+    ON r.foia_firm_uid = f.foia_firm_uid
+"""
+)
 
-foia_indiv = con.sql(
-f"""SELECT a.foia_firm_uid, a.FEIN, a.lottery_year, country, 
-        get_country_subregion(country) AS subregion, 
-        female_ind, yob, status_type, ben_multi_reg_ind, employer_name, 
+con.sql(
+f"""CREATE OR REPLACE TEMP TABLE foia_indiv AS
+SELECT a.foia_firm_uid, a.FEIN, a.lottery_year, a.country,
+        COALESCE(sub.subregion, a.country) AS subregion,
+        female_ind, yob, status_type, ben_multi_reg_ind, employer_name,
         CASE WHEN BEN_EDUCATION_CODE = 'I' THEN 'Doctor'
             WHEN BEN_EDUCATION_CODE = 'G' OR BEN_EDUCATION_CODE = 'H' THEN 'Master'
             WHEN BEN_EDUCATION_CODE = 'F' THEN 'Bachelor'
@@ -584,7 +703,7 @@ f"""SELECT a.foia_firm_uid, a.FEIN, a.lottery_year, country,
             WHEN BEN_CURRENT_CLASS = 'NA' THEN NULL
             ELSE 'Other' END AS prev_visa,
         CASE WHEN S3Q1 = 'M' THEN 1 WHEN S3Q1 = 'NA' THEN NULL ELSE 0 END AS ade_lottery, NAICS4,
-        CASE WHEN NAICS4 = '5415' THEN 'Computer Systems' 
+        CASE WHEN NAICS4 = '5415' THEN 'Computer Systems'
             WHEN NAICS4 = '5413' THEN 'Engineering/Architectural Services'
             WHEN NAICS4 = '5416' THEN 'Consulting Services'
             WHEN NAICS4 = '5417' THEN 'Scientific Research'
@@ -599,17 +718,19 @@ f"""SELECT a.foia_firm_uid, a.FEIN, a.lottery_year, country,
             WHEN NAICS2 = '51' THEN 'Other Information'
             WHEN NAICS_CODE = 'NA' OR NAICS2 = '99' THEN NULL
             ELSE 'Other' END AS industry,
-        {help.field_clean_regex_sql('BEN_PFIELD_OF_STUDY')} AS field_clean, DOT_CODE, {help.inst_clean_regex_sql('JOB_TITLE')} AS job_title, n_apps, n_unique_country, no_rep_emp_ind, high_rep_emp_ind, foia_indiv_id, rcid AS main_rcid, rcid 
+        {help.field_clean_regex_sql('BEN_PFIELD_OF_STUDY')} AS field_clean, DOT_CODE, {help.inst_clean_regex_sql('JOB_TITLE')} AS job_title, n_apps, n_unique_country, no_rep_emp_ind, high_rep_emp_ind, foia_indiv_id, rcid AS main_rcid, rcid
     FROM (
-        SELECT FEIN, lottery_year, get_std_country(country_of_nationality) AS country, 
+        SELECT FEIN, lottery_year, COALESCE(cw.std_country, fi.country_of_nationality) AS country,
             foia_firm_uid,
-            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY foia_firm_uid) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id 
-        FROM foia_with_ids
+            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id
+        FROM foia_with_ids AS fi
+        LEFT JOIN _country_cw AS cw ON fi.country_of_nationality = cw.raw_country
         WHERE foia_firm_uid IS NOT NULL
-    ) AS a JOIN samp_to_rcid AS b ON a.foia_firm_uid = b.foia_firm_uid
+    ) AS a JOIN samp_to_rcid AS b ON a.foia_firm_uid = b.foia_firm_uid AND TRY_CAST(a.lottery_year AS INTEGER) = TRY_CAST(b.lottery_year AS INTEGER)
     LEFT JOIN (
         SELECT foia_firm_uid, no_rep_emp_ind, high_rep_emp_ind, share_rep FROM match_rep
-    ) AS c ON a.foia_firm_uid = c.foia_firm_uid 
+    ) AS c ON a.foia_firm_uid = c.foia_firm_uid
+    LEFT JOIN _subregion_cw AS sub ON a.country = sub.std_country
     WHERE sampgroup = 'insamp'""")
 
 if not test:
@@ -637,9 +758,20 @@ print('Cleaning Individual-level Revelio User Data...')
 # WHERE rcid = 857329.0
 # """)
 
+con.sql(
+    """
+    CREATE OR REPLACE TEMP TABLE rev_raw_scope AS
+    SELECT r.*
+    FROM rev_raw AS r
+    JOIN user_samp AS u
+        ON r.user_id = u.user_id
+    """
+)
+
 # Cleaning Revelio Data, removing duplicates
-rev_clean = con.sql(
+con.sql(
 f"""
+CREATE OR REPLACE TEMP TABLE rev_clean AS
 SELECT * FROM
     (SELECT 
     fullname, degree, user_id, 
@@ -650,13 +782,12 @@ SELECT * FROM
     profile_linkedin_url, user_location, user_country,
     CASE WHEN fullname ~ '.*[A-z].*' THEN {help.fullname_clean_regex_sql('fullname')} ELSE '' END AS fullname_clean,
     university_raw, f_prob, education_number, ed_enddate, ed_startdate, ROW_NUMBER() OVER(PARTITION BY user_id, education_number) AS dup_num, updated_dt
-    FROM rev_raw)
+    FROM rev_raw_scope)
 WHERE dup_num = 1
 """
 )
 
-# Filtering to only include users in the preferred sample
-rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a.user_id = b.user_id")
+con.sql("CREATE OR REPLACE TEMP TABLE rev_users_filt AS SELECT * FROM rev_clean")
 
 # testing
 if test:
@@ -669,41 +800,164 @@ if test:
         .df()["user_id"]
         .astype(str)
     )
-    rev_users_filt = con.sql(f"SELECT * FROM rev_clean AS a JOIN user_samp AS b ON a.user_id = b.user_id WHERE a.user_id IN ({ids}) OR a.user_id = {test_user}")
+    con.sql(
+        f"""
+        CREATE OR REPLACE TEMP TABLE rev_users_filt AS
+        SELECT *
+        FROM rev_clean
+        WHERE user_id IN ({ids}) OR user_id = {test_user}
+        """
+    )
 
-# Cleaning name matches (long on country)
-# testing
-if test:
-    nanats_long = con.sql(
-        f"""SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (
-            SELECT fullname_clean, get_std_country(raw_eth) AS nanat_country, nanat_prob FROM (
-                UNPIVOT (
-                    SELECT a.fullname_clean, UNNEST(pred_nats_name) FROM nanats AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean
-                ) 
-                ON COLUMNS(* EXCLUDE (fullname_clean)) INTO NAME raw_eth VALUE nanat_prob
-            )
-        ) GROUP BY fullname_clean, nanat_country""")
+con.sql(
+    """
+    CREATE OR REPLACE TEMP TABLE rev_user_names AS
+    SELECT fullname_clean
+    FROM rev_users_filt
+    GROUP BY fullname_clean
+    """
+)
+con.sql(
+    """
+    CREATE OR REPLACE TEMP TABLE nanats_scope AS
+    SELECT a.*
+    FROM nanats AS a
+    JOIN rev_user_names AS b
+        ON a.fullname_clean = b.fullname_clean
+    """
+)
+con.sql(
+    """
+    CREATE OR REPLACE TEMP TABLE nts_long_scope AS
+    SELECT a.*
+    FROM nts_long AS a
+    JOIN rev_user_names AS b
+        ON a.fullname_clean = b.fullname_clean
+    """
+)
 
-    # nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country({help.nanats_to_long('pred_nats_name')}[1]) AS nanat_country, {help.nanats_to_long('pred_nats_name')}[2]::FLOAT AS nanat_prob FROM (SELECT * FROM nanats AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean)) GROUP BY fullname_clean, nanat_country")
+# Cleaning name matches (long on country) and blending full/first/last channels.
+nanat_cols = set(nanats.columns)
+nanat_full_col = "pred_nats_full" if "pred_nats_full" in nanat_cols else "pred_nats_name"
+nanat_first_col = "pred_nats_first" if "pred_nats_first" in nanat_cols else None
+nanat_last_col = "pred_nats_last" if "pred_nats_last" in nanat_cols else None
+nanat_has_last_channel = 1 if nanat_last_col is not None else 0
+if nanat_full_col != "pred_nats_full":
+    print("Name2Nat full-name channel not found; falling back to legacy pred_nats_name.")
+if nanat_first_col is None or nanat_last_col is None:
+    print("Name2Nat first/last channels missing; blended nationality uses available channels only.")
 
-    nts_long = con.sql("SELECT * FROM nts_long AS a RIGHT JOIN (SELECT fullname_clean FROM rev_users_filt GROUP BY fullname_clean) AS b ON a.fullname_clean = b.fullname_clean")
-# not testing
-else:
-    nanats_long = con.sql(f"SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS nanat_prob FROM (SELECT fullname_clean, get_std_country(raw_eth) AS nanat_country, nanat_prob FROM (UNPIVOT (SELECT fullname_clean, UNNEST(pred_nats_name) FROM nanats) ON COLUMNS(* EXCLUDE (fullname_clean)) INTO NAME raw_eth VALUE nanat_prob)) GROUP BY fullname_clean, nanat_country")
+
+def _nanat_long_query(pred_col, prob_alias):
+    if pred_col is None:
+        return (
+            f"SELECT NULL::VARCHAR AS fullname_clean, NULL::VARCHAR AS nanat_country, "
+            f"NULL::DOUBLE AS {prob_alias} WHERE FALSE"
+        )
+    source_sql = f"SELECT fullname_clean, UNNEST({pred_col}) FROM nanats_scope"
+    return f"""
+    SELECT fullname_clean, nanat_country, SUM(nanat_prob) AS {prob_alias}
+    FROM (
+        SELECT u.fullname_clean, COALESCE(cw.std_country, u.raw_eth) AS nanat_country, u.nanat_prob
+        FROM (
+            UNPIVOT ({source_sql})
+            ON COLUMNS(* EXCLUDE (fullname_clean)) INTO NAME raw_eth VALUE nanat_prob
+        ) AS u
+        LEFT JOIN _country_cw AS cw ON u.raw_eth = cw.raw_country
+    )
+    WHERE nanat_country IS NOT NULL AND nanat_country != 'NA'
+    GROUP BY fullname_clean, nanat_country
+    """
 
 
-# Cleaning institution matches 
-inst_match_clean = con.sql(
+anglo_country_sql = ", ".join([f"'{c}'" for c in ANGLO_COUNTRIES])
+con.sql(
+    f"""
+    CREATE OR REPLACE TEMP TABLE nanats_long AS
+    WITH nanats_full AS ({_nanat_long_query(nanat_full_col, "nanat_prob_full")}),
+    nanats_first AS ({_nanat_long_query(nanat_first_col, "nanat_prob_first")}),
+    nanats_last AS ({_nanat_long_query(nanat_last_col, "nanat_prob_last")}),
+    nanats_merged AS (
+        -- UNION ALL + GROUP BY avoids two expensive FULL JOINs across large (name x country) sets
+        SELECT fullname_clean, nanat_country,
+            SUM(nanat_prob_full)  AS nanat_prob_full,
+            SUM(nanat_prob_first) AS nanat_prob_first,
+            SUM(nanat_prob_last)  AS nanat_prob_last
+        FROM (
+            SELECT fullname_clean, nanat_country, nanat_prob_full, 0::DOUBLE AS nanat_prob_first, 0::DOUBLE AS nanat_prob_last FROM nanats_full
+            UNION ALL
+            SELECT fullname_clean, nanat_country, 0::DOUBLE AS nanat_prob_full, nanat_prob_first, 0::DOUBLE AS nanat_prob_last FROM nanats_first
+            UNION ALL
+            SELECT fullname_clean, nanat_country, 0::DOUBLE AS nanat_prob_full, 0::DOUBLE AS nanat_prob_first, nanat_prob_last FROM nanats_last
+        )
+        GROUP BY fullname_clean, nanat_country
+    ),
+    nanats_scored AS (
+        SELECT *,
+            SUM(CASE WHEN nanat_country IN ({anglo_country_sql}) THEN nanat_prob_full ELSE 0 END)
+                OVER(PARTITION BY fullname_clean) AS anglo_prob_full,
+            SUM(CASE WHEN nanat_country IN ({anglo_country_sql}) THEN nanat_prob_last ELSE 0 END)
+                OVER(PARTITION BY fullname_clean) AS anglo_prob_last
+        FROM nanats_merged
+    ),
+    nanats_weighted AS (
+        SELECT *,
+            CASE
+                WHEN {nanat_has_last_channel} = 1 THEN GREATEST(0, anglo_prob_full - anglo_prob_last)
+                ELSE 0
+            END AS anglo_pressure,
+            CASE WHEN (
+                CASE
+                    WHEN {nanat_has_last_channel} = 1 THEN GREATEST(0, anglo_prob_full - anglo_prob_last)
+                    ELSE 0
+                END
+            ) > {NANAT_ANGLO_PRESSURE_CUTOFF}
+                THEN {NANAT_W_CROWDED_FULL} ELSE {NANAT_W_DEFAULT_FULL} END AS w_full,
+            CASE WHEN (
+                CASE
+                    WHEN {nanat_has_last_channel} = 1 THEN GREATEST(0, anglo_prob_full - anglo_prob_last)
+                    ELSE 0
+                END
+            ) > {NANAT_ANGLO_PRESSURE_CUTOFF}
+                THEN {NANAT_W_CROWDED_LAST} ELSE {NANAT_W_DEFAULT_LAST} END AS w_last,
+            {NANAT_W_FIRST} AS w_first
+        FROM nanats_scored
+    ),
+    nanats_blended AS (
+        SELECT *,
+            w_full*nanat_prob_full + w_last*nanat_prob_last + w_first*nanat_prob_first AS nanat_prob_raw
+        FROM nanats_weighted
+    )
+    SELECT
+        fullname_clean,
+        nanat_country,
+        nanat_prob_full,
+        nanat_prob_first,
+        nanat_prob_last,
+        anglo_pressure,
+        CASE WHEN anglo_pressure > {NANAT_ANGLO_PRESSURE_CUTOFF} THEN 1 ELSE 0 END AS nanat_anglo_crowding_ind,
+        CASE WHEN SUM(nanat_prob_raw) OVER(PARTITION BY fullname_clean) > 0
+            THEN nanat_prob_raw / SUM(nanat_prob_raw) OVER(PARTITION BY fullname_clean)
+            ELSE 0 END AS nanat_prob
+    FROM nanats_blended
+    WHERE nanat_country IS NOT NULL AND nanat_country != 'NA'
+    """
+)
+
+# Cleaning institution matches — materialized so DuckDB has statistics for the JOIN into rev_users_with_inst
+con.sql(
 """
-    SELECT *, 
-        COUNT(*) OVER(PARTITION BY university_raw) AS n_country_match 
+CREATE OR REPLACE TEMP TABLE inst_match_clean AS
+    SELECT *,
+        COUNT(*) OVER(PARTITION BY university_raw) AS n_country_match
     FROM inst_country_cw
     WHERE lower(REGEXP_REPLACE(university_raw, '[^A-z]', '', 'g')) NOT IN ('highschool', 'ged', 'unknown', 'invalid')
 """)
 
-# Merging users with institution matches
-rev_users_with_inst = con.sql(
-""" 
+# Merging users with institution matches (materialized — referenced twice: parquet write + inst_merge_long)
+con.sql(
+"""
+CREATE OR REPLACE TEMP TABLE rev_users_with_inst AS
 SELECT user_id, education_number, degree_clean, ed_startdate, ed_enddate,
     a.university_raw, match_country, matchscore, matchtype, hs_share,
 -- trying to get earliest education for each country
@@ -741,65 +995,124 @@ if not test:
     print("Saving intermediate copy of users with institutions to file...")
     con.sql(f"COPY (SELECT * EXCLUDE (us_hs_exact, us_educ, ade_ind, ade_year)  FROM rev_users_with_inst) TO '{rcfg.REV_EDUC_LONG_PARQUET}'")
 
-# Merging users with institution matches (long) and collapsing to user x country level, filtering out 
-inst_merge_long = con.sql(
+# Merging users with institution matches (long) and collapsing to user x country level
+# Uses JOIN to _country_cw instead of Python UDF get_std_country; materialized for country_merge_long
+con.sql(
 """
-SELECT user_id, university_raw, get_std_country(match_country) AS match_country, 
+CREATE OR REPLACE TEMP TABLE inst_merge_long AS
+WITH std AS (
+    SELECT
+        r.user_id, r.university_raw, r.hs_share, r.degree_clean,
+        r.matchscore, r.matchtype, r.education_number,
+        r.us_hs_exact, r.us_educ, r.ade_ind, r.ade_year, r.last_grad_year,
+        COALESCE(cw.std_country, r.match_country) AS match_country
+    FROM rev_users_with_inst AS r
+    LEFT JOIN _country_cw AS cw ON r.match_country = cw.raw_country
+    WHERE r.educ_order = 1 AND r.match_country != 'NA'
+)
+SELECT
+    user_id, university_raw, match_country,
     us_hs_exact, us_educ, ade_ind, ade_year, last_grad_year,
-    CASE WHEN degree_clean = 'High School' OR hs_share > 0.9 THEN matchscore WHEN degree_clean = 'Bachelor' THEN matchscore*0.8 ELSE matchscore*0.5 END AS matchscore_corr, 
-    matchscore, matchtype, education_number, 
+    CASE WHEN degree_clean = 'High School' OR hs_share > 0.9 THEN matchscore
+         WHEN degree_clean = 'Bachelor' THEN matchscore*0.8
+         ELSE matchscore*0.5 END AS matchscore_corr,
+    matchscore, matchtype, education_number,
     MAX(matchscore) OVER(PARTITION BY user_id, match_country) AS max_matchscore,
     COUNT(*) OVER(PARTITION BY user_id, match_country) AS n_match
-FROM rev_users_with_inst
-WHERE educ_order = 1 AND match_country != 'NA'
+FROM std
 """
 )
 
-# Merging users with name2nat matches (long on user x country)
-name_merge_long = con.sql(
+# Merging users with name2nat matches (long on user x country) — materialized for country_merge_long
+con.sql(
 """
-SELECT user_id, a.fullname_clean, nanat_country, nanat_prob FROM 
-    (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a 
-    JOIN 
-    nanats_long AS b 
-    ON a.fullname_clean = b.fullname_clean 
+CREATE OR REPLACE TEMP TABLE name_merge_long AS
+SELECT
+    user_id,
+    a.fullname_clean,
+    nanat_country,
+    nanat_prob,
+    nanat_prob_full,
+    nanat_prob_first,
+    nanat_prob_last,
+    anglo_pressure,
+    nanat_anglo_crowding_ind
+FROM
+    (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a
+    JOIN
+    nanats_long AS b
+    ON a.fullname_clean = b.fullname_clean
 """
 )
 
-# Merging users with nametrace matches (long on user x subregion)
-nt_merge_long = con.sql("""SELECT user_id, a.fullname_clean, region, prob, f_prob_nt FROM (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a 
-    JOIN 
-    nts_long AS b 
-    ON a.fullname_clean = b.fullname_clean """)
+# Merging users with nametrace matches (long on user x subregion) — materialized for country_merge_long
+con.sql("""
+CREATE OR REPLACE TEMP TABLE nt_merge_long AS
+SELECT user_id, a.fullname_clean, region, prob, f_prob_nt
+FROM (SELECT fullname_clean, user_id FROM rev_users_filt GROUP BY fullname_clean, user_id) AS a
+    JOIN
+    nts_long_scope AS b
+    ON a.fullname_clean = b.fullname_clean
+""")
 
-# combining all country matches
-country_merge_long = con.sql(
+# combining all country matches — materialized; get_country_subregion UDFs replaced with JOIN to _subregion_cw
+con.sql(
 """
-SELECT user_id, MAX(fullname_clean) OVER(PARTITION BY user_id), country, subregion, nanat_score, inst_score, MAX(f_prob_nt) OVER(PARTITION BY user_id) AS f_prob_nt, SUM(nanat_score) OVER(PARTITION BY user_id, subregion) AS nanat_subregion_score, nt_subregion_score, university_raw, inst_score, us_hs_exact, us_educ, ade_ind, ade_year, last_grad_year
-FROM (
-SELECT  
+CREATE OR REPLACE TEMP TABLE country_merge_long AS
+SELECT
     CASE WHEN countries.user_id IS NULL THEN nt.user_id ELSE countries.user_id END AS user_id,
-    CASE WHEN countries.fullname_clean IS NULL THEN nt.fullname_clean ELSE countries.fullname_clean END AS fullname_clean,
+    MAX(CASE WHEN countries.fullname_clean IS NULL THEN nt.fullname_clean ELSE countries.fullname_clean END)
+        OVER(PARTITION BY CASE WHEN countries.user_id IS NULL THEN nt.user_id ELSE countries.user_id END) AS fullname_clean,
     country,
     CASE WHEN countries.subregion IS NULL THEN nt.region ELSE countries.subregion END AS subregion,
-    CASE WHEN countries.nanat_score IS NULL THEN 0 ELSE nanat_score END AS nanat_score,
-    f_prob_nt, 
-    CASE WHEN prob IS NULL THEN 0 ELSE prob END AS nt_subregion_score, university_raw, 
-    CASE WHEN countries.inst_score IS NULL THEN 0 ELSE inst_score END AS inst_score, us_hs_exact, us_educ, ade_ind, ade_year, last_grad_year
+    CASE WHEN countries.nanat_score IS NULL THEN 0 ELSE countries.nanat_score END AS nanat_score,
+    CASE WHEN countries.nanat_prob_full IS NULL THEN 0 ELSE countries.nanat_prob_full END AS nanat_prob_full,
+    CASE WHEN countries.nanat_prob_first IS NULL THEN 0 ELSE countries.nanat_prob_first END AS nanat_prob_first,
+    CASE WHEN countries.nanat_prob_last IS NULL THEN 0 ELSE countries.nanat_prob_last END AS nanat_prob_last,
+    CASE WHEN countries.anglo_pressure IS NULL THEN 0 ELSE countries.anglo_pressure END AS anglo_pressure,
+    CASE WHEN countries.nanat_anglo_crowding_ind IS NULL THEN 0 ELSE countries.nanat_anglo_crowding_ind END AS nanat_anglo_crowding_ind,
+    CASE WHEN countries.inst_score IS NULL THEN 0 ELSE countries.inst_score END AS inst_score,
+    MAX(f_prob_nt) OVER(PARTITION BY CASE WHEN countries.user_id IS NULL THEN nt.user_id ELSE countries.user_id END) AS f_prob_nt,
+    SUM(CASE WHEN countries.nanat_score IS NULL THEN 0 ELSE countries.nanat_score END)
+        OVER(PARTITION BY CASE WHEN countries.user_id IS NULL THEN nt.user_id ELSE countries.user_id END,
+                          CASE WHEN countries.subregion IS NULL THEN nt.region ELSE countries.subregion END) AS nanat_subregion_score,
+    CASE WHEN prob IS NULL THEN 0 ELSE prob END AS nt_subregion_score,
+    university_raw,
+    us_hs_exact,
+    us_educ,
+    ade_ind,
+    ade_year,
+    last_grad_year
 FROM (
-    SELECT 
-        CASE WHEN a.user_id IS NULL THEN b.user_id ELSE a.user_id END AS user_id, fullname_clean, university_raw,
-        CASE WHEN match_country IS NULL THEN nanat_country ELSE match_country END AS country,
-        CASE WHEN match_country IS NULL THEN get_country_subregion(nanat_country) ELSE get_country_subregion(match_country) END AS subregion, 
-        CASE WHEN match_country IS NULL THEN 0 ELSE matchscore_corr END AS inst_score, 
-        CASE WHEN nanat_country IS NULL THEN 0 ELSE nanat_prob END AS nanat_score,
-        us_hs_exact, us_educ, ade_ind, ade_year, last_grad_year
-    FROM inst_merge_long AS a 
-    FULL JOIN name_merge_long AS b 
-    ON a.user_id = b.user_id AND a.match_country = b.nanat_country
-) AS countries 
+    SELECT
+        CASE WHEN a.user_id IS NULL THEN b.user_id ELSE a.user_id END AS user_id,
+        b.fullname_clean AS fullname_clean,
+        university_raw,
+        CASE WHEN a.match_country IS NULL THEN b.nanat_country ELSE a.match_country END AS country,
+        CASE WHEN a.match_country IS NULL
+             THEN COALESCE(sub_n.subregion, b.nanat_country)
+             ELSE COALESCE(sub_m.subregion, a.match_country)
+        END AS subregion,
+        CASE WHEN a.match_country IS NULL THEN 0 ELSE matchscore_corr END AS inst_score,
+        CASE WHEN b.nanat_country IS NULL THEN 0 ELSE nanat_prob END AS nanat_score,
+        CASE WHEN b.nanat_country IS NULL THEN 0 ELSE nanat_prob_full END AS nanat_prob_full,
+        CASE WHEN b.nanat_country IS NULL THEN 0 ELSE nanat_prob_first END AS nanat_prob_first,
+        CASE WHEN b.nanat_country IS NULL THEN 0 ELSE nanat_prob_last END AS nanat_prob_last,
+        CASE WHEN b.nanat_country IS NULL THEN 0 ELSE anglo_pressure END AS anglo_pressure,
+        CASE WHEN b.nanat_country IS NULL THEN 0 ELSE nanat_anglo_crowding_ind END AS nanat_anglo_crowding_ind,
+        us_hs_exact,
+        us_educ,
+        ade_ind,
+        ade_year,
+        last_grad_year
+    FROM inst_merge_long AS a
+    FULL JOIN name_merge_long AS b
+        ON a.user_id = b.user_id AND a.match_country = b.nanat_country
+    LEFT JOIN _subregion_cw AS sub_n ON b.nanat_country = sub_n.std_country
+    LEFT JOIN _subregion_cw AS sub_m ON a.match_country = sub_m.std_country
+) AS countries
 FULL JOIN nt_merge_long AS nt
-ON countries.user_id = nt.user_id AND countries.subregion = nt.region)
+ON countries.user_id = nt.user_id AND countries.subregion = nt.region
 """)
 
 print("Done!")
@@ -811,30 +1124,100 @@ print("Cleaning Revelio Position Data...")
 
 # testing
 if test:
-    merged_pos = con.sql(f"SELECT * FROM merged_pos WHERE user_id IN ({ids}) OR user_id = {test_user}")
+    con.sql(
+        f"""
+        CREATE OR REPLACE TEMP TABLE merged_pos_scope_test AS
+        SELECT *
+        FROM merged_pos_scope
+        WHERE user_id IN ({ids}) OR user_id = {test_user}
+        """
+    )
+    con.sql(
+        """
+        CREATE OR REPLACE TEMP TABLE merged_pos_scope AS
+        SELECT *
+        FROM merged_pos_scope_test
+        """
+    )
 
 # # TODO:Cleaning position history -- (impute rcid if company name similar to below,) get rid of duplicates -- also need to clean duplicate users!
 
-pos_with_null_enddates = con.sql(
+# Pre-materialize null-enddate positions so next_pos and dup_pos each get one scan (not two)
+con.sql(
 """
-    SELECT a.user_id, a.position_number, a.startdate, a.enddate, b.startdate AS alt_enddate, 
-        CASE WHEN DATEDIFF('month', a.startdate::DATETIME, b.startdate::DATETIME) <= 3 AND jaro_winkler_similarity(a.company_raw, b.company_raw) >= 0.85 THEN 1 ELSE 0 END AS pos_dup_ind,
-        CASE WHEN b.position_number = (MIN(CASE WHEN DATEDIFF('month', a.startdate::DATETIME, b.startdate::DATETIME) >= 6 THEN b.position_number ELSE 10000 END) OVER(PARTITION BY a.user_id, a.position_number)) THEN 1 ELSE 0 END AS next_pos_ind
-    FROM (SELECT * FROM merged_pos WHERE enddate IS NULL) AS a 
-    JOIN (SELECT user_id, position_number, startdate, company_raw FROM merged_pos) AS b 
-    ON a.user_id = b.user_id AND NOT (a.position_number = b.position_number) AND (a.startdate < b.startdate)
-""")
+CREATE OR REPLACE TEMP TABLE _pos_null AS
+SELECT user_id, position_number, startdate, enddate, company_raw
+FROM merged_pos_scope
+WHERE enddate IS NULL
+"""
+)
+
+# Scope join target to only users with null-enddate positions — avoids scanning all of merged_pos_scope
+con.sql(
+"""
+CREATE OR REPLACE TEMP TABLE _pos_null_user_scope AS
+SELECT user_id, position_number, startdate, company_raw
+FROM merged_pos_scope
+WHERE user_id IN (SELECT user_id FROM _pos_null)
+"""
+)
+
+con.sql(
+"""
+    CREATE OR REPLACE TEMP TABLE pos_with_null_enddates AS
+    WITH next_pos AS (
+        SELECT
+            a.user_id,
+            a.position_number,
+            arg_min(b.startdate, b.position_number) AS alt_enddate
+        FROM _pos_null AS a
+        LEFT JOIN _pos_null_user_scope AS b
+            ON a.user_id = b.user_id
+           AND a.position_number != b.position_number
+           AND b.startdate::DATE >= a.startdate::DATE + INTERVAL '6' MONTH
+        GROUP BY a.user_id, a.position_number
+    ),
+    dup_pos AS (
+        SELECT
+            a.user_id,
+            a.position_number,
+            1 AS pos_dup_ind
+        FROM _pos_null AS a
+        JOIN _pos_null_user_scope AS b
+            ON a.user_id = b.user_id
+           AND a.position_number != b.position_number
+           AND a.startdate < b.startdate
+           AND DATEDIFF('month', a.startdate::DATETIME, b.startdate::DATETIME) <= 3
+           AND LEFT(UPPER(REGEXP_REPLACE(a.company_raw, '[^A-Za-z0-9]', '', 'g')), 1)
+             = LEFT(UPPER(REGEXP_REPLACE(b.company_raw, '[^A-Za-z0-9]', '', 'g')), 1)
+           AND jaro_winkler_similarity(a.company_raw, b.company_raw) >= 0.85
+        GROUP BY a.user_id, a.position_number
+    )
+    SELECT
+        a.user_id,
+        a.position_number,
+        a.startdate,
+        a.enddate,
+        n.alt_enddate,
+        COALESCE(d.pos_dup_ind, 0) AS pos_dup_ind
+    FROM _pos_null AS a
+    LEFT JOIN next_pos AS n
+        ON a.user_id = n.user_id AND a.position_number = n.position_number
+    LEFT JOIN dup_pos AS d
+        ON a.user_id = d.user_id AND a.position_number = d.position_number
+"""
+)
 
 
-merged_pos_clean = con.sql(
+con.sql(
     f"""
+    CREATE OR REPLACE TEMP TABLE merged_pos_clean AS
     SELECT *,
         CASE WHEN max_share_foia > 0 THEN 1 ELSE 0 END AS foia_occ_ind
-    FROM merged_pos AS a
+    FROM merged_pos_scope AS a
     LEFT JOIN (
         SELECT user_id, position_number, alt_enddate, pos_dup_ind
         FROM pos_with_null_enddates
-        WHERE next_pos_ind = 1 OR pos_dup_ind = 1
     ) AS b
         ON a.user_id = b.user_id AND a.position_number = b.position_number
     LEFT JOIN occ_cw AS c
@@ -850,12 +1233,13 @@ if not test:
 # okay for now just leave as today if null (most conservative -- downside is that enddatediff filter will be less effective)
 
 
-# User-level indicator for H-1B occupation
-merged_pos_cw = con.sql("SELECT user_id, MAX(foia_occ_ind) AS foia_occ_ind, MIN(min_rank) AS min_h1b_occ_rank FROM merged_pos_clean GROUP BY user_id")
+# User-level indicator for H-1B occupation — materialized so DuckDB has statistics for the JOIN in user_merge
+con.sql("CREATE OR REPLACE TEMP TABLE merged_pos_cw AS SELECT user_id, MAX(foia_occ_ind) AS foia_occ_ind, MIN(min_rank) AS min_h1b_occ_rank FROM merged_pos_clean GROUP BY user_id")
 
-# Cleaning position history and aggregating to user level
-merged_pos_user = con.sql(f"""
-    SELECT user_id, 
+# Cleaning position history and aggregating to user level — materialized (regex-heavy; needed for rev_indiv LEFT JOIN)
+con.sql(f"""
+    CREATE OR REPLACE TEMP TABLE merged_pos_user AS
+    SELECT user_id,
         ARRAY_AGG(title_clean ORDER BY position_number) AS positions,
         ARRAY_AGG(rcid ORDER BY position_number) AS rcids,
         MIN(CASE WHEN position_number > max_intern_position THEN startdate ELSE NULL END) AS min_startdate,
@@ -863,12 +1247,12 @@ merged_pos_user = con.sql(f"""
     FROM (
         SELECT *, MAX(CASE WHEN intern_ind = 1 THEN position_number ELSE 0 END) OVER(PARTITION BY user_id) AS max_intern_position FROM (
             SELECT user_id, {help.inst_clean_regex_sql('title_raw')} AS title_clean, position_number, rcid, country, startdate, enddate, {role_col} AS role_k_selected,
-                CASE WHEN 
-                    (lower(title_raw) ~ '(^|\\s)(intern)($|\\s)' AND 
-                        DATEDIFF('month', startdate::DATETIME, enddate::DATETIME) < 12) 
-                    OR (lower(title_raw) ~ '(^|\\s)(student)($|\\s)') 
+                CASE WHEN
+                    (lower(title_raw) ~ '(^|\\s)(intern)($|\\s)' AND
+                        (enddate IS NULL OR DATEDIFF('month', startdate::DATETIME, enddate::DATETIME) < 12))
+                    OR (lower(title_raw) ~ '(^|\\s)(student)($|\\s)')
                 THEN 1 ELSE 0 END AS intern_ind
-            FROM merged_pos
+            FROM merged_pos_scope
         )
     ) GROUP BY user_id
     """
@@ -880,10 +1264,13 @@ print("Done!")
 ### GETTING AND EXPORTING FINAL USER FILE
 #####################################
 print("Final merge...")
-user_merge = con.sql(
+con.sql(
 f"""
+CREATE OR REPLACE TEMP TABLE user_merge AS
 SELECT * FROM (
     SELECT a.user_id, est_yob, hs_ind, valid_postsec, updated_dt, f_prob, stem_ind, f_prob_nt, fullname, university_raw, country, subregion, inst_score, nanat_score, nanat_subregion_score, nt_subregion_score, 0.5*inst_score + 0.5*nanat_score AS total_score, 0.5*inst_score + 0.25*nanat_subregion_score + 0.25*nt_subregion_score AS total_subregion_score,
+        MAX(COALESCE(nanat_anglo_crowding_ind, 0)) OVER(PARTITION BY a.user_id) AS country_uncertain_ind,
+        MAX(COALESCE(anglo_pressure, 0)) OVER(PARTITION BY a.user_id) AS max_anglo_pressure,
         MAX(us_hs_exact) OVER(PARTITION BY a.user_id) AS us_hs_exact, 
         MAX(us_educ) OVER(PARTITION BY a.user_id) AS us_educ,
         MAX(CASE WHEN ade_ind IS NULL THEN 0 ELSE ade_ind END) OVER(PARTITION BY a.user_id) AS ade_ind,
@@ -926,28 +1313,186 @@ WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (
 
 # final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jul28.parquet')
 
+## DUPLICATE PROFILE DEDUP
+# Within (fullname_clean, rcid) groups that have multiple user_ids, keep the one with
+# the most positions (proxy for most complete profile); tiebreak: latest updated_dt, then
+# smallest user_id. A user is dropped only if it is non-canonical in some group and
+# canonical in none (avoids incorrectly dropping users who share a name but differ elsewhere).
+# Date-overlap guard: only treat two profiles as duplicates if their position date ranges
+# at the shared rcid overlap (within a 1-year buffer for LinkedIn imprecision) OR their
+# overall education date ranges overlap — this filters out two genuinely different people
+# who happen to share a name and work at the same company at different times.
+dup_profile_dedup = rcfg.BUILD_DUP_PROFILE_DEDUP
+print(f"dup_profile_dedup: {dup_profile_dedup}")
+if dup_profile_dedup:
+    con.sql("""
+    CREATE OR REPLACE TEMP TABLE dup_user_drop AS
+    WITH in_scope AS (
+        SELECT DISTINCT user_id FROM user_merge
+    ),
+    user_completeness AS (
+        SELECT p.user_id,
+            COUNT(*) AS n_positions,
+            MAX(r.updated_dt) AS updated_dt
+        FROM merged_pos_clean AS p
+        JOIN (SELECT user_id, MAX(updated_dt) AS updated_dt FROM rev_users_filt GROUP BY user_id) AS r
+            ON p.user_id = r.user_id
+        JOIN in_scope AS s ON p.user_id = s.user_id
+        GROUP BY p.user_id
+    ),
+    user_name AS (
+        SELECT user_id, ANY_VALUE(fullname_clean) AS fullname_clean
+        FROM rev_users_filt
+        WHERE fullname_clean IS NOT NULL AND LENGTH(TRIM(fullname_clean)) > 0
+        GROUP BY user_id
+    ),
+    -- Position date range per (user_id, rcid)
+    user_rcid_dates AS (
+        SELECT user_id, rcid,
+            MIN(TRY_CAST(startdate AS DATE)) AS pos_start,
+            MAX(CASE
+                WHEN alt_enddate IS NULL AND enddate IS NULL THEN CURRENT_DATE
+                WHEN enddate IS NULL THEN TRY_CAST(alt_enddate AS DATE)
+                ELSE TRY_CAST(enddate AS DATE)
+            END) AS pos_end
+        FROM merged_pos_clean
+        WHERE rcid IS NOT NULL
+        GROUP BY user_id, rcid
+    ),
+    -- Education date range per user (across all education records)
+    user_educ_dates AS (
+        SELECT user_id,
+            MIN(TRY_CAST(ed_startdate AS DATE)) AS educ_start,
+            MAX(COALESCE(TRY_CAST(ed_enddate AS DATE), TRY_CAST(ed_startdate AS DATE))) AS educ_end
+        FROM rev_users_filt
+        WHERE ed_startdate IS NOT NULL OR ed_enddate IS NOT NULL
+        GROUP BY user_id
+    ),
+    -- Distinct normalized school names per user
+    user_schools AS (
+        SELECT DISTINCT user_id, LOWER(TRIM(university_raw)) AS school
+        FROM rev_users_filt
+        WHERE university_raw IS NOT NULL AND LENGTH(TRIM(university_raw)) > 0
+    ),
+    -- All (fullname_clean, rcid) groups with 2+ in-scope users — GROUP BY only, no self-join.
+    dup_groups_raw AS (
+        SELECT n.fullname_clean, da.rcid
+        FROM user_name AS n
+        JOIN in_scope AS s ON n.user_id = s.user_id
+        JOIN user_rcid_dates AS da ON n.user_id = da.user_id
+        GROUP BY n.fullname_clean, da.rcid
+        HAVING COUNT(DISTINCT n.user_id) > 1
+    ),
+    -- Position date overlap: sort each group by pos_start and check if LAG(pos_end) >= pos_start.
+    -- Detecting any pairwise overlap via a sorted sweep is O(n log n) with no self-join.
+    -- (If any two intervals overlap, consecutive ones in sorted order must also overlap.)
+    pos_overlap_groups AS (
+        SELECT DISTINCT fullname_clean, rcid
+        FROM (
+            SELECT n.fullname_clean, da.rcid, da.pos_start,
+                LAG(da.pos_end) OVER (
+                    PARTITION BY n.fullname_clean, da.rcid ORDER BY da.pos_start
+                ) AS prev_pos_end
+            FROM user_name AS n
+            JOIN in_scope AS s ON n.user_id = s.user_id
+            JOIN user_rcid_dates AS da ON n.user_id = da.user_id
+            JOIN dup_groups_raw AS dg
+                ON n.fullname_clean = dg.fullname_clean AND da.rcid = dg.rcid
+        )
+        WHERE prev_pos_end IS NOT NULL
+          AND pos_start <= prev_pos_end + INTERVAL '1 year'
+    ),
+    -- Education date overlap: same LAG sweep per group.
+    educ_overlap_groups AS (
+        SELECT DISTINCT fullname_clean, rcid
+        FROM (
+            SELECT n.fullname_clean, da.rcid, ea.educ_start,
+                LAG(ea.educ_end) OVER (
+                    PARTITION BY n.fullname_clean, da.rcid ORDER BY ea.educ_start
+                ) AS prev_educ_end
+            FROM user_name AS n
+            JOIN in_scope AS s ON n.user_id = s.user_id
+            JOIN user_rcid_dates AS da ON n.user_id = da.user_id
+            JOIN user_educ_dates AS ea ON n.user_id = ea.user_id
+            JOIN dup_groups_raw AS dg
+                ON n.fullname_clean = dg.fullname_clean AND da.rcid = dg.rcid
+            WHERE ea.educ_start IS NOT NULL AND ea.educ_end IS NOT NULL
+        )
+        WHERE prev_educ_end IS NOT NULL
+          AND educ_start <= prev_educ_end + INTERVAL '1 year'
+    ),
+    -- School name overlap: groups where 2+ users share a school.
+    -- COUNT OVER (PARTITION BY group, school) detects shared schools with no self-join.
+    school_overlap_groups AS (
+        SELECT DISTINCT fullname_clean, rcid
+        FROM (
+            SELECT n.fullname_clean, da.rcid,
+                COUNT(DISTINCT n.user_id) OVER (
+                    PARTITION BY n.fullname_clean, da.rcid, us.school
+                ) AS n_users_with_school
+            FROM user_name AS n
+            JOIN in_scope AS s ON n.user_id = s.user_id
+            JOIN user_rcid_dates AS da ON n.user_id = da.user_id
+            JOIN user_schools AS us ON n.user_id = us.user_id
+            JOIN dup_groups_raw AS dg
+                ON n.fullname_clean = dg.fullname_clean AND da.rcid = dg.rcid
+        )
+        WHERE n_users_with_school > 1
+    ),
+    -- Confirmed duplicate groups: pass at least one overlap check.
+    confirmed_groups AS (
+        SELECT fullname_clean, rcid FROM pos_overlap_groups
+        UNION
+        SELECT fullname_clean, rcid FROM educ_overlap_groups
+        UNION
+        SELECT fullname_clean, rcid FROM school_overlap_groups
+    ),
+    -- Rank users within each confirmed group; keep the most complete profile.
+    ranked AS (
+        SELECT n.user_id, cg.fullname_clean, cg.rcid,
+            ROW_NUMBER() OVER (
+                PARTITION BY cg.fullname_clean, cg.rcid
+                ORDER BY COALESCE(c.n_positions, 0) DESC, c.updated_dt DESC NULLS LAST, n.user_id ASC
+            ) AS dup_rank
+        FROM confirmed_groups AS cg
+        JOIN user_name AS n ON cg.fullname_clean = n.fullname_clean
+        JOIN in_scope AS s ON n.user_id = s.user_id
+        JOIN user_rcid_dates AS da ON n.user_id = da.user_id AND cg.rcid = da.rcid
+        LEFT JOIN user_completeness AS c ON n.user_id = c.user_id
+    ),
+    non_canonical AS (SELECT DISTINCT user_id FROM ranked WHERE dup_rank > 1),
+    canonical     AS (SELECT DISTINCT user_id FROM ranked WHERE dup_rank = 1)
+    -- only drop users that are never the canonical in any group
+    SELECT user_id FROM non_canonical WHERE user_id NOT IN (SELECT user_id FROM canonical)
+    """)
+    n_dup = con.sql("SELECT COUNT(*) FROM dup_user_drop").fetchone()[0]
+    print(f"  Duplicate profiles identified for removal: {n_dup}")
+else:
+    con.sql("CREATE OR REPLACE TEMP TABLE dup_user_drop AS SELECT NULL::DOUBLE AS user_id WHERE FALSE")
+
 ## FURTHER COLLAPSING
 # cleaning revelio data (collapsing to user x company x country level)
 rev_indiv = con.sql(
 """
 SELECT * EXCLUDE (users.user_id, poshist.user_id) FROM
 -- start with user x rcid data (get rcid-specific startdate)
-(SELECT user_id, a.rcid, first_startdate, last_enddate, b.foia_firm_uid FROM
-    (SELECT user_id, 
-        MIN(startdate)::DATETIME AS first_startdate, 
-        MAX(CASE WHEN alt_enddate IS NULL AND enddate IS NULL THEN '2026-01-01' WHEN enddate IS NULL AND alt_enddate IS NOT NULL THEN alt_enddate ELSE enddate END)::DATETIME AS last_enddate, rcid 
-    FROM merged_pos_clean WHERE country = 'United States' AND startdate >= '2015-01-01' GROUP BY user_id, rcid) AS a 
-    JOIN 
-    (SELECT rcid, foia_firm_uid FROM samp_to_rcid GROUP BY rcid, foia_firm_uid) AS b 
+(SELECT user_id, a.rcid, first_startdate, last_enddate, b.foia_firm_uid, b.llm_match_score FROM
+    (SELECT user_id,
+        MIN(startdate)::DATETIME AS first_startdate,
+        MAX(CASE WHEN alt_enddate IS NULL AND enddate IS NULL THEN STRFTIME(CURRENT_DATE, '%Y-%m-%d') WHEN enddate IS NULL AND alt_enddate IS NOT NULL THEN alt_enddate ELSE enddate END)::DATETIME AS last_enddate, rcid
+    FROM merged_pos_clean WHERE country = 'United States' AND startdate >= '2015-01-01' GROUP BY user_id, rcid) AS a
+    JOIN
+    (SELECT rcid, foia_firm_uid, MAX(llm_match_score) AS llm_match_score FROM samp_to_rcid GROUP BY rcid, foia_firm_uid) AS b
     ON a.rcid = b.rcid
 ) AS pos
 
--- joining on user id with final user merge data from above, filtered on OPT-likely 
-JOIN 
-(SELECT * FROM user_merge WHERE (us_hs_exact IS NULL OR us_hs_exact = 0) AND (us_educ IS NULL OR us_educ = 1)) AS users 
+-- joining on user id with final user merge data from above, filtered on OPT-likely
+JOIN
+(SELECT * FROM user_merge WHERE (us_hs_exact IS NULL OR us_hs_exact = 0) AND (us_educ IS NULL OR us_educ = 1)
+    AND user_id NOT IN (SELECT user_id FROM dup_user_drop)) AS users
 ON pos.user_id = users.user_id
 
--- left joining on user id with user-level position history data 
+-- left joining on user id with user-level position history data
 LEFT JOIN
 merged_pos_user AS poshist
 ON pos.user_id = poshist.user_id

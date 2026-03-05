@@ -35,7 +35,7 @@ def load_wrds_users():
 
     print("Consolidated users file not found. Falling back to legacy rev_user_merge shards.")
     rev_raw = con.read_parquet(legacy_chunk_files[0])
-    for j in range(1, 10):
+    for j in range(1, len(legacy_chunk_files)):
         rev_raw = con.sql(
             f"SELECT * FROM rev_raw UNION ALL SELECT * FROM '{legacy_chunk_files[j]}'"
         )

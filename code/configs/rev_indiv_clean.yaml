@@ -1,5 +1,8 @@
 run_tag: "feb2026"
 
+build:
+  dup_profile_dedup: true   # drop duplicate Revelio profiles (same fullname_clean + shared rcid, keep the one with more positions)
+
 legacy_tags:
   wrds_users: "sep2"
   wrds_positions: "aug1"
