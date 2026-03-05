@@ -81,6 +81,17 @@ def _with_firm_key(df):
     return out
 
 
+def _weighted_average(values, weights):
+    mask = values.notna() & weights.notna()
+    if not mask.any():
+        return np.nan
+    w = weights[mask]
+    denom = w.sum()
+    if denom == 0:
+        return np.nan
+    return (values[mask] * w).sum() / denom
+
+
 def merge_filt_clean(merge_raw, index = 'firm x year'):
     ## DEFINING VARIABLES
     merge_filt = _with_firm_key(merge_raw.copy())
@@ -98,12 +109,8 @@ def merge_filt_clean(merge_raw, index = 'firm x year'):
     merge_filt['graddiff'] = merge_filt['lottery_year'].astype('int') - 1 - merge_filt['last_grad_year']
     merge_filt["graddiff_agg"] = (
     merge_filt
-    .groupby("foia_indiv_id")
-    .apply(lambda g: (
-        (g.dropna(subset=["graddiff", "weight_norm"])
-           .assign(weighted=lambda x: x["graddiff"] * x["weight_norm"])
-           .pipe(lambda x: x["weighted"].sum() / x["weight_norm"].sum()))
-    ))
+    .groupby("foia_indiv_id")[["graddiff", "weight_norm"]]
+    .apply(lambda g: _weighted_average(g["graddiff"], g["weight_norm"]))
     .reindex(merge_filt["foia_indiv_id"])
     .values
     )
@@ -140,7 +147,8 @@ def merge_collapse(merge_clean, index = 'firm x year'):
     merge_out = _with_firm_key(merge_clean.copy().reset_index())
     
     ## COLLAPSING TO APPLICATION LEVEL
-    outcomes = ['change_company1', 'change_company2','change_company3', 'promote1', 'promote2', 'in_us1', 'in_us2', 'ade', 'work_1yr', 'work_2yr', 'new_educ1', 'new_educ2', 'agg_compensation1', 'agg_compensation2', 'graddiff', 'in_home_country1', 'in_home_country2']#, 'loc_null1', 'loc_null2']
+    candidate_outcomes = ['change_company1', 'change_company2','change_company3', 'promote1', 'promote2', 'in_us1', 'in_us2', 'ade', 'work_1yr', 'work_2yr', 'new_educ1', 'new_educ2', 'agg_compensation1', 'agg_compensation2', 'graddiff', 'in_home_country1', 'in_home_country2']#, 'loc_null1', 'loc_null2']
+    outcomes = [var for var in candidate_outcomes if var in merge_out.columns]
     group_cols = ['foia_indiv_id', 'firm_key', 'female_ind', 'yob', 'age', 'lottery_year', 'foia_country', 'winner', 'n_apps', 'n_unique_country', 'high_rep_emp_ind', 'no_rep_emp_ind']
     if 'foia_firm_uid' in merge_out.columns:
         group_cols.insert(1, 'foia_firm_uid')
@@ -314,15 +322,19 @@ for i in range(3):
     df = mergedfs[i].copy() #.loc[all_dfs[i]['lottery_year']==2023]
     df['stay1'] = 1 - df['change_company1']
     df['stay2'] = 1 - df['change_company2']
-    df['stay3'] = 1 - df['change_company3']
+    if 'change_company3' in df.columns:
+        df['stay3'] = 1 - df['change_company3']
 
     df_raw = mergedfs_clean[i].copy()
     df_raw['stay1'] = 1 - df_raw['change_company1']
     df_raw['stay2'] = 1 - df_raw['change_company2']
-    df_raw['stay3'] = 1 - df_raw['change_company3']
+    if 'change_company3' in df_raw.columns:
+        df_raw['stay3'] = 1 - df_raw['change_company3']
 
     # keep only relevant columns + preserve panel index
-    keep = ["stay1", "stay2", "stay3", "work_1yr", 'work_2yr', "winner", "ade", "weight_norm",'firm_year_fe', 'foia_indiv_id']
+    keep = ["stay1", "stay2", "work_1yr", 'work_2yr', "winner", "ade", "weight_norm",'firm_year_fe', 'foia_indiv_id']
+    if 'stay3' in df_raw.columns:
+        keep.insert(2, "stay3")
     df_raw = df_raw.reset_index()[keep].copy().set_index(['firm_year_fe', 'foia_indiv_id'])
     df_raw['const'] = 1
     
@@ -345,14 +357,14 @@ for i in range(3):
 ## outputting regression results
 panelols_to_latex(m1s + m2s, [f'c = {c} (t{t})' for t in [1,2] for c in [2,4,6] ], verbose = True)
 
-df = mergedfs_clean[3]
+df = mergedfs_clean[1]
 yvar_list = ['in_us1', 'in_us2', 'in_home_country1','in_home_country2', 'new_educ1', 'new_educ2']
 x=panelols_to_latex([PanelOLS.from_formula(f'{yvar} ~ winner + ade + EntityEffects', data = df, weights = df['weight_norm']).fit(cov_type = 'clustered') for yvar in yvar_list], yvar_list, verbose = True)
 
-df2 = mergedfs_clean[3]
+df2 = mergedfs_clean[1]
 x = panelols_to_latex([PanelOLS.from_formula(f'work_1yr ~ winner + ade + EntityEffects', data = d, weights = d['weight_norm']).fit(cov_type = 'clustered') for d in [df2, df2.loc[df2['high_rep_emp_ind']==1], df2.loc[df2['no_rep_emp_ind']==1], df2.loc[(round(df2['graddiff_agg']) < 3) & (df2['graddiff_agg'] >= -1)], df2.loc[(round(df2['graddiff_agg']) > 3) & (df2['graddiff_agg'] <= 6)]]] + [PanelOLS.from_formula(f'work_1yr ~ winner*graddiff3 + ade + EntityEffects', data = df2.assign(graddiff3 = np.where(round(df2['graddiff_agg']) == 3, 1, 0)), weights = df2['weight_norm']).fit(cov_type = 'clustered')], ['all (mult 2)', 'high rep employers only', 'no rep employers only', 'grad diff <3 yrs', 'grad diff >3 years', 'grad diff 3 yrs'], verbose = True)
 
-df2 = mergedfs[3]
+df2 = mergedfs[1]
 x = panelols_to_latex([PanelOLS.from_formula(f'work_1yr ~ winner + ade + EntityEffects', data = d).fit(cov_type = 'clustered') for d in [df2, df2.loc[df2['high_rep_emp_ind']==1], df2.loc[df2['no_rep_emp_ind']==1], df2.loc[(round(df2['graddiff']) == 3)]]] + [PanelOLS.from_formula(f'work_1yr ~ winner*graddiff3 + ade + EntityEffects', data = df2.assign(graddiff3 = np.where(round(df2['graddiff']) == 3, 1, 0))).fit(cov_type = 'clustered')], ['all (mult 2)', 'high rep employers only', 'no rep employers only', 'grad diff 3 yrs', 'interact'], verbose = True)
 
 # print(compare({'c = 2': m1s[0], 'c = 2 (t2)': m2s[0], 'c = 4': m1s[1], 'c = 4 (t2)': m2s[1], 'c = 6': m1s[2], 'c = 6 (t2)': m2s[2]}, stars = True, precision = 'std_errors'))

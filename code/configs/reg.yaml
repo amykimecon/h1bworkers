@@ -1,0 +1,64 @@
+run_tag: "feb2026"
+
+testing:
+  enabled: false
+  n_apps: 500   # sample this many unique applicants for testing
+  seed: 42
+
+output_dir: "{root}/output/reg"
+
+# Which merged parquets to run regressions on (parquet key maps to icfg.*_PARQUET)
+variants:
+  - name: "baseline"
+    parquet_key: "MERGE_FILT_BASELINE_PARQUET"
+  - name: "mult2"
+    parquet_key: "MERGE_FILT_MULT2_PARQUET"
+  - name: "mult4"
+    parquet_key: "MERGE_FILT_MULT4_PARQUET"
+  - name: "mult6"
+    parquet_key: "MERGE_FILT_MULT6_PARQUET"
+  - name: "prefilt"
+    parquet_key: "MERGE_FILT_PREFILT_PARQUET"
+  - name: "strict"
+    parquet_key: "MERGE_FILT_STRICT_PARQUET"
+
+# FE specifications to run
+# Options: "none", "firm_year" (firm x year combined), "firm_plus_year" (separate firm + year)
+fe_specs:
+  - "none"
+  - "firm_year"
+#  - "firm_plus_year"
+
+# Primary spec — used for the main saved tables (others printed to console only)
+primary_fe_spec: "firm_year"
+
+# Outcome variable groups (only variables present in data will be used)
+outcomes:
+  retention:
+    - still_at_firm1   # still at same foia_firm_uid (any position, incl. original)
+    - still_at_firm2
+    - still_at_firm3
+  mobility:
+    - change_company1  # at a different foia_firm_uid post-lottery
+    - change_company2
+    - change_company3
+    - in_us1
+    - in_us2
+    - in_home_country1
+    - in_home_country2
+  career:
+    - promoted1        # new position at same firm post-lottery
+    - promoted2
+    - promoted3
+    - new_educ1
+    - new_educ2
+  compensation:
+    - agg_compensation1
+    - agg_compensation2
+
+# Balance table comparing pre-lottery covariates by winner status
+balance_table: true
+
+# Heterogeneous effects (subgroup + interaction regressions)
+# Runs on all retention outcomes using the primary FE spec
+het_effects: true
