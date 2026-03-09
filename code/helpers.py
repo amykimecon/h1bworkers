@@ -200,7 +200,57 @@ def stem_ind_regex_sql():
             ELSE NULL
         END
     """
-    return str_out 
+    return str_out
+
+# maps Revelio field_clean category name (or field_raw text) → 2-digit CIP family integer.
+# used for F1 merge to compare F1 CIP codes to Revelio field categories (low-weight signal).
+# returns NULL if unresolvable → treated as neutral 0.5 field_score in merge pipeline.
+def field_clean_to_cip2_sql(col):
+    str_out = f"""
+        CASE
+            -- CIP 11: Computer/Information Sciences
+            WHEN lower({col}) ~ '.*(comput|software|information technolog|data science|cyber|machine learning|artificial intelligence|web dev|database|network).*' THEN 11
+            WHEN {col} IN ('Information Technology') THEN 11
+            -- CIP 14: Engineering
+            WHEN lower({col}) ~ '.*(engineer|electrical|mechanical|civil|chemical|aerospace|industrial|biomedical|environmental eng).*' THEN 14
+            WHEN {col} IN ('Engineering') THEN 14
+            -- CIP 26: Biological/Life Sciences
+            WHEN lower({col}) ~ '.*(biolog|life sci|biochem|biomed|genetics|ecology|microbio|molecular|neurosci|genomic).*' THEN 26
+            WHEN {col} IN ('Biology') THEN 26
+            -- CIP 27: Mathematics/Statistics
+            WHEN lower({col}) ~ '.*(math|statistic|actuarial|quantitative).*' THEN 27
+            WHEN {col} IN ('Mathematics', 'Statistics') THEN 27
+            -- CIP 40: Physical Sciences
+            WHEN lower({col}) ~ '.*(physics|chemistry|astronom|optics|material science|earth sci|geology|atmospheric).*' THEN 40
+            WHEN {col} IN ('Chemistry', 'Physics') THEN 40
+            -- CIP 51: Health Professions
+            WHEN lower({col}) ~ '.*(medicine|health|nursing|pharmacy|dentist|public health|medical|clinical|physician|surgery).*' THEN 51
+            WHEN {col} IN ('Medicine', 'Nursing') THEN 51
+            -- CIP 52: Business
+            WHEN lower({col}) ~ '.*(business|management|marketing|finance|accounting|entrepreneurship|mba|commerce|supply chain|human resource).*' THEN 52
+            WHEN {col} IN ('Business', 'Finance', 'Accounting', 'Marketing', 'Economics') THEN 52
+            -- CIP 45: Social Sciences
+            WHEN lower({col}) ~ '.*(social sci|psychology|sociology|anthropology|political sci|economics|public policy|international relation).*' THEN 45
+            -- CIP 13: Education
+            WHEN lower({col}) ~ '.*(education|teaching|pedagogy|curriculum|instruction).*' THEN 13
+            WHEN {col} IN ('Education') THEN 13
+            -- CIP 04: Architecture/Planning
+            WHEN lower({col}) ~ '.*(architecture|urban planning|urban design).*' THEN 4
+            WHEN {col} IN ('Architecture') THEN 4
+            -- CIP 22: Legal
+            WHEN lower({col}) ~ '.*(law|legal|juris|attorney).*' THEN 22
+            WHEN {col} IN ('Law') THEN 22
+            -- CIP 09: Communications/Media
+            WHEN lower({col}) ~ '.*(communication|media|journalism|public relation|broadcasting).*' THEN 9
+            -- CIP 50: Visual/Performing Arts
+            WHEN lower({col}) ~ '.*(art|music|theater|film|design|animation|photography|fashion|dance|drama).*' THEN 50
+            -- CIP 54: History
+            WHEN lower({col}) ~ '.*(history|historic).*' THEN 54
+            ELSE NULL
+        END
+    """
+    return str_out
+
 
 # returns sql string for cleaned full name: removes everything after comma, removes anything 2-4 characters all caps as long as entire name not all caps (get rid of degrees or titles) [TODO: currently missing things like MSEd], then removes anything in parentheses at end, removes PhD specifically, removes plus specifically, then converts to title case (NOTE: title case function must be read into con)
 def fullname_clean_regex_sql(col):
