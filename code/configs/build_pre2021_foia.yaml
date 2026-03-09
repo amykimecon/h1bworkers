@@ -1,0 +1,22 @@
+run_tag: "v1"
+
+testing:
+  enabled: false
+  n_rows: 2000    # rows to load per Excel file when testing
+
+# TRK_12704 raw H-1B petition files (approved petitions, FY2000-2023)
+h1b_raw_dir: "{root}/data/raw/H-1B Data"
+# Fiscal years to include (lottery era; FY2008 = first H-1B lottery year)
+h1b_years: [2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020]
+
+# Crosswalk from extend_foia_dedup_trk12704.py: (pet_firm_name, pet_state) -> foia_firm_uid
+trk_crosswalk: "{root}/data/int/trk12704_to_foiafirm.csv"
+
+# Output parquet for firm_outcomes.py pre-2021 FOIA path
+output_dir: "{root}/data/int"
+
+# Decision status filter (keep only approved petitions)
+approved_status: "Approved"
+
+# Synthetic foia_indiv_id offset to avoid collision with Bloomberg integer IDs (~1-2M range)
+indiv_id_offset: 10000000

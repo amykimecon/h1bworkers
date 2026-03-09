@@ -1,0 +1,108 @@
+run_tag: "feb2026"
+
+testing:
+  enabled: false
+  n_firms: 200     # number of unique foia_firm_uids to keep in testing mode
+  seed: 42
+
+output_dir: "{root}/output/firm_outcomes"
+
+# FOIA input (supports clean parquet OR raw Bloomberg CSV).
+# Using full FOIA sample here (~1.8M applications).
+foia_parquet: "{root}/data/raw/foia_bloomberg/foia_bloomberg_all_withids.csv"
+# Required when using raw FOIA CSV: maps FEIN x lottery_year -> foia_firm_uid
+foia_firm_map_csv: "{root}/data/int/company_matching_jan28/foia_fein_to_firm.csv"
+# Required when using raw FOIA CSV:
+# Prefer the full LLM crosswalk ("all"), then union with legacy good matches
+# using rev_users_clean logic to maximize foia_firm_uid -> rcid coverage.
+foia_rcid_map_csv: "{root}/data/int/company_matching_jan28/llm_review_all_foia_to_rcid_crosswalk.csv"
+foia_good_match_ids_csv: "{root}/data/int/good_match_ids_mar20.csv"
+# Merged individual parquet used to proxy ADE eligibility for non-selected applicants
+# (covers matched subset only; unmatched applicants are treated as unknown ADE status)
+merge_parquet: "{root}/data/int/merge_filt_baseline_feb2026.parquet"
+
+# WRDS connection
+wrds_username: "amykimecon"
+wrds_chunk_size: 300   # rcids per WRDS query chunk (tune down if WRDS times out)
+
+# Headcount snapshot parameters
+snapshot_month: 1
+snapshot_day: 1
+# Years to compute headcount for (covers 1 pre-lottery year through max k_lag post-lottery)
+headcount_year_min: 2014
+headcount_year_max: 2026
+# Tenure filter for emp_tenure version (months before snapshot date)
+tenure_min_months: 6
+# Cap on imputed end date for open-ended positions
+enddate_fallback: "2026-03-01"
+
+# Occupation filter for emp_h1b_occ is now derived automatically from FOIA rank/share
+# metadata in the occupation crosswalk (no manual role list needed).
+h1b_occ_filter:
+  enabled: false
+  foia_occ_crosswalk: "{root}/data/crosswalks/rev_occ_to_foia_freq.csv"
+  max_rank: null   # null -> keep all ranked occupations (rank < 1000 fallback rule)
+  min_share: 0.0   # 0.0 -> treated as share > 0
+
+# Regression lags to estimate (k = outcome year - lottery year)
+# k = -1 is the pre-trend check; k = 0..3 are post-lottery effects
+k_lags: [-2, -1, 0, 1, 2, 3, 4]
+log_outcomes: false   # if false, use employment levels (not log) as regression outcome
+# Optional: drop top x% of firms by pre-lottery baseline size.
+# Percent is in [0,100], where 0 disables trimming.
+# Baseline year defaults to min(lottery_year)-1 when null.
+top_size_trim_pct: 0.1
+baseline_size_year: 2016
+baseline_size_col: "emp_all"
+baseline_size_drop_missing: false
+# Missing outcome handling:
+#   zero_impute   -> set missing to 0 only if matched rcid has positive headcount in other years
+#   balanced_panel -> no imputation; keep only balanced firm-year x k blocks per outcome
+missing_outcome_policy: "balanced_panel" #"zero_impute"
+# Optional printed heterogeneity tables (stdout only; not saved).
+print_heterogeneity_tables: true
+heterogeneity_outcome: "out_emp_all"  # fallback: first available out_* column
+heterogeneity_fe_spec: "firm_year"    # one of none, firm_only, year_only, firm_year
+heterogeneity_k: 1                    # set null to auto-pick first post period
+# Event-study by pre-period (t-1) firm size decile
+plot_size_decile_event_study: true
+size_decile_event_outcome: "out_emp_all"
+size_decile_event_fe_spec: "firm_year"
+# Deep-dive diagnostics package (tables + plots under output_dir/debug)
+diagnostics:
+  enabled: true
+  focus_outcome: "out_emp_all"
+  trim_quantile: 0.99
+  compare_missing_policies: true
+  run_sensitivity_grid: true
+  scatter_sample_n: 50000
+# Fixed-effects specs to run. Supported: none, firm_only, year_only, firm_year
+fe_specs: ["none", "firm_year"]
+force_requery: false # if true, ignore cached WRDS headcount parquet and re-query
+
+# Minimum number of lottery-pool applications (SELECTED + ELIGIBLE) to include a firm-year
+min_apps: 1
+# Maximum number of applications to include a firm-year (set null to disable cap)
+max_apps: 500
+
+# FOIA status values
+status_selected: "SELECTED"
+status_eligible: "ELIGIBLE"   # non-selected lottery participants (FY2022+)
+# CREATED = non-selected lottery participants in FY2021 (same as ELIGIBLE in later years)
+# The script always includes CREATED in the lottery pool to ensure 2021 is valid.
+
+# Pre-2021 FOIA input: approved H-1B petitions from TRK_12704, built by
+# build_pre2021_foia.py. These rows have status_type="SELECTED" and
+# lottery_year <= max_lottery_year, feeding the pre2021_lca_proxy branch.
+# Set to "" or omit to disable.
+foia_pre2021_parquet: "{root}/data/int/pre2021_foia.parquet"
+
+# Pre-2021 LCA proxy for application denominator.
+# Before FY2021 electronic registration, FOIA only records petition approvals (winners).
+# Certified LCA filings proxy total H-1B applications per firm-year (Kerr & Lincoln 2010).
+pre2021_lca_proxy:
+  enabled: true
+  lca_parquet: "{root}/data/int/lca_firm_year.parquet"
+  lca_crosswalk_parquet: "{root}/data/int/lca_foia_crosswalk.parquet"
+  max_lottery_year: 2020   # inclusive; use LCA proxy for lottery_year <= this value
+  proxy_col: "n_lca_workers"  # column from lca_firm_year to use as n_apps proxy
