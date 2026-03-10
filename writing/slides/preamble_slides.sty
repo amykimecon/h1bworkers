@@ -1,0 +1,45 @@
+\ProvidesPackage{preamble_slides}
+%% paths
+\newcommand{\outputpath}{~/Documents/GitHub/h1bworkers/output/slides}
+
+% %% Beamer Stuff
+\usetheme{Boadilla}
+\useinnertheme{circles} % make bullets matte
+\setbeamertemplate{footline}[frame number]
+\setbeamertemplate{caption}[numbered]
+\setbeamertemplate{section in toc}[sections numbered]
+\setbeamertemplate{subsection in toc}[sections numbered]
+\setbeamertemplate{navigation symbols}{} 
+\setbeamercovered{transparent=15}
+\usepackage{graphicx}
+\usepackage{hhline}
+\usepackage{appendixnumberbeamer}
+\usepackage{multirow}
+\definecolor{darkcolor}{rgb}{0.31, 0.18, 0.38} %hex code #4f2f60
+\definecolor{maincolor}{rgb}{0.6, 0.4, 0.7} %hex code #9966b3
+\definecolor{litecolor}{rgb}{0.82, 0.73, 0.87} %hex code #d2bbdd 
+\usecolortheme[named = maincolor]{structure}
+\renewcommand{\arraystretch}{1.5}
+\usepackage{xcolor}
+\usepackage{bbm}
+\usepackage{tikz}
+    \usetikzlibrary{patterns} % for fancy fills
+    \usetikzlibrary{calc} % for scatterplot
+    \usetikzlibrary{arrows.meta, positioning}
+    \usetikzlibrary{intersections,shapes.misc, fadings, through, fit}
+    \pgfmathsetseed{212}
+    \usepackage{xifthen} % for if/then inside tikz
+    \usetikzlibrary{shapes,snakes}
+    \usetikzlibrary{decorations.pathreplacing} % for brackets in timelines
+    \newcommand{\mytab}[1]{%
+        \begin{tabular}{@{}c@{}}
+        #1
+        \end{tabular}
+        }
+        
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+%% Bibliography packages
+\usepackage{natbib}
+\bibliographystyle{abbrvnat}

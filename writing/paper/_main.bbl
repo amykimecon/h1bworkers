@@ -1,0 +1,88 @@
+\begin{thebibliography}{14}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Bound et~al.(2017)Bound, Khanna, and Morales]{boundetal2017}
+John Bound, Gaurav Khanna, and Nicolas Morales.
+\newblock Understanding the economic impact of the h-1b program on the u.s.
+\newblock NBER Working Paper 23153, National Bureau of Economic Research, 2017.
+
+\bibitem[Brinatti and Guo(2023)]{brinattiguo2023}
+Agostina Brinatti and Xing Guo.
+\newblock Third-country effects of u.s. immigration policy.
+\newblock Staff Working Paper 2023-60, Bank of Canada, 2023.
+
+\bibitem[Doran et~al.(2022)Doran, Gelber, and Isen]{doranetal2022}
+Kirk Doran, Alexander Gelber, and Adam Isen.
+\newblock The effects of high-skilled immigration policy on firms: Evidence from visa lotteries.
+\newblock IZA Discussion Paper 15146, IZA Institute of Labor Economics, 2022.
+
+\bibitem[Glennon(2024)]{glennon2024}
+Britta Glennon.
+\newblock How do restrictions on high-skilled immigration affect offshoring? evidence from the h-1b program.
+\newblock \emph{Management Science}, 70\penalty0 (2):\penalty0 907--930, 2024.
+
+\bibitem[Kerr and Lincoln(2010)]{kerrlincoln2010}
+William~R. Kerr and William~F. Lincoln.
+\newblock The supply side of innovation: H-1b visa reforms and u.s. ethnic invention.
+\newblock \emph{Journal of Labor Economics}, 28\penalty0 (3):\penalty0 473--508, 2010.
+
+\bibitem[Khanna and Morales(2017)]{khannamorales2017}
+Gaurav Khanna and Nicolas Morales.
+\newblock The it boom and other unintended consequences of chasing the american dream.
+\newblock Working Paper 460, Center for Global Development, 2017.
+
+\bibitem[Kim and Pei(2022)]{kimpei2022}
+Seohee Kim and Alison Pei.
+\newblock Monopsony in the high-skilled migrant labor market: Evidence from h-1b petition data.
+\newblock Technical report, SSRN, 2022.
+
+\bibitem[Mahajan et~al.(2024)Mahajan, Morales, Shih, Chen, and Brinatti]{mahajanetal2024}
+Parag Mahajan, Nicolas Morales, Kevin~Y. Shih, Mingyu Chen, and Agostina Brinatti.
+\newblock The impact of immigration on firms and workers: Insights from the h-1b lottery.
+\newblock Working Paper CES-24-19, U.S. Census Bureau Center for Economic Studies, 2024.
+
+\bibitem[Mayda et~al.(2020)Mayda, Ortega, Peri, Shih, and Sparber]{maydaetal2020}
+Anna~Maria Mayda, Francesc Ortega, Giovanni Peri, Kevin~Y. Shih, and Chad Sparber.
+\newblock Coping with h-1b shortages: Firm performance and mitigation strategies.
+\newblock NBER Working Paper 27730, National Bureau of Economic Research, 2020.
+
+\bibitem[{U.S. Citizenship and Immigration Services}(2024{\natexlab{a}})]{uscis_integrity_2024}
+{U.S. Citizenship and Immigration Services}.
+\newblock Uscis announces strengthened integrity measures for h-1b program.
+\newblock USCIS Alert, 2024{\natexlab{a}}.
+\newblock URL \url{https://www.uscis.gov/archive/uscis-announces-strengthened-integrity-measures-for-h-1b-program}.
+\newblock Accessed March 6, 2026.
+
+\bibitem[{U.S. Citizenship and Immigration Services}(2024{\natexlab{b}})]{uscis_opt_2024}
+{U.S. Citizenship and Immigration Services}.
+\newblock Optional practical training (opt) for f-1 students.
+\newblock USCIS guidance page, 2024{\natexlab{b}}.
+\newblock URL \url{https://www.uscis.gov/working-in-the-united-states/students-and-exchange-visitors/optional-practical-training-opt-for-f-1-students}.
+\newblock Accessed March 6, 2026.
+
+\bibitem[{U.S. Citizenship and Immigration Services}(2025{\natexlab{a}})]{uscis_beneficiary_centric_2025}
+{U.S. Citizenship and Immigration Services}.
+\newblock Fy 2026 h-1b cap initial registration period opens on march 7.
+\newblock USCIS Alert, 2025{\natexlab{a}}.
+\newblock URL \url{https://www.uscis.gov/newsroom/alerts/fy-2026-h-1b-cap-initial-registration-period-opens-on-march-7}.
+\newblock Describes the beneficiary-centric selection process for later cap seasons; accessed March 6, 2026.
+
+\bibitem[{U.S. Citizenship and Immigration Services}(2025{\natexlab{b}})]{uscis_cap_gap_2025}
+{U.S. Citizenship and Immigration Services}.
+\newblock Extension of post-completion optional practical training (opt) and f-1 status for eligible students.
+\newblock USCIS guidance page, 2025{\natexlab{b}}.
+\newblock URL \url{https://www.uscis.gov/working-in-the-united-states/temporary-workers/h-1b-specialty-occupations/extension-of-post-completion-optional-practical-training-opt-and-f-1-status-for-eligible-students}.
+\newblock Accessed March 6, 2026.
+
+\bibitem[{U.S. Immigration and Customs Enforcement}(2024)]{ice_practical_training_2024}
+{U.S. Immigration and Customs Enforcement}.
+\newblock Practical training.
+\newblock Student and Exchange Visitor Program, 2024.
+\newblock URL \url{https://www.ice.gov/sevis/practical-training}.
+\newblock Accessed March 6, 2026.
+
+\end{thebibliography}

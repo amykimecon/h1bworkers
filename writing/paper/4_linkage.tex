@@ -1,0 +1,54 @@
+\section{Probabilistic Linkage}
+\label{sec:linkage}
+
+This section describes the paper's main methodological contribution: a probabilistic linkage between deidentified H-1B administrative records and LinkedIn-based worker histories. The linkage proceeds in three stages. I first build an employer crosswalk between the FOIA files and Revelio firms. I then impute the sparse fields needed for person-level matching on the Revelio side. Finally, within each employer-year cell, I score candidate workers and carry forward the resulting match weights into the outcome analysis.
+
+\subsection{Step 1: Employer linkage}
+
+The first problem is to align employers in the FOIA data with employer identifiers in Revelio. The code base constructs a firm-year crosswalk using cleaned employer names, employer tax identifiers where available, lottery year, and a union of previously validated matches. Exact or high-confidence matches are kept directly. Ambiguous firm-name cases are first narrowed using fuzzy string comparison and then reviewed using an LLM-assisted workflow that classifies whether a candidate Revelio firm is a valid crosswalk for the FOIA employer. The LLM is therefore used only at the firm-linkage stage, where the task is to evaluate company identities, rebrands, subsidiaries, or spelling variants; it is not used to identify individual workers.
+
+Allowing the employer crosswalk to be many-to-many at the firm-year level is important. A single employer can map to multiple Revelio company identifiers because of rebranding, acquisitions, legal-entity fragmentation, or data-vendor conventions. Conversely, forcing a one-to-one firm mapping too early can create false non-matches that cascade into the person-level linkage. The current pipeline therefore carries forward all valid firm-year crosswalks and later uses additional evidence from workers' position histories to refine match quality.
+
+\subsection{Step 2: Constructing Revelio-side linkage variables}
+
+Because the administrative H-1B records are deidentified, the person-level match cannot use names directly. Instead, I exploit a set of sparse fields that appear in both datasets either directly or by imputation.
+
+First, I estimate year of birth in Revelio using education timing. When a profile reports a high school degree, the implied birth year is derived from the observed high school end date. Otherwise, the estimate comes from the earliest postsecondary start date or end date, with adjustments for the degree type. Second, I construct a probabilistic sex measure from names, averaging across alternative name-based models to reduce the chance that any one model performs poorly for particular naming conventions.
+
+Third, I infer country of origin using a combination of information from education histories, names, and career histories. Institution-country matches use the locations of schools and universities, while name-based country and subregion predictions come from two different models (a country classifier and a broader subregion classifier). Position histories provide an additional consistency check when a worker's pre-lottery job history includes the same origin country observed in the administrative record. The current code combines these ingredients into a country score and a subregion score, while also flagging cases where the name-based predictions are especially uncertain.
+
+Fourth, I use education histories to impute variables that matter later in the empirical design, even if they are not primary linkage fields. These include an indicator for advanced-degree exemption status, the year of the latest U.S. graduation, and field-of-study measures that help identify STEM-oriented profiles. These variables are useful both substantively and operationally: they sharpen the match and help define heterogeneity by likely remaining OPT runway.
+
+Finally, I deduplicate Revelio profiles when multiple profiles appear to correspond to the same underlying person. The current implementation treats profiles as duplicates only when they share a normalized name and an employer identifier and also satisfy an overlap condition based on job dates, education dates, or school names. Within duplicate groups, the profile with the richer position history is retained. This step is important for avoiding overcounting in large employers with many similar profiles.
+
+\subsection{Step 3: Candidate pools and applicant-candidate scoring}
+
+For each H-1B applicant, I define the candidate pool as workers who appear in Revelio at the linked employer around the lottery date. This is the key economic restriction that makes the individual-level linkage feasible. In older H-1B settings, employer-based linkage would be biased because many workers were not yet at the firm before the visa decision. In the modern OPT setting, however, pre-lottery employment at the sponsoring firm is common rather than exceptional.
+
+Within this candidate pool, I compute an applicant-candidate score that combines agreement on country of origin, year of birth, and sex, along with measures of firm-link confidence and occupational plausibility. In the current code, the baseline score takes the form
+\begin{equation}
+\label{eq:matchscore}
+S_{ic} = m^{\text{firm}}_{ic}\left[(1-\omega_{occ})\left(\omega_{country}s^{country}_{ic} + \omega_{yob}s^{yob}_{ic} + \omega_{sex}s^{sex}_{ic}\right) + \omega_{occ}s^{occ}_{ic}\right],
+\end{equation}
+where $i$ indexes applicants and $c$ indexes candidate Revelio workers. The current baseline weights in the code are $\omega_{country}=0.70$, $\omega_{yob}=0.20$, and $\omega_{sex}=0.10$, with the occupation component used only in some variants. The firm-quality multiplier $m^{\text{firm}}_{ic}$ equals one when the candidate's position history directly supports the employer crosswalk and otherwise scales with the normalized firm-match score from the employer-linkage stage. Appendix Table \ref{tab:link_params} reports the current defaults used by the working code.
+
+The scoring stage also imposes several plausibility filters. Candidate workers must have start and end dates that make it plausible they were employed at the sponsoring firm around the lottery date; age implied by the estimated birth year must be consistent with the administrative year-of-birth field; and, where observed, education and occupational histories must look broadly consistent with H-1B-eligible work. When no candidate achieves a sufficiently strong country-level match, the algorithm allows a controlled fallback to subregion-level evidence, but only when the overall score is still credible.
+
+\subsection{From scores to probabilistic match weights}
+
+A central choice in the paper is not to force a deterministic one-to-one person match. Instead, I convert the applicant-candidate scores into within-applicant weights,
+\begin{equation}
+\label{eq:weights}
+ w_{ic} = \frac{S_{ic}}{\sum_{c' \in C_i} S_{ic'}},
+\end{equation}
+where $C_i$ is the set of retained candidates for applicant $i$. These weights sum to one within applicant and capture the relative likelihood that each candidate is the correct match.
+
+This choice matters for the econometrics. If the linkage were forced to select a single candidate in every case, mistakes would enter the outcome data in a difficult-to-model way and would likely generate both attenuation and classical misclassification. By preserving multiple candidates, the analysis can instead work with applicant-level weighted outcomes. In the current regression code, each outcome is first aggregated to the applicant level using the $w_{ic}$ and then regressed on lottery-selection indicators. The resulting estimand is naturally conservative: if linkage is noisy, treatment effects are attenuated toward zero rather than driven by arbitrary hard assignments.
+
+\subsection{Quality controls, strict samples, and validation}
+
+Because probabilistic linkage can still fail in systematic ways, the analysis uses several quality controls. First, I flag applications for which the top candidate is only weakly separated from the second-best candidate. Second, I estimate results in samples that limit candidate multiplicity. Third, I define a strict high-precision sample that requires a dominant top weight, a high absolute match score, strong firm-link quality, strong country evidence, and a nonmissing estimated birth year. These restrictions are designed to reduce false positives at the cost of recall.
+
+The working code currently produces a family of analysis variants---including a baseline sample, samples that cap the number of retained candidates per applicant, and a strict sample---so that the paper can transparently show how sensitive the estimates are to linkage quality. In the final draft, I recommend emphasizing two comparisons. The first is between the baseline weighted results and the strict high-precision sample, which speaks directly to attenuation from match error. The second is between the linked sample and employer-year cells with especially clean applicant coverage, which addresses concern that selection into linkage may vary with treatment.
+
+A fuller account of the linkage pipeline, including the exact thresholds used in the current code and the construction of the outcome variables, is provided in Appendix \ref{sec:appendix_linkage}.

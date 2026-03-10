@@ -1,0 +1,5 @@
+\beamer@sectionintoc {1}{Introduction}{2}{0}{1}
+\beamer@sectionintoc {2}{Background and Context}{7}{0}{2}
+\beamer@sectionintoc {3}{Data and Linking Strategy}{10}{0}{3}
+\beamer@sectionintoc {4}{Empirical Evidence on Pre-H-1B Visa Holders}{16}{0}{4}
+\beamer@sectionintoc {5}{Conclusion and Next Steps}{23}{0}{5}

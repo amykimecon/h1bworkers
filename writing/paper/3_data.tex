@@ -1,0 +1,38 @@
+\section{Data}
+
+\label{sec:data}
+\subsection{Administrative Data}
+My data on H-1B applications was obtained from U.S. Customs and Immigration Services (USCIS) via a Freedom of Information Act (FOIA) request from Bloomberg... [source]. It is a complete record of all cap-subject lottery applications in FY 2020-2023, including the applicant's country of origin, year of birth, gender, sponsoring employer, and lottery outcome. For lottery winners who subsequently filed a petition for an H-1B visa, I have much more detailed information including their college major, job title, previous visa status, etc. The data do not contain indicators for ADE status for lottery losers.
+
+Each row of the H-1B data represents a single lottery application, which is the unit of treatment assignment in the analysis. Importantly, as discussed in Section \ref{sec:context}, the data include many duplicate applications from different employers on behalf of the same applicant.
+The data include an indicator for whether an applicant is a `duplicate' (i.e. whether the applicant was already named on another application in the same lottery year), but do not indicate the original application. Therefore while I can filter on this indicator to obtain a sample of applications that are unique at the applicant x year level, I am not able to fully exclude all applicants that submit multiple applications in the same year (since one of the applications will not be marked as a duplicate or indicated in any way). To address this as best as possible, I use the duplicate indicator to identify and exclude employer-year cells with \textit{any} duplicate applications.
+
+
+% \paragraph{Fraud. }
+% Note that during the period covered by this data, USCIS regulations permitted individuals to submit multiple applications in the same year, under different employers. This led to a high rate of duplicate applications, particularly in 2023: x\% of applications... 
+% In 2024, USCIS changed their regulations... (footnote on bloomberg article and `middlemen etc.?')
+
+\subsection{Revelio Data}
+My data on outcomes... comes from Revelio Labs. Scraped LinkedIn profiles...
+Position data on individuals' complete work histories (as reported on LinkedIn), including employer, start and end dates, location, job title.
+
+Education data on individuals' complete education histories (as reported on LinkedIn), including institution name, program start and end dates, degree, and field. 
+
+
+The outcome data come from Revelio Labs' large snapshot of public LinkedIn-based profiles. In the current project files, Revelio contains worker-level profiles with names, profile-update dates, education histories, and detailed position histories, along with company identifiers (\texttt{rcid}), titles, start and end dates, locations, and imputed compensation for many positions. The raw scale is large enough that the data behave like a near-universe of digitally visible professional workers, which is particularly useful in a study of the skilled labor market.
+
+The main strength of Revelio for this project is that it observes both the pre-lottery and post-lottery histories of workers who are likely to be in the H-1B applicant pool. The pre-period is crucial: it allows me to identify which users were already employed at the petitioning firm before the lottery and to restrict attention to those applicants for whom a LinkedIn-based match is feasible. The post-period is equally important because it allows me to track whether a worker remains at the sponsoring firm, switches firms, appears to leave the United States, or returns to education.
+
+At the same time, Revelio is not a frictionless measure of labor-market outcomes. Profile coverage is selective, profile updates are not continuous, location fields are noisy, and some workers disappear from the platform for reasons unrelated to migration or employment. Those issues motivate two choices in the paper. First, the administrative records determine treatment status and the basic analysis sample; Revelio is used primarily for linkage and outcomes rather than for treatment assignment. Second, I treat probabilistic linkage uncertainty as an object to be propagated forward into the regression analysis rather than as a nuisance to be hidden.
+
+\subsection{Analysis sample}
+
+The linked analysis is necessarily a subset of the raw H-1B applicant pool. The main sample focuses on applicants who plausibly were already employed at the sponsoring firm before the lottery. This restriction is both substantively natural and empirically valuable. It targets the margin for which winner-loser comparisons are most credible in LinkedIn data and excludes cases where the worker was likely abroad and therefore essentially unobservable absent a successful H-1B transition.
+
+In practice, the linked sample is shaped by three filters. First, the employer must be linkable from the FOIA files into Revelio. Second, there must exist a plausible pool of candidate workers at the linked employer around the lottery date. Third, the applicant-candidate match must pass the probabilistic-linkage filters described in Section \ref{sec:linkage}. Depending on the specification, I further restrict the sample by candidate multiplicity, match quality, or employer-level duplicate-registration patterns. The current linked sample is on the order of 100{,}000 applicants, but the final paper should report exact counts for the baseline, strict, and alternative samples in a transparent sample-construction table \placeholder{insert final Ns by sample variant}.
+
+\subsection{Outcomes}
+
+The main outcomes are drawn from Revelio position and education histories. The paper's central retention outcome is an indicator for whether the linked worker is still employed by the sponsoring firm one, two, or three years after the lottery. The corresponding migration outcome is an indicator for whether the worker is observed in the United States over the same horizon. Additional outcomes include switching firms, promotion-like within-firm job changes, new education enrollment, and compensation measures based on Revelio's imputed salary fields.
+
+Two points are useful to emphasize in the final draft. First, the outcome definitions are designed to be conservative with respect to noisy profile timing. For example, same-firm retention is defined at the employer level rather than requiring a specific title match. Second, the ``in the U.S.'' outcome is an observed-location measure rather than a direct legal-status measure. It should therefore be presented as evidence on observed geographic attachment, not as a literal measure of immigration status. Appendix \ref{sec:appendix_linkage} describes the underlying construction in more detail.

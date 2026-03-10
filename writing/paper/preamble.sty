@@ -1,0 +1,187 @@
+\ProvidesPackage{preamble}
+
+%% paths
+\newcommand{\outputpath}{~/Documents/GitHub/headtax/output/paper}
+
+%For better code
+\usepackage{verbatim} %Allows begin{comment} and end{comment}, "verbatim" package
+\pagestyle{plain} %includes page numbers
+\usepackage[margin=1in]{geometry} %included to change page margins
+\usepackage[pdftex]{graphicx} %included to insert a graph
+%\usepackage{graphicx}
+\usepackage{grffile} %allows to use spaces in file names when using pdflatex
+%\usepackage{caption} %included to include a caption over the graph
+
+\usepackage[section]{placeins} %to keep graphs and tables in the very section to which they belong
+\usepackage{pdflscape} %to include the landscape environment
+\usepackage{setspace} %to allow for doubleline spacing, etc
+\usepackage{amsmath}	 % Packages for Mathematics
+\usepackage{amssymb}
+\usepackage{amsthm}
+
+%For the tables and graphs
+\usepackage{booktabs}		%For different style lines
+\usepackage{calc}			%Necessary for the text wrapping command on tables.
+\usepackage{array}			%For better tables (wrapping text in cells)
+\usepackage{rotating}		%For rotated tables
+\usepackage{longtable}		%Allows tables to extend past one page
+\usepackage{float} 			%Allows to suppress floating of tables
+\usepackage{tabularx}		%Provides more alignment options, and specifying table width
+\usepackage{placeins}		%For floatbarrier
+%\usepackage[lmargin=2cm, rmargin=2cm,tmargin=2.4cm,bmargin=2cm]{geometry}
+\onehalfspacing
+\usepackage{supertabular}
+
+%Packages from Elisa
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{latexsym}
+\usepackage{tikz}
+	\usetikzlibrary{patterns} % for fancy fills
+	\usetikzlibrary{calc} % for scatterplot
+	\pgfmathsetseed{212}
+	\usetikzlibrary{positioning}
+	\usepackage{xifthen} % for if/then inside tikz
+	\usetikzlibrary{shapes,snakes}
+    \usetikzlibrary{decorations.pathreplacing} % for brackets in timelines
+    \newcommand{\mytab}[1]{%
+        \begin{tabular}{@{}c@{}}
+        #1
+        \end{tabular}
+        }
+  \usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,backgrounds}
+
+\usepackage{ctable}
+\usepackage{dcolumn}
+\def\sym#1{\ifmmode^{#1}\else\(^{#1}\)\fi}
+\newcommand{\specialcell}[2][c]{
+\begin{tabular}[#1]{@{}c@{}}#2\end{tabular}}
+
+%Package from Svetlana
+\usepackage{dcolumn} % to be able to center on the decimal, and add in stata: alignment(D{.}{.}{-1})
+\newcolumntype{C}[1]{>{\centering\arraybackslash\hspace{0pt}}p{#1}}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[english]{babel} %%% 'french', 'german', 'spanish', 'danish', etc.
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{mathdots}
+\usepackage{makecell}
+\renewcommand\theadalign{cb}
+\renewcommand\theadfont{\bfseries}
+\renewcommand\theadgape{\Gape[4pt]}
+\renewcommand\cellgape{\Gape[4pt]}
+
+% Carolyn additions
+\usepackage{array}
+\usepackage{color}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{hyperref}
+\hypersetup{
+	colorlinks   = true, %Colours links instead of ugly boxes
+	urlcolor     = blue, %Colour for external hyperlinks%
+	linkcolor    = blue, %Colour of internal links
+	citecolor   = blue %Colour of citations
+}
+\usepackage{adjustbox}
+\usepackage{threeparttable}
+\usepackage{soul}
+\usepackage{import}
+\usepackage[final]{pdfpages}
+\let\oldhat\hat
+\renewcommand{\vec}[1]{\boldsymbol{\mathbf{#1}}} % formatting vectors
+%\renewcommand{\hat}[1]{\oldhat{\boldsymbol{\mathbf{#1}}}}
+% \usepackage{kpfonts}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.11} 
+\usepgfplotslibrary{fillbetween}
+\newcommand\gauss[2]{1/(#2*sqrt(2*pi))*exp(-((x-#1)^2)/(2*#2^2))} % Gauss function, parameters mu and sigma
+\usepackage{listings} % for including code 
+\lstset{ 
+  language=R,                     % the language of the code
+  basicstyle=\tiny\ttfamily, % the size of the fonts that are used for the code
+  numbers=left,                   % where to put the line-numbers
+  numberstyle=\tiny\color{blue},  % the style that is used for the line-numbers
+  stepnumber=1,                   % the step between two line-numbers. If it is 1, each line
+                                  % will be numbered
+  numbersep=5pt,                  % how far the line-numbers are from the code
+  backgroundcolor=\color{white},  % choose the background color. You must add \usepackage{color}
+  showspaces=false,               % show spaces adding particular underscores
+  showstringspaces=false,         % underline spaces within strings
+  showtabs=false,                 % show tabs within strings adding particular underscores
+  frame=single,                   % adds a frame around the code
+  rulecolor=\color{black},        % if not set, the frame-color may be changed on line-breaks within not-black text (e.g. commens (green here))
+  tabsize=2,                      % sets default tabsize to 2 spaces
+  captionpos=b,                   % sets the caption-position to bottom
+  breaklines=true,                % sets automatic line breaking
+  breakatwhitespace=false,        % sets if automatic breaks should only happen at whitespace
+  keywordstyle=\color{RoyalBlue},      % keyword style
+  commentstyle=\color{YellowGreen},   % comment style
+  stringstyle=\color{ForestGreen}      % string literal style
+} 
+\usepackage{breqn} % for breaking up equations over multiple lines
+\newcommand{\dv}[1]{\frac{\mathrm{d}}{\mathrm{d} #1}} 
+
+% Index
+\usepackage{makeidx}
+\makeindex
+
+% Bibliography packages
+\usepackage[round,authoryear]{natbib}
+
+% Add subtitle to main title
+\usepackage{titling}
+\newcommand{\subtitle}[1]{%
+  \posttitle{%
+    \par\end{center}
+    \begin{center}\large#1\end{center}
+    \vskip0.5em}%
+}
+
+% Line spacing
+\setlength\parskip{0em}
+\setlength\parindent{2em}
+
+\renewcommand{\baselinestretch}{1.5}
+\usepackage{bbm} % for nice indicator function
+
+% for loops
+\usepackage{lipsum}
+
+% for simple trees
+\usepackage{qtree}
+
+% for multiple footnotes- not sure this works though
+\usepackage[multiple]{footmisc}
+
+% for appendices
+\usepackage[toc,page]{appendix}
+
+% add fancy header
+% \usepackage{fancyhdr}
+% \pagestyle{fancy}
+%   \fancyhf{}%
+%   \renewcommand{\headrulewidth}{0mm}%
+%   \fancyhead[R]{{\it Carolyn Tsao}}%
+%   \fancyhead[L]{{\it Non-Wage Amenities and the Allocation of Teacher Quality}}%
+%   \fancyfoot[C]{\thepage}
+
+
+% amy additions
+\usepackage{hhline}
+\usepackage{ragged2e}
+% centered manual width lines
+\newcolumntype{L}[1]{>{\raggedright\let\newline\\\arraybackslash\hspace{0pt}}m{#1}}
+\newcolumntype{C}[1]{>{\centering\let\newline\\\arraybackslash\hspace{0pt}}m{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\let\newline\\\arraybackslash\hspace{0pt}}m{#1}}
+
+% h1b project
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\placeholder}[1]{\textcolor{BrickRed}{\textit{[#1]}}}
+\newcommand{\app}{\text{app}}
+\newcommand{\ADE}{\text{ADE}}

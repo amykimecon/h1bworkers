@@ -1,0 +1,158 @@
+\documentclass[xcolor=dvipsnames, compress, 12pt, aspectratio=169, handout]{beamer}
+\usepackage{../preamble_slides}
+
+\title{H-1B Visa Project: Updates}
+\author{Amy Kim}
+\date{July 3, 2025}
+
+\begin{document}
+
+\begin{frame}
+    \frametitle{Overview}
+    \textbf{Progress so far:}
+    \begin{itemize}
+        \item Revelio (LinkedIn) data cleaning and imputation
+        \item First pass at H-1B to LinkedIn individual matching 
+        \item (+ marriage bars resubmitted!)
+    \end{itemize}    
+    \vspace{2mm}
+    \textbf{Want to Discuss Today:}
+    \begin{itemize}
+        \item Matching strategy and potential hurdles
+        \item Next Steps
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Revelio Data Imputation}
+    Three pieces of information to match to H-1B data:
+    \begin{enumerate}
+        \item Gender 
+        \begin{itemize}
+            \item For now, using Revelio's imputation\textemdash seems to be not great for Chinese and Indian names so looking at alternative models 
+        \end{itemize}
+        \item Year of Birth
+        \begin{itemize}
+            \item Imputing based on high school graduation year if available, else college start year, else using first job start date as upper bound
+        \end{itemize}
+        \item Country of Birth
+        \begin{itemize}
+            \item Imputing based on (a) educational history and (b) name and taking the union of possible countries
+            \item E.g. for a LinkedIn user $i$ whose educational history shows institutions that could be in France or Algeria (see geolocation of institutions), and whose name is imputed as Moroccan, Algerian, or American, I create four `copies' of $i$, one for each potential country 
+        \end{itemize}
+    \end{enumerate}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Geolocating Institutions}
+    \begin{itemize}
+        \item Difficult problem because institution names in LinkedIn are not standardized
+        \item Have to match `UCLA', `University of California LA', `BA from UC Los Angeles', etc. to the same location 
+        \item Four-pronged approach:
+        \begin{enumerate}
+            \item OpenAlex (open-source research catalog) has list of institutions and locations\textemdash I fuzzy match LinkedIn institutions to this list using various techniques 
+            \item GeoNames has list of all cities, administrative divisions (e.g. states, counties) in the world\textemdash I look for `geonames' in LinkedIn institution names and return any matches 
+            \item For a subset of institutions I used the Google Maps API (very expensive)\textemdash results are often U.S.-biased, but I use when no other matches are found 
+            \item Revelio has their own imputation of institution location, appears to be not great for smaller non-US institutions\textemdash I use Revelio label if $n$ sufficiently large or no other matches found 
+        \end{enumerate}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Alternative Strategies}
+    \begin{itemize}
+        \item Creating Classification Model
+        \begin{itemize}
+            \item Idea: train model to learn how to classify users' gender, YOB, country of birth based on their LinkedIn profile
+            \item Hurdle: would need a training dataset
+        \end{itemize}
+        \item Large Language Model (LLM) 
+        \begin{itemize}
+            \item Idea: use BERT (Chat-GPT equivalent) to classify users' gender, YOB, country of birth based on their LinkedIn profile
+            \item Hurdle: too Black-box-y? 
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\section{Matching}
+\begin{frame}
+    \frametitle{Matching to H-1B}
+    Overall Strategy: matching only sample of F-1 student visa holders who can then use OPT-STEM extension to work in U.S. for up to 3 years and apply to H-1B to extend their stay
+    \begin{enumerate}
+        \item Restrict to core sample of `OPT-likely' LinkedIn users (current def: did not attend high school in U.S. but did go to U.S. school for higher educ)
+        \item Match to H-1B visas on company and country of birth 
+        \item Filter matches based on:
+        \begin{itemize}
+            \item Revelio-reported probability female 
+            \item Estimated year of birth (match within 3-yr window)
+            \item Started at firm before H-1B application but no more than 3 years before H-1B application
+            \item Still working at firm at the time of H-1B application
+            \item Was not working in the U.S. (excluding internships) for more than 3 years prior to H-1B application 
+        \end{itemize}
+    \end{enumerate}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Step One: LinkedIn User Sample}
+    \begin{itemize}
+        \item 14.6 million total users who have ever worked in the U.S. at a company in the H-1B sample
+        \begin{itemize}
+            \item 92\% list any education on their LinkedIn
+            \item 18\% list a high school
+        \end{itemize}
+        \item 13.4m (91\%) list an educational institution that I can geolocate
+        \begin{itemize}
+            \item 92\% of geolocations are `very good' (high-confidence match)
+            \item 89\% of `very good' geolocations are to the U.S.
+        \end{itemize}
+        \item I \textbf{drop} 2.4m users (16\%) who report a high school that has a `very good' geolocation to the U.S.
+        \item I further \textbf{drop} 800k users (6\%) who report some education but none in the U.S.
+        \item \textbf{Final `OPT-likely' sample:} 11.1 million users (also dropping users only matched to U.S.)
+        \item Next Step: Also restrict to STEM majors
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Step Two: Raw Matching}
+    \begin{itemize}
+        \item \textbf{H-1B Sample:} 187k applications from employer x years with fewer than 50 applicants and no duplicate applications (extra restrictive for now) 
+        \item \textbf{Revelio Sample:} 79m user x imputed country observations (avg. 7 imputed countries per user)
+        \item Matching on imputed country x firm: 
+        \begin{itemize}
+            \item 30.3m total matches 
+            \item 161k H-1B applications matched (86\%) 
+            \item Average 188 potential Revelio matches per H-1B application!
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Step Three: Match Filtering}
+    Number of matches after filtering by...
+    \begin{itemize}
+        \item Gender ($abs(prob female - female ind) < 0.6$): 17.3m (57\%)
+        \item YOB ($abs(yob - est_yob) <= 3$): 11.4m (38\%)
+        \item Start date: 8.1m (27\%)
+        \item End date: 17.2m (57\%)
+        \item U.S. work time: 6.3m (21\%)
+    \end{itemize}
+    After filtering by all:
+    \begin{itemize}
+        \item 544k (1.8\%) matches remaining
+        \item 89k (55\%) H-1B applications remaining 
+        \item Average 6 potential Revelio matches per H-1B application
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Matching: Central Issues}
+    \begin{itemize}
+        \item High corr. of country, YOB, gender within firms (i.e. if a firm applies for an H-1B for a Chinese woman born in 1995, highly likely that many of their other H-1B applications are also for Chinese women of similar age)
+        \begin{itemize}
+            \item This means that for many firms, it's hard to distinguish between their hires and therefore they are matched with equal probability to the same pool of LinkedIn candidates \textemdash problem for estimation?
+        \end{itemize}
+        \item Matching design means that I will incorrectly match non-OPT H-1B applicants to OPT Revelio individuals a lot of the time. I think this is a problem for identification particularly because OPT holders have higher lottery success rates (through additional lottery)
+    \end{itemize}
+\end{frame}
+
+\end{document}

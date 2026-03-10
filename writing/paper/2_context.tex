@@ -1,0 +1,78 @@
+\section{Background and Context: The H-1B Visa Program}
+
+Since its inception in [year], the H-1B visa has remained the primary pathway for temporary skilled workers to immigrate to the US. While the number of H-1B visas issued annually has remained capped at 85,000 for the past x years, the number of applications for H-1B visas (plotted in Figure x) has grown substantially over time. In years where demand exceeds supply (as has been the case in every year since x), USCIS conducts a lottery to allocate the limited number of visas. 
+
+Every year since x, the number of applications has exceeded the cap, prompting USCIS to conduct a lottery to allocate the limited number of visas, which is the source of random variation I use in this paper. 
+
+\subsection{The H-1B Visa}
+The H-1B visa is an employer-sponsored temporary work visa for workers in ``specialty occupations'', created in x as a way for firms to fill skill shortages in the US labor market.
+
+There are three key institutional details of the H-1B visa that are important for this paper. First, the H-1B is employer-sponsored, meaning that employers must apply for the visa on behalf of the worker, and the worker's legal status is tied to the sponsoring employer. While the visa is portable between employers,... \textcolor{red}{fill in}. Workers cannot self-sponsor.
+
+Second, the H-1B is temporary, with a maximum duration in most cases of six years (three years of initial status plus one three-year extension). Finally, the H-1B is dual-intent, meaning that while it does not lead directly to permanent residency, it does not preclude workers from applying for permanent residency while on H-1B status. Many H-1B workers apply for employer-sponsored green cards under their H-1B employer, and while H-1B visas are portable across employers, pending green card applications are not, creating an additional incentive for workers to remain with their sponsoring employer until they receive their green card.
+
+\textcolor{purple}{For employers to sponsor an H-1B worker, they must first file a Labor Condition Application (LCA) with the Department of Labor, attesting that they will pay the worker the prevailing wage for the occupation and location, and that the employment of the H-1B worker will not adversely affect the working conditions of similarly employed US workers. After receiving LCA certification, employers can then file Form I-129 with USCIS to petition for the H-1B visa on behalf of the worker.} Put this in 'petition' language.
+
+\subsection{The H-1B Lottery}
+Since x, the number of H-1B visas that can be allocated in any given year has remained capped at 85,000. This is partitioned into 65,000 visas for all applicants (`regular' cap) and an additional 20,000 visas reserved for applicants with an ``Advanced Degree Exemption'' (`ADE' cap), i.e. applicants with an advanced degree (Master's or higher) from a U.S. institution. Certain types of institutions \textcolor{red}{fill} are exempt from the cap. 
+
+Historically, allocation of the cap-subject H-1B visas has been on a first-come, first-served basis: applications are accepted and processed on a rolling basis starting on April 1 of each year, and once the cap is reached, USCIS stops accepting applications. In every year since 2013, however, the cap has been reached on the first day of the application period, prompting USCIS to conduct a lottery to allocate the limited number of visas. Starting in FY 2020, USCIS implemented an electronic registration system for the H-1B lottery. Prior to this system, firms were required to submit the full petition at the time of application, and USCIS would conduct the lottery among all submitted petitions \textit{without retaining any information on petitioners not selected in the lottery}. 
+
+Under the new system, firms first submit a short electronic registration during a registration window in March. USCIS then conducts the random lottery separately by ADE status and notifies selected registrants (henceforth lottery `winners').\footnote{The ADE lottery is conducted first among ADE-eligible applications. The regular lottery is subsequently conducted with all non-ADE applications \textbf{and} ADE applications not selected in the ADE lottery. ADE applications can therefore be selected through either of the ADE or non-ADE lotteries.} 
+Lottery winners are then given a window of 90 days to submit a fully completed petition for an H-1B application, including the labor condition application and supporting documentation. If that petition is approved, the earliest start date for cap-subject employment is October 1 of the relevant fiscal year. 
+
+This new registration system substantially reduced the cost of application for employers (who no longer need to submit a full petition for every applicant) and created an electronic record of lottery applicants, including lottery losers, the crucial source of data for this paper. 
+\textcolor{purple}{In reducing the cost of application, however, the new system also created scope for multiple registrations on behalf of the same beneficiary. During the years in my sample, the random selection operated at the registration level rather than at the beneficiary level, meaning that a worker with multiple registrations could receive more chances in the lottery. USCIS later adopted a beneficiary-centric selection process in response to these integrity concerns, beginning after the main years I study \citep{uscis_integrity_2024, uscis_beneficiary_centric_2025}. This matters empirically because duplicate-heavy employers and outsourcing-style applications can distort both the interpretation of the lottery and the quality of individual linkage. I therefore describe the multiple-registration issue explicitly in the data section and treat it as both an institutional feature of the sample period and a source of robustness checks in the linked analysis.}
+
+
+\subsection{Optional Practical Training (OPT) and the Pre-H-1B Worker}
+
+The central institutional fact behind the linkage strategy is the importance of Optional Practical Training (OPT). Students on F-1 visas can typically work for up to 12 months after completing their studies through post-completion OPT, and eligible STEM graduates can apply for a 24-month extension, yielding up to 36 months of work authorization in total \citep{ice_practical_training_2024, uscis_opt_2024}. For many international graduates of U.S. universities, the typical sequence is therefore: graduate, begin working immediately for a U.S. employer under OPT, and then enter the H-1B lottery one or more times while already employed.
+
+This has three consequences for the analysis. First, many lottery applicants are already attached to the sponsoring employer before the lottery takes place. That creates a feasible linkage design, because the relevant candidate pool in LinkedIn data is not ``everyone in the world with similar demographics'' but rather ``workers already observed at the sponsoring firm around the lottery date.'' Second, lottery loss need not imply immediate separation from the employer or immediate exit from the United States. A worker who loses can remain under the initial 12-month OPT period, under the STEM extension, through cap-gap protection if a later petition is pending, or through another temporary status \citep{uscis_cap_gap_2025}. Third, the treatment effect of winning should vary with remaining runway on OPT. The difference between winning and losing is likely to be largest when alternative work authorization is about to expire.
+
+% Unlike many other visa pathways, the H-1B visa operates using a lottery system. 
+
+% (Not important for this paper: information on employer timeline, LCA, etc.)
+% Employer timeline -- useful for further proof that employers are unlikely to hire an OPT eligible person directly via H1B?
+
+% \subsection{Eligibility}
+% - can apply from inside or outside the country
+% - employer must certify...
+
+% \subsection{Terms/Benefits (what you get)}
+% - pathway to greencard
+
+% \subsection{Lottery Details}
+% - ADE
+% - online vs not (no data on losers before fy2019)
+% - if you win, submit i129
+
+% \subsection{OPT}
+
+% %\section{Institutional Context}
+% %\label{sec:context}
+
+% \subsection{The H-1B program}
+
+% The H-1B is a temporary employment-based visa for workers in specialty occupations. In broad terms, the employer must show that the job requires specialized knowledge and that the worker has at least the relevant bachelor's-level training, while the petitioning firm files on the worker's behalf \citep{uscis_h1b_specialty_2026}. Cap-subject H-1B status is typically granted for an initial period of up to three years and can generally be extended to a maximum of six years, with some exceptions related to permanent-residency processing \citep{uscis_h1b_specialty_2026}. The key feature for this paper is that H-1B status is tied to an employer-worker relationship. A worker cannot self-petition into the cap-subject H-1B category, and although H-1B workers can later move across employers, doing so requires another employer to file on their behalf. In practice, this linkage between legal status and the sponsoring employer can create employer stickiness, especially when the worker is also navigating permanent-residency sponsorship \citep{kimpei2022}.
+
+% Congress has fixed the annual cap for new cap-subject H-1B visas at 65{,}000 for the regular cap plus 20{,}000 visas reserved for workers eligible for the advanced-degree exemption (ADE), sometimes called the master's cap \citep{uscis_h1b_overview_2021}. Eligibility for the ADE requires a qualifying U.S. advanced degree. When demand exceeds supply, USCIS allocates visa slots by lottery. During the period studied here, demand exceeded the cap by a wide margin, making random selection the relevant source of identifying variation in most years.
+
+% \subsection{Lottery timing and why selection is not the same as visa issuance}
+
+% The timing of the cap-subject H-1B process matters for both identification and interpretation. Since the introduction of electronic registration for the FY2021 cap season, employers first submit a short electronic registration during a registration window in March \citep{uscis_h1b_registration_2020}. USCIS then conducts the random selection process and notifies selected registrants. Petitioners with selected registrations have a filing window of at least 90 days to submit the full Form I-129 petition, including the labor condition application and supporting documentation \citep{uscis_h1b_fy2021_file, uscis_h1b_registration_process_2026}. If that petition is approved, the earliest start date for cap-subject employment is October~1 of the relevant fiscal year \citep{uscis_h1b_fy2021_file}. Appendix Figure \ref{fig:h1b_timeline} summarizes the timeline.
+
+% Two implications follow. First, lottery selection is not the same as final H-1B take-up. A selected registration must still be converted into a filed petition and then adjudicated. Second, the relevant horizon between lottery resolution and H-1B activation is long. Employers commonly learn the lottery outcome in late March, but the new H-1B status generally does not begin until October. For workers already employed under another temporary status, that gap can often be bridged. For workers with no alternative work authorization, however, the lottery outcome can be pivotal.
+
+% A second institutional detail is the treatment of advanced-degree-exempt applicants. Under the rules in force for the period I study, the order of selection was the regular cap first and the advanced-degree exemption second, increasing the probability that U.S. advanced-degree holders receive a visa relative to otherwise similar applicants \citep{uscis_h1b_final_rule_2019, uscis_h1b_overview_2021}. That feature is central for the empirical design because the lottery is random only conditional on the applicant's lottery bucket. Throughout the paper I therefore condition on, or interact treatment with, ADE status.
+
+% \subsection{OPT and the modern pre-H-1B worker}
+
+% The central institutional fact behind the linkage strategy is the importance of Optional Practical Training (OPT). F-1 students can typically work for up to 12 months after completing their studies through post-completion OPT, and eligible STEM graduates can apply for a 24-month extension, yielding up to 36 months of work authorization in total \citep{ice_practical_training_2024, uscis_opt_2024}. For many international graduates of U.S. universities, the typical sequence is therefore: graduate, begin working immediately for a U.S. employer under OPT, and then enter the H-1B lottery one or more times while already employed.
+
+% This has three consequences for the analysis. First, many lottery applicants are already attached to the sponsoring employer before the lottery takes place. That creates a feasible linkage design, because the relevant candidate pool in LinkedIn data is not ``everyone in the world with similar demographics'' but rather ``workers already observed at the sponsoring firm around the lottery date.'' Second, lottery loss need not imply immediate separation from the employer or immediate exit from the United States. A worker who loses can remain under the initial 12-month OPT period, under the STEM extension, through cap-gap protection if a later petition is pending, or through another temporary status \citep{uscis_cap_gap_2025}. Third, the treatment effect of winning should vary with remaining runway on OPT. The difference between winning and losing is likely to be largest when alternative work authorization is about to expire.
+
+% \subsection{Multiple registrations and integrity concerns}
+
+% The move to electronic registration substantially lowered the cost of entering the lottery. That change reduced paperwork for legitimate employers, but it also created scope for multiple registrations on behalf of the same beneficiary. During the years in my sample, the random selection operated at the registration level rather than at the beneficiary level, meaning that a worker with multiple registrations could receive more chances in the lottery. USCIS later adopted a beneficiary-centric selection process in response to these integrity concerns, beginning after the main years I study \citep{uscis_integrity_2024, uscis_beneficiary_centric_2025}. This matters empirically because duplicate-heavy employers and outsourcing-style applications can distort both the interpretation of the lottery and the quality of individual linkage. I therefore describe the multiple-registration issue explicitly in the data section and treat it as both an institutional feature of the sample period and a source of robustness checks in the linked analysis.

@@ -798,11 +798,9 @@ ipeds["cip_str"] = _pad_cip(ipeds.get("cipcode", pd.Series(dtype="Int64")))
 def _assign_econ_group(cip: str) -> str | None:
     if cip is None:
         return None
-    if cip == "450601":
-        return "General Economics (Non-STEM OPT)"
     if cip == "450603":
         return "Econometrics (STEM OPT)"
-    if cip in {"450602", "450604", "450605", "450699"}:
+    if cip in {"450601", "450602", "450604", "450605", "450699"}:
         return "Other Economics (Non-STEM OPT)"
     return None
 
@@ -841,12 +839,7 @@ if not isinstance(axes, np.ndarray):
 for ax, degree in zip(axes, sorted(econ_grouped["awlevel_group"].unique())):
     subset = econ_grouped[econ_grouped["awlevel_group"] == degree]
     for group_name, grp in subset.groupby("econ_group"):
-        ax.plot(grp["year"], grp["completions"], marker="o", label = group_name)
-    ax.axvline(2014, color = 'red', linestyle='--', linewidth=1)
-    # add grey box between 2014 and 2016
-    ax.axvspan(2014, 2016, color='gray', alpha=0.3)
-    ax.axvline(2016, color = 'red', linestyle='--', linewidth=1)
-    ax.axhline(1, color="gray", linestyle="--", linewidth=1)
+        ax.plot(grp["year"], grp["completions"], marker="o", label = group_name, color = "#2e8b57" if group_name == "Econometrics (STEM OPT)" else "#e07a5f")
     ax.set_ylabel("Total Master's Degrees")
     ax.set_xlabel("Year")
     ax.legend()

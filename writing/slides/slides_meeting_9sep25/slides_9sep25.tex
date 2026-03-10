@@ -1,0 +1,160 @@
+\documentclass[xcolor=dvipsnames, compress, 12pt, aspectratio=169, handout]{beamer}
+\usepackage{../preamble_slides}
+\usepackage{pifont}
+
+\title{H-1B Visa Project: Updates}
+\author{Amy Kim}
+\date{August 28, 2025}
+
+\begin{document}
+\begin{frame}[plain]
+    \titlepage
+    \addtocounter{framenumber}{-1}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Overview}
+    \begin{enumerate}
+        \item Misc Updates
+        \item Results: Taking Stock + Some New Things
+        \item Zooming Out: Research questions and next steps
+    \end{enumerate}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Misc Updates}
+    \begin{itemize}
+        \item Possibility of \textit{four} tries at H-1B lottery (internships)
+        \item Using WLS instead of OLS on weighted averages
+        \item Issue with weights:
+        \begin{itemize}
+            \item Weights are measure of `how certain' I am of match -- higher for those who have names distinctively associated w ethnicity or who list university outside of US, could lead to selected sample? 
+            \item Still unbiased if same problem among winners and losers but what am I really measuring?
+        \end{itemize}
+        \item Possibility of alternate empirical strategy: 
+        \begin{itemize}
+            \item Start with given program x year on LinkedIn (e.g. 2023 Masters of Finance at Princeton) 
+            \item Use \textit{firm}(x country?)-level H-1B lottery win rate to construct cohort-level shock
+            \item Compare outcomes at cohort level
+            \item Much weaker measure of lottery win/loss but sidesteps individual linking issues and sample is clearly defined
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Updates: Remain at Company After 1 Year}
+    $stay1yr_{jct} = \gamma_{ct} + \beta_1 win_j + \beta_2 ADE_j + \varepsilon_{jct}$
+    \begin{itemize} 
+        \item Issue: $\beta_1$ `diluted' because of repeat tries at lottery 
+        \item Solution: subset to sample less likely to try again
+        \begin{itemize}
+            \item First strategy: employers that exhibit `repeat try' behavior vs. employers that do not 
+            \begin{itemize}
+                \item Would expect `repeat try' employers sample to have much smaller coefficient than `non-repeat try' employers 
+            \end{itemize}
+            \item Second strategy: filter by years after graduation 
+            \begin{itemize}
+                \item Would expect lottery to matter more for people >3 years out of school
+            \end{itemize}
+        \end{itemize}
+        \item Sample: Full Baseline sample (with high multiplicity but large sample size)
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Raw Data: Mean of stay1yr by Years Since Graduation}
+    \centering
+    \includegraphics[width=0.7\textwidth]{\outputpath/graddiff_work1yr_sep9.png}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Results}
+    Trend disappears after including firm x year fixed effects\textemdash insufficient within-firm variation?
+    \centering 
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{lcccccc}
+    \toprule
+     & All & `Repeat' Emp. & `Non-Repeat' Emp. & Grad  $<3$ Yrs & Grad $>3$ Yrs & All\\
+    & (1) & (2) & (3) & (4) & (5) & (6) \\
+    \midrule
+    winner & 0.0062*** & -0.0040 & 0.0315*** & 0.0070** & -0.0000 & 0.0062*** \\
+    & (0.0021) & (0.0036) & (0.0116) & (0.0034) & (0.0057) & (0.0023) \\
+    winner $\times$ grad 3 yrs & &&&&& -0.0004 \\
+    &&&&&& (0.0058) \\
+    \midrule
+    \textbf{Obs.} & 988,941 & 284,366 & 31,541 & 309,620 & 217,061 & 988,941 \\
+    \midrule
+    \textbf{DV mean} & 0.698 & 0.720 & 0.662 & 0.659 & 0.704 & 0.698 \\
+    \bottomrule
+    \end{tabular}
+    }
+\end{frame}
+
+\begin{frame}
+    \frametitle{Additional Outcomes}
+\centering 
+\resizebox{\textwidth}{!}{
+    \begin{tabular}{lcccccc}
+\toprule
+& In US 1yr & In US 2yr & In Home Ctry 1yr & In Home Ctry 2yr & Educ 1yr & Educ 2yr \\
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+winner & 0.0025** & 0.0040*** & -0.0016** & -0.0023*** & -0.0002 & 0.0028 \\
+& (0.0010) & (0.0013) & (0.0008) & (0.0008) & (0.0020) & (0.0021) \\
+\midrule
+\textbf{Obs.} & 988,941 & 988,941 & 988,941 & 988,941 & 988,941 & 988,941 \\
+\midrule
+\textbf{DV mean} & 0.961 & 0.930 & 0.011 & 0.011 & 0.149 & 0.174 \\
+\bottomrule
+\end{tabular}
+}
+\end{frame}
+
+\begin{frame}[allowframebreaks]
+    \frametitle{Original Research Questions from April}
+    When workers lose the H-1B visa...
+    \vspace{2mm}
+    \begin{itemize}
+        \item \textbf{Characterizing Losers:} where do they go? 
+        \begin{itemize}
+            \item Immediately answerable with current data, but limited scope and maybe not the most interesting question. 
+        \end{itemize}
+        \vspace{4mm}
+        \item \textbf{Worker Outcomes:} how does it affect their wages?
+        \begin{itemize}
+            \item Would require linking with better income data (e.g. Equifax?) Seems like some work but doable.
+            \item If result is positive, maybe kind of obvious? If result is null, could be too noisy?
+            \item If result of interest is specific dollar return to winning H-1B, I likely can't measure that very accurately (data and linkage too messy)
+        \end{itemize}
+        \vspace{7mm}
+        \item \textbf{Productivity/Entrepreneurship:} how does it affect their productivity? Employer mobility limiting entrepreneurship?
+        \begin{itemize}
+            \item Potentially most interesting question
+            \item Productivity: would neeed to link with GitHub data (I think this would be extremely difficult and very small sample)
+            \item Mobility: I'm finding that people don't actually really leave their employer at rates we would expect. So very small sample of people leaving to measure mobility effects? Would also need some other source of data (international patents)?
+        \end{itemize}
+        \item \textbf{(Additional) Firm Outcomes:} promotions, job postings, recruitment strategies? 
+        \begin{itemize}
+            \item Not as novel 
+            \item Doable with current data 
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Next Steps}
+    \begin{enumerate}
+        \item Thinking more about inference/metrics 
+        \begin{itemize}
+            \item Results are very sensitive
+            \item I think I ideally want to be doing bootstrapped SEs
+            \item Talking to Dave today
+        \end{itemize}
+        \item Cleaning data more
+        \begin{itemize}
+            \item Two weak points are company matching and nationality imputation -- I think I can make progress using ML/LLM-assisted matching strategies 
+        \end{itemize}
+        \item Writing up results vs. linking new data?
+    \end{enumerate}
+\end{frame}
+\end{document}

@@ -1,0 +1,236 @@
+\documentclass[xcolor=dvipsnames, compress, 12pt, aspectratio=169, handout]{beamer}
+\usepackage{../preamble_slides}
+
+\title{H-1B Visa Project: Updates}
+\author{Amy Kim}
+\date{August 13, 2025}
+
+\begin{document}
+\begin{frame}[plain]
+    \titlepage
+    \addtocounter{framenumber}{-1}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Updates}
+    \begin{enumerate}
+        \item \textbf{Benchmarking Regression Results}
+        \begin{itemize}
+            \item Last time: regression results where outcome indicator for still being at company in $t+1, t+2,...$ 
+            \item What would we actually expect the coefficient to be with no measurement error? How do my results compare?
+        \end{itemize}
+        \vspace{2mm}
+        \item \textbf{New Results}
+        \begin{itemize}
+            \item What is actually happening to winners/losers? (Staying in U.S., return to school, promotions, etc.)
+        \end{itemize}
+        \vspace{2mm}
+        \item \textbf{Miscellaneous}
+        \begin{itemize}
+            \item Updates on questions from last time and potential data issues
+        \end{itemize}
+    \end{enumerate}
+\end{frame}
+
+\section{Benchmarking Regression Results}
+\begin{frame}
+    \frametitle{Empirical Strategy: Basic Version}
+For H-1B lottery application $j$:
+\begin{equation*}
+    stay^{1yr}_{i(j), c(j), t(j)} = \beta_0 + \beta_1 win_{j} + \varepsilon{j}
+\end{equation*}
+
+where $i(j)$, $c(j)$, and $t(j)$ denote the individual, company, and lottery year respectively of application $j$, $stay_{i,c,t}$ indicates whether individual $i$ who was observed working at company $c$ in year $t$ is still working at the firm one year later (in $t+1$). $win_{j}$ indicates whether application $j$ was selected in the H-1B lottery.
+
+\vspace{2mm}
+Our coefficient of interest is $\beta_1$, the effect of winning the lottery on staying at the firm (suppressing some notation for convenience):
+\begin{equation*}
+    \beta_1 = \mathbb{E}[stay_{ict}|win_j = 1] - \mathbb{E}[stay_{ict}|win_j = 0]
+\end{equation*} 
+\vspace{2mm}
+
+In a world where all lottery losers leave immediately ($\mathbb{E}[stay_{ict}|win_j = 0] = 0$) and everyone else stays with probability $r$ ($\mathbb{E}[stay_{ict}|win_j = 1] = r$), we have $\beta_1 = r$. 
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Complication 1: Losers Don't Leave Immediately}
+In my setting, the first reason why I might be estimating a smaller $\beta_1$ than expected is because of the repeated draw structure of the lottery.
+\vspace{2mm}
+
+Let's assume that all applicants $i(j)$ are on 3-year OPT visas, so they apply for the H-1B visa every year until they win, with a max of three attempts. Applicants who are on their third try and lose leave the company immediately, otherwise they stay with probability $r$. Then:
+\begin{align*}
+    \mathbb{E}[stay_{ict}|win_j = 0] &= \mathbb{E}[\mathbb{E}[stay_{ict}|win_j=0, attempt(j) = a] | win_j = 0] \\
+    &= \mathbb{P}[attempt(j) < 3] \cdot r + \mathbb{P}[attempt(j) = 3] \cdot 0 \\
+    &= (1-s_3) \cdot r
+\end{align*} 
+where $attempt(j) \in \{1,2,3\}$ denotes the `attempt number' of application $j$ and $s_3$ represents the share of applicants that are on their third attempt.
+\end{frame}
+
+\begin{frame}
+    \frametitle{Complication 2: Multiplicity/Mismeasurement}
+    The second complication is when I measure $stay_{ict}$, I'm really measuring a weighted average of the true $stay_{ict}$ and the $stay_{i'ct}$ for some falsely matched individuals $i'$. If the true individual has weight $w$ on average and the falsely matched individuals have average stay rate $q$:
+
+    \begin{align*}
+        \mathbb{E}[\hat{\beta}_1] &= w\cdot r + (1-w) \cdot q - (w \cdot (1-s_3) \cdot r + (1-w) \cdot q) \\ 
+        &= w s_3 r
+    \end{align*}
+
+    Note that all estimated coefficients (not just for outcome stay rate) will be downweighted by $w$ under these assumptions.
+\end{frame}
+
+\begin{frame}
+    \frametitle{Putting it All Together}
+    \begin{equation*}
+        \mathbb{E}[\hat{\beta}_1] = w s_3 r
+    \end{equation*}
+    \begin{itemize}
+        \item Estimating $r$ (average stay rate of winners): various methods yield similar estimates of 0.5
+        \item Estimating $s_3$ (share of applicants in sample that are on their third try): assuming constant win probability of $0.4$ in sample yields estimate of 0.18
+        \item Estimating $w$ (average weight on `true match'): depending on merge specification, estimates range from 0.5 to 0.7
+    \end{itemize}
+    \begin{align*}
+        \hat{w} \cdot \hat{s}_3 \cdot \hat{r} \in [0.5 \cdot 0.18 \cdot 0.5, 0.7 \cdot 0.18 \cdot 0.5] = [0.045, 0.063]
+    \end{align*}
+    So even if I'm estimating and measuring everything correctly, in the best matched sample I would only expect to see a coefficient of $0.06$.
+\end{frame}
+
+\begin{frame}
+    \frametitle{Some Implications}
+    \begin{equation}
+        \mathbb{E}[\hat{\beta}_1] = w s_3 r
+    \end{equation}
+    \begin{enumerate}
+        \item The estimated coefficient on $stay_{ict}$ should increase as $s_3$ (the share of the sample that is on their third try) increases.
+        \begin{itemize}
+            \item I can vary this either by restricting the lottery year ($s_3$ should increase in later years as the lottery gets harder), or by measuring outcome $stay^{2yr}$ (the resulting coefficient would be downweighted instead by $s_2 > s_3$)
+            \item If the estimated coefficient does not increase with $s_3$, it suggests that my ex-ante three year OPT model of behavior is incorrect (or that there is mismeasurement)
+        \end{itemize}
+        \item The estimated coefficient on $stay_{ict}$ should increase as $w$ (the average weight of the `true' individual) increases.
+        \begin{itemize}
+            \item I can vary this in the `postfiltered' merge sample, which is explicitly filtered on multiplicity
+            \item If the estimated coefficient does not increase with $w$, it suggests mismeasurement
+        \end{itemize}
+    \end{enumerate}
+\end{frame}
+
+
+\begin{frame}
+    \frametitle{Comparing Benchmarks to Real Results}
+    Baseline regression + control for ADE and firm x year fixed effects:
+    \small
+    \centering
+\resizebox{0.85\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{\textbf{1. Low Multiplicity}} 
+& \multicolumn{2}{c}{\textbf{2. Medium Multiplicity}} 
+& \multicolumn{2}{c}{\textbf{3. High Multiplicity}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& stay1yr & stay2yr &  stay1yr & stay2yr & stay1yr & stay2yr \\
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+win & 0.0149   &   0.0318**  &    0.0155**   &   0.0171**    & 0.0154***  &    0.0126** \\
+& (0.0124)   &   (0.0135)     & (0.0072)   &   (0.0078)    &  (0.0056)   &   (0.0061) \\
+\midrule
+\textbf{Obs.}      & 2920     &    2920     &     7007     &      7007      &      10363        &     10363 \\
+\midrule
+\textbf{DV mean for winners} ($\hat{r}$) & 0.507 & 0.420 & 0.506 & 0.417 & 0.507 & 0.416 \\
+$\hat{s}$ & 0.18 & 0.3 & 0.18 & 0.3 & 0.18 & 0.3 \\
+$\hat{w}$ & 0.790 & 0.790 & 0.620 & 0.620 & 0.536 & 0.536 \\
+\textbf{Predicted coefficient} ($wsr$) & 0.072 & 0.100 & 0.057 & 0.078 & 0.049 & 0.067 \\
+% Predicted relative coef size & 1 & 1.39 & 0.79 & 1.08 & 0.68 & 0.93 \\
+% Actual relative coef size & 1 & 2.13 & 1.04 & 1.15 & 1.03 & 0.85 \\
+\bottomrule
+\end{tabular}
+}
+
+\end{frame}
+\section{New Results}
+\begin{frame}
+    \frametitle{New Outcome Variables}
+    \begin{itemize}
+        \item us1yr and us2yr: indicator for working in US 1 and 2 yrs after lottery 
+        \item promote1yr and promote2yr: indicator for working at same firm but switching jobs 1 and 2 yrs after lottery 
+        \item school1yr and school2yr: indicator for attending school 1 and 2 yrs after lottery 
+        \item Also have Revelio imputed salary, but it seems really bad so looking for a way to improve on that (maybe looking at indicators for different jobs)
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{New Results}
+    Baseline regression + control for ADE and firm x year fixed effects (medium multiplicity sample):
+    \vspace{2mm}
+    \small
+
+
+    \centering
+\resizebox{0.85\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& us1yr & us2yr &  promote1yr & promote2yr & school1yr & school2yr \\
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+win & 0.0079**  &      0.0077     &  -0.0015    &    0.0015   &     0.0030   &      0.0090 \\
+& (0.0034)  &    (0.0047)  &    (0.0064)   &   (0.0072)   &   (0.0075)    &   (0.0076) \\
+\midrule
+\textbf{Obs.}      & 7007     &      7007     &     7007     &      7007      &     7007     &      7007  \\
+\midrule
+\textbf{DV mean} & 0.953 & 0.905 & 0.192 & 0.271 & 0.341 & 0.372 \\
+\bottomrule
+\end{tabular}
+}
+
+\end{frame}
+
+
+\begin{frame}
+    \frametitle{Miscellaneous Updates}
+\begin{itemize}
+            \item Evaluating merge quality for winners (more info on winner applications): seems to be pretty good, more than half of applications are matched to at least one indiv with exact match on field of study or job title (pretty restrictive) 
+            \item From last time: winners and losers balanced on multiplicity, so any match issues shouldn't create bias
+            \item Data quality issues: trying to contact Revelio rep through Charissa
+            \item Previous result on updated date incorrect: I think updated date actually refers to date Revelio data was refreshed from LinkedIn, not date profile was updated
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Next Steps}
+    Potential paths forward 
+    \begin{itemize}
+        \item Go back and work on improving matching (putting time limit of a month or two)
+        \item Try to start putting together working draft
+        \item Merge in external data sources 
+    \end{itemize}
+\end{frame}
+
+\appendix
+
+
+\begin{frame}
+    \frametitle{Estimating $w$ in Data}
+
+    \begin{itemize}
+        \item \textbf{Method 1:} If I assume the match with the highest weight is the `true match' then I can estimate $\hat{w} = \frac{1}{n} \sum_{j} \max_{i' \in \mathcal{I}(j)} w_{i'j}$ where $\mathcal{I}(j)$ is the set of individuals to which application $j$ is matched (average of max weight)
+        \begin{itemize}
+            \item Under this method I estimate $\hat{w} \in [0.55,0.7]$ for various merge specifications
+        \end{itemize}
+        \vspace{2mm}
+        \item \textbf{Method 2:} If I instead assume the `true match' has an equal probability of being any of the potential matches regardless of weight, I can estimate $\hat{w} = \frac{1}{n} \sum_{j} \frac{1}{|\mathcal{I}(j)|}\sum_{i' \in \mathcal{I}(j)} w_{i'j}$ (average of average weight)\footnote{Last time I talked about multiplicity, the avg number of LinkedIn profiles to which a given application is matched, which ranges from 2 to 8 in these samples. Last time we talked about inverting this number to get w, which would imply 0.1 to 0.5. But I think averaging after inverting makes more sense when thinking about average weight of the true individual.}
+        \begin{itemize}
+            \item Under this method I estimate $\hat{w} \in [0.5,0.65]$ for various merge specifications
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+
+\begin{frame}
+    \frametitle{Estimating $s_3$ in Data}
+    In reality $s_3$ is lottery year dependent, but for now assume win probability $p$ is constant across years and the number of applicants is also constant across years (not far from true in our sample). Then:
+    \begin{equation*}
+        s_3 = \frac{(1-p)^2}{1 + (1-p) + (1-p)^2}
+    \end{equation*}
+    In our merged sample I estimate $\hat{p} \approx 0.4$, so $\hat{s}_3 \approx 0.18$. In reality since $p$ is actually decreasing over time, $s_3$ is larger in later lottery years.
+\end{frame}
+
+\end{document}

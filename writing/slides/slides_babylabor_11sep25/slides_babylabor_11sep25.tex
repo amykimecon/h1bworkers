@@ -1,0 +1,296 @@
+\documentclass[xcolor=dvipsnames, compress, 12pt, aspectratio=169, handout]{beamer}
+\usepackage{../preamble_slides}
+\usepackage{pifont}
+
+\title{Labor Market Effects of Winning the H-1B Lottery}
+\author{Amy Kim}
+\date{September 11, 2025}
+
+\begin{document}
+\begin{frame}[plain]
+    \titlepage
+    \addtocounter{framenumber}{-1}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Project Overview}
+    \begin{itemize}
+        \item \textbf{Research Question:} What is the individual-level effect of winning the H-1B lottery on labor market outcomes?
+        \vspace{2mm}
+        \item \textbf{Data:} H-1B lottery applications and LinkedIn profile data from Revelio
+        \vspace{2mm}
+        \item \textbf{Empirical challenge:} linkage with limited information 
+        \begin{itemize}
+            \item H-1B data contains only country of nationality, year of birth, gender, firm 
+            \item But hard to use firm\textemdash if individual loses lottery, can't observe as working at firm?
+        \end{itemize}
+        \vspace{2mm}
+        \item \textbf{Solution:} Restrict to sample of international STEM students 
+        \begin{itemize}
+            \item STEM grads have 3-year work permit (OPT)
+            \item Hypothesis: STEM grads work at firm on OPT, apply for H-1B lottery every year until they win
+            \item Should therefore be able to observe as working at firm regardless of lottery outcome
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Project Progress}
+    \begin{itemize}
+        \item This summer: 
+        \begin{itemize}
+            \item First pass at linkage, much harder than anticipated 
+            \item Initial results difficult to interpret (real or just noise?)
+            \item \textbf{Conclusion:} this paper will be a noisy/shaky stab at a very big and important question (not ideal for JMP but still meaningful contribution to field)
+            \item Next steps: write up paper ASAP and pivot
+        \end{itemize}
+        \item \textbf{Today:} present results, talk about obstacles
+        \item Looking for feedback on:
+        \begin{itemize}
+            \item Most compelling `story' for this paper (with minimal additional work)
+            \item Empirics: inference with probabilistic matching 
+            \item Interesting future directions/projects 
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Step One: Linkage}
+    \textbf{Overview}
+    \begin{itemize}
+        \item I impute nationality, YOB, gender for individual LinkedIn users and match to H-1B applications, assigning weights based on how certain I am of a match
+        \item Then I further filter matches based on tenure at firm, occupation history, etc.
+        \item \textbf{Resulting Baseline Sample:} 989k LinkedIn users matched to 78k applications (`multiplicity' of 13)
+        \begin{itemize}
+            \item Alt. Samples: restrict the sample to exclude common countries, larger firms, etc.
+        \end{itemize}
+    \end{itemize}
+    \vspace{2mm}
+    \textbf{Key Empirical Problems}
+    \begin{enumerate}
+        \item Selection/External Validity: lower match weight for individuals with less info on profile, no benchmark for how many applications I \textit{should} be able to match
+        \item Noise: Each application matched to many potential users, dilutes true estimate
+    \end{enumerate}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Step Two: Collapsing Matches}
+    \textbf{Overview}
+    \begin{itemize}
+        \item For now: I collapse observations to the application level (compute weighted average of relevant variables using whatever weights I have)
+        \item Eventually: calibrate weights + simulate draws based on weights (`bootstrap'-style) 
+    \end{itemize}
+    \vspace{2mm}
+    \textbf{Key Empirical Problem:}
+    \begin{enumerate}
+        \item Simulating draws is complicated because many LinkedIn users are matched (with high weight) to multiple potential applications\textemdash prior literature? Inference?
+    \end{enumerate}
+\end{frame}
+\begin{frame}
+    \frametitle{Step Three: Estimation}
+    For application $j$ for an individual at company $c$ in lottery year $t$ I estimate:
+    \begin{equation}
+        y_{jct} = \beta_0 + \beta_1 win_j + \beta_2 ADE_j + \varepsilon_{jct}
+    \end{equation}
+    where $win_j$ indicates winning the lottery and $ADE_j$ indicates `Advanced Degree Exemption' status (the only thing that changes your lottery odds), outcomes $y_{jct}$ include:
+    \begin{itemize}
+        \item $work1yr$ ($work2yr$): indicator for still working at firm one (two) years after lottery
+        \item $us1yr$ ($us2yr$): indicator for still working in the U.S. one (two) years after lottery
+        \item $educ1yr$ ($educ2yr$): indicator for re-entering school one (two) years after lottery
+    \end{itemize}
+    In some specifications I also include firm x year fixed effects.
+
+    \vspace{2mm}
+    \textbf{Identification Assumption:} winning is random conditional on ADE status \textemdash this seems to be true! Yay!
+\end{frame}
+
+\begin{frame}
+    \frametitle{Results (one year post lottery)}
+    \centering 
+    \resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{work1yr} & \multicolumn{2}{c}{us1yr} & \multicolumn{2}{c}{educ1yr} \\
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+win & 0.0186*** & 0.0054** & 0.0071*** & 0.0021* & -0.0082*** & 0.0006 \\
+& (0.0024) & (0.0025) & (0.0011) & (0.0012) & (0.0024) & (0.0026) \\
+\midrule
+Firm x Year FEs & No & Yes & No & Yes & No & Yes \\
+\midrule 
+\textbf{Obs.} & 77,606 & 77,606 & 77,606 & 77,606 & 77,606 & 77,606 \\
+\textbf{DV mean} & 0.690 & 0.690 & 0.950 & 0.950 & 0.248 & 0.248 \\
+\bottomrule
+\end{tabular}
+    }
+\end{frame}
+
+\begin{frame}
+    \frametitle{Results (two years post lottery)}
+    \centering 
+    \resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{work2yr} & \multicolumn{2}{c}{us2yr} & \multicolumn{2}{c}{educ2yr} \\
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+win &  0.0052* & 0.0010 & 0.0153*** & 0.0038** & -0.0049** & 0.0029 \\
+& (0.0027) & (0.0027) & (0.0015) & (0.0016) & (0.0025) & (0.0027) \\
+\midrule
+Firm x Year FEs & No & Yes & No & Yes & No & Yes \\
+\midrule 
+\textbf{Obs.} & 77,606 & 77,606 & 77,606 & 77,606 & 77,606 & 77,606 \\
+\textbf{DV mean} & 0.523 & 0.523 & 0.911 & 0.911 & 0.276 & 0.276 \\
+\bottomrule
+\end{tabular}
+    }
+\end{frame}
+
+\begin{frame}
+    \frametitle{Benchmarking Results: Why Are Coefficients So Small?}
+    When estimating the coefficient $\beta_1$ on $win$ for outcome $work1yr$, we can decompose:
+    \begin{equation*}
+        \mathbb{E}[\hat{\beta}_1] = r \cdot s_3 \cdot w \approx 0.07
+    \end{equation*}
+    \begin{itemize}
+        \item $r \equiv \mathbb{E}[work1yr_{jct}|win_j = 1]$ represents the probability of an individual staying at the firm conditional on winning the lottery 
+        \begin{itemize}
+            \item Estimate in data: $r \approx 0.7$
+        \end{itemize}
+        \item $s_{last}$ represents the share of applicants that are on their `last attempt' at the lottery
+        \begin{itemize}
+            \item Estimate in theory: if all applicants get three tries and win probability is 0.4 in all years, $s_{last} \approx 0.18$
+        \end{itemize}
+        \item $w$ represents the average weight of the `true' applicant among all potential matches
+        \begin{itemize}
+            \item Estimate in data (mean of max weight): $w \approx 0.54$ 
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Conclusion and Next Steps}
+    \begin{itemize}
+        \item \textbf{Fundamental Problem:} difficult to distinguish whether coefficient small due to $s_{last}$ (`real' policy-relevant parameter) or $w$ (measurement error)
+        \vspace{2mm}
+        \item What outcomes/channels are most compelling to dig further into? 
+        \begin{itemize}
+            \item Promotions (change jobs within firm)
+            \item Entrepreneurship/mobility (changing firms, focus on smaller firms)
+            \item Education (idk but seems weird anecdotally that there's not much of a result)
+            \item Conditional on leaving US: where do they go? what kinds of jobs do they work?
+            \item If they lose lottery and don't leave firm, what does their trajectory look like?
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\appendix
+\begin{frame}
+    \frametitle{Empirical Strategy: Basic Version}
+For H-1B lottery application $j$:
+\begin{equation*}
+    stay^{1yr}_{i(j), c(j), t(j)} = \beta_0 + \beta_1 win_{j} + \varepsilon{j}
+\end{equation*}
+
+where $i(j)$, $c(j)$, and $t(j)$ denote the individual, company, and lottery year respectively of application $j$, $stay_{i,c,t}$ indicates whether individual $i$ who was observed working at company $c$ in year $t$ is still working at the firm one year later (in $t+1$). $win_{j}$ indicates whether application $j$ was selected in the H-1B lottery.
+
+\vspace{2mm}
+Our coefficient of interest is $\beta_1$, the effect of winning the lottery on staying at the firm (suppressing some notation for convenience):
+\begin{equation*}
+    \beta_1 = \mathbb{E}[stay_{ict}|win_j = 1] - \mathbb{E}[stay_{ict}|win_j = 0]
+\end{equation*} 
+\vspace{2mm}
+
+In a world where all lottery losers leave immediately ($\mathbb{E}[stay_{ict}|win_j = 0] = 0$) and everyone else stays with probability $r$ ($\mathbb{E}[stay_{ict}|win_j = 1] = r$), we have $\beta_1 = r$. 
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Complication 1: Losers Don't Leave Immediately}
+In my setting, the first reason why I might be estimating a smaller $\beta_1$ than expected is because of the repeated draw structure of the lottery.
+\vspace{2mm}
+
+Let's assume that all applicants $i(j)$ are on 3-year OPT visas, so they apply for the H-1B visa every year until they win, with a max of three attempts. Applicants who are on their third try and lose leave the company immediately, otherwise they stay with probability $r$. Then:
+\begin{align*}
+    \mathbb{E}[stay_{ict}|win_j = 0] &= \mathbb{E}[\mathbb{E}[stay_{ict}|win_j=0, attempt(j) = a] | win_j = 0] \\
+    &= \mathbb{P}[attempt(j) < 3] \cdot r + \mathbb{P}[attempt(j) = 3] \cdot 0 \\
+    &= (1-s_3) \cdot r
+\end{align*} 
+where $attempt(j) \in \{1,2,3\}$ denotes the `attempt number' of application $j$ and $s_3$ represents the share of applicants that are on their third attempt.
+\end{frame}
+
+\begin{frame}
+    \frametitle{Complication 2: Multiplicity/Mismeasurement}
+    The second complication is when I measure $stay_{ict}$, I'm really measuring a weighted average of the true $stay_{ict}$ and the $stay_{i'ct}$ for some falsely matched individuals $i'$. If the true individual has weight $w$ on average and the falsely matched individuals have average stay rate $q$:
+
+    \begin{align*}
+        \mathbb{E}[\hat{\beta}_1] &= w\cdot r + (1-w) \cdot q - (w \cdot (1-s_3) \cdot r + (1-w) \cdot q) \\ 
+        &= w s_3 r
+    \end{align*}
+
+    Note that all estimated coefficients (not just for outcome stay rate) will be downweighted by $w$ under these assumptions.
+\end{frame}
+
+\begin{frame}
+    \frametitle{Putting it All Together}
+    \begin{equation*}
+        \mathbb{E}[\hat{\beta}_1] = w s_3 r
+    \end{equation*}
+    \begin{itemize}
+        \item Estimating $r$ (average stay rate of winners): various methods yield similar estimates of 0.5
+        \item Estimating $s_3$ (share of applicants in sample that are on their third try): assuming constant win probability of $0.4$ in sample yields estimate of 0.18
+        \item Estimating $w$ (average weight on `true match'): depending on merge specification, estimates range from 0.5 to 0.7
+    \end{itemize}
+    \begin{align*}
+        \hat{w} \cdot \hat{s}_3 \cdot \hat{r} \in [0.5 \cdot 0.18 \cdot 0.5, 0.7 \cdot 0.18 \cdot 0.5] = [0.045, 0.063]
+    \end{align*}
+    So even if I'm estimating and measuring everything correctly, in the best matched sample I would only expect to see a coefficient of $0.06$.
+\end{frame}
+
+\begin{frame}
+    \frametitle{Some Implications}
+    \begin{equation}
+        \mathbb{E}[\hat{\beta}_1] = w s_3 r
+    \end{equation}
+    \begin{enumerate}
+        \item The estimated coefficient on $stay_{ict}$ should increase as $s_3$ (the share of the sample that is on their third try) increases.
+        \begin{itemize}
+            \item I can vary this either by restricting the lottery year ($s_3$ should increase in later years as the lottery gets harder), or by measuring outcome $stay^{2yr}$ (the resulting coefficient would be downweighted instead by $s_2 > s_3$)
+            \item If the estimated coefficient does not increase with $s_3$, it suggests that my ex-ante three year OPT model of behavior is incorrect (or that there is mismeasurement)
+        \end{itemize}
+        \item The estimated coefficient on $stay_{ict}$ should increase as $w$ (the average weight of the `true' individual) increases.
+        \begin{itemize}
+            \item I can vary this in the `postfiltered' merge sample, which is explicitly filtered on multiplicity
+            \item If the estimated coefficient does not increase with $w$, it suggests mismeasurement
+        \end{itemize}
+    \end{enumerate}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Updates: Remain at Company After 1 Year}
+    
+    \begin{itemize} 
+        \item Issue: $\beta_1$ `diluted' because of repeat tries at lottery 
+        \item Solution: subset to sample less likely to try again
+        \begin{itemize}
+            \item First strategy: employers that exhibit `repeat try' behavior vs. employers that do not 
+            \begin{itemize}
+                \item Would expect `repeat try' employers sample to have much smaller coefficient than `non-repeat try' employers 
+            \end{itemize}
+            \item Second strategy: filter by years after graduation 
+            \begin{itemize}
+                \item Would expect lottery to matter more for people >3 years out of school
+            \end{itemize}
+        \end{itemize}
+        \item Sample: Full Baseline sample (with high multiplicity but large sample size)
+    \end{itemize}
+\end{frame}
+
+
+\begin{frame}
+    \frametitle{Raw Data: Mean of stay1yr by Years Since Graduation}
+    \centering
+    \includegraphics[width=0.7\textwidth]{\outputpath/graddiff_work1yr_sep9.png}
+\end{frame}
+
+\end{document}

@@ -1,0 +1,53 @@
+\clearpage
+\section{Detailed Timeline of the Cap-Subject H-1B Process}
+\label{sec:appendix_context}
+
+Figure \ref{fig:h1b_timeline} provides a stylized timeline of the cap-subject H-1B process during the electronic-registration era studied in the paper. The exact calendar dates vary slightly by year, but the sequencing is stable: registration in March, lottery resolution by late March, full petition filing over roughly the next 90 days, and an earliest H-1B start date of October~1. The gap between lottery resolution and October~1 is part of the reason OPT and cap-gap protection matter so much for worker-level outcomes.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1.45cm,y=1cm,>=Latex,font=\small]
+    % timeline base
+    \draw[thick,->] (0,0) -- (8.2,0);
+    \foreach \x/\lab in {0.5/Mar,1.5/Apr,2.5/May,3.5/Jun,4.5/Jul,5.5/Aug,6.5/Sep,7.5/Oct} {
+        \draw (\x,0.08) -- (\x,-0.08);
+        \node[below=4pt] at (\x,0) {\lab};
+    }
+
+    % registration
+    \node[draw=MidnightBlue, fill=MidnightBlue!8, rounded corners, align=center,
+          minimum width=1.35cm, minimum height=0.75cm] (reg) at (0.7,1.1)
+          {Electronic\\registration};
+    \draw[MidnightBlue, thick] (0.1,0.45) -- (1.3,0.45);
+
+    % lottery
+    \node[draw=ForestGreen, fill=ForestGreen!10, rounded corners, align=center,
+          minimum width=1.3cm, minimum height=0.75cm] (lot) at (1.8,2.2)
+          {Lottery\\selection};
+    \draw[ForestGreen, thick] (1.45,1.55) -- (2.15,1.55);
+    \draw[ForestGreen,->,thick] (1.8,1.85) -- (1.8,0.1);
+
+    % petition window
+    \node[draw=BrickRed, fill=BrickRed!10, rounded corners, align=center,
+          minimum width=2.25cm, minimum height=0.75cm] (pet) at (3.1,1.1)
+          {Selected cases file\\full I-129 petition};
+    \draw[BrickRed, thick] (1.7,0.45) -- (4.5,0.45);
+
+    % adjudication / bridge period
+    \node[draw=Goldenrod!70!black, fill=Goldenrod!15, rounded corners, align=center,
+          minimum width=2.9cm, minimum height=0.82cm] (bridge) at (5.6,2.15)
+          {Petition adjudication,\\OPT, STEM OPT, and cap-gap can bridge status};
+    \draw[Goldenrod!70!black, thick] (2.0,1.55) -- (7.0,1.55);
+
+    % start date
+    \node[draw=black, fill=black!6, rounded corners, align=center,
+          minimum width=1.15cm, minimum height=0.75cm] (start) at (7.55,1.1)
+          {Earliest\\H-1B start};
+    \draw[black, thick] (7.15,0.45) -- (7.95,0.45);
+
+    % notes
+    \node[align=left, text width=13.2cm, anchor=west] at (-0.05,-1.2) {\footnotesize\textit{Notes:} Registration typically occurs in March. USCIS then runs the random selection process. Petitioners with selected registrations receive a filing window of at least 90 days to submit the full petition. For approved cap-subject petitions, the earliest start date is October~1 of the fiscal year. During the years studied here, advanced-degree-exempt applicants faced a distinct lottery path, and many workers were already employed under OPT before the lottery.};
+\end{tikzpicture}
+\caption{Stylized timeline for the cap-subject H-1B process in the electronic-registration era}
+\label{fig:h1b_timeline}
+\end{figure}

@@ -1,0 +1,4 @@
+\beamer@sectionintoc {1}{Overview}{2}{0}{1}
+\beamer@sectionintoc {2}{Initial Idea: Background and Data}{4}{0}{2}
+\beamer@sectionintoc {3}{Initial Idea: Descriptives and Empirical Strategy}{10}{0}{3}
+\beamer@sectionintoc {4}{Alternate Ideas and Brainstorming}{15}{0}{4}

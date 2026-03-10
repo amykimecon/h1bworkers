@@ -1,0 +1,6 @@
+\beamer@sectionintoc {1}{Overview}{2}{0}{1}
+\beamer@sectionintoc {2}{[SKIP] Background and Data}{4}{0}{2}
+\beamer@sectionintoc {3}{H-1B Data: Descriptives and Challenges}{9}{0}{3}
+\beamer@sectionintoc {4}{Merging with Revelio Data}{18}{0}{4}
+\beamer@sectionintoc {5}{Initial Results}{22}{0}{5}
+\beamer@sectionintoc {6}{Next Steps}{29}{0}{6}

@@ -1,0 +1,470 @@
+\documentclass[xcolor=dvipsnames, compress, 12pt, aspectratio=169, handout]{beamer}
+\usepackage{../preamble_slides}
+
+\title{H-1B Visas \& Worker Outcomes}
+\author{Amy Kim}
+\date{March 24, 2025}
+
+\begin{document}
+\begin{frame}[plain]
+    \titlepage
+\end{frame}
+
+% OPEN WITH PRIMER ON FEEDBACK IM LOOKING FOR: 
+%   first part of talk will be quick overview of slides for current idea (partly as practice, partly to introduce lit, data, context), looking for feedback on how compelling, missing/important background, etc.
+%   second part of talk will be broader look at other potential ideas, interested in feedback on which direction is most interesting + any other ideas!
+\section{Overview}
+\begin{frame}
+    \frametitle{Today's Preface and Outline}
+    \begin{itemize}
+        \item Presentation is really on a particular \textbf{context and data set}
+        \begin{itemize}
+            \item Will present a specific idea today but am ultimately looking for the \textbf{best possible idea} using this context and data
+        \end{itemize}
+        \item Part One: illustration of that context and data using my current working idea
+        \item Part Two: alternate ideas and brainstorming
+    \end{itemize}
+\end{frame}
+
+%%% TABLE OF CONTENTS
+\begin{frame}[plain]{Outline}
+    \tableofcontents
+\end{frame}
+
+
+%%% TABLE OF CONTENTS -- CURRENT SECTION
+\AtBeginSection[ ]
+{
+\begin{frame}[plain]{Outline}
+    \tableofcontents[currentsection, hideothersubsections]
+    \addtocounter{framenumber}{-1}
+\end{frame}
+}
+
+\section{Initial Idea: Background and Data}
+\begin{frame}
+    \frametitle{Introduction}
+    \begin{itemize}
+        \item H-1B visas: high-profile immigration channel, based on the idea that we need to import talent for particular high-skill jobs
+        \item H-1B lottery serves as ideal experiment to compare otherwise similar firms who can and can't use H-1B visas
+        \item Literature: large focus on crowd-out and firm-level outcomes, with mixed results \textcolor{gray}{\footnotesize[Dimmock, Huang and Weisbenner 2022; Doran, Gelber and Isen 2022; Mahajan et al. 2024]}  \hyperlink{h1blit}{\beamergotobutton{Lit Review}}
+        \item \textbf{No empirical evidence} on worker-level outcomes (e.g. promotions, turnover) at firms who win H-1B visas relative to firms who do not
+        \item \textbf{Research question:} do workers (both new hires and incumbents) at H-1B winning firms have better outcomes than workers at H-1B losing firms?
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{H-1B Visas: Policy Overview}
+    \begin{itemize}
+        \item Nonimmigrant visa for workers in `specialty occupations' 
+        \begin{itemize}
+            \item ``A specialty occupation is one that requires the application of a body of \textbf{highly specialized knowledge} and the attainment of at least a bachelor’s degree or its equivalent. The intent of the H-1B provisions is to help employers who \textbf{cannot otherwise obtain needed business skills and abilities from the U.S. workforce...}''
+        \end{itemize}
+        \item Employment-based visa: employer must apply on worker's behalf
+        \begin{itemize}
+            \item 'H-1B portability' between employers introduced in 2000, but lots of friction remains
+            \item 'Dual-intent' visa: employer can sponsor green card for worker 
+        \end{itemize}
+        \item Generally a three-year visa with a three-year extension
+        \item Capped at 65,000 normal visas annually and 20,000 advanced-degree exempt (ADE) visas for U.S. advanced degree holders (some employers exempt from cap)
+    \end{itemize}
+\end{frame}%Literature, Context and Timeline}
+
+\begin{frame}\label{h1bfiling}
+    \frametitle{H-1B Filing Process \hyperlink{data}{\beamerreturnbutton{back}}}
+        \begin{itemize}
+            \item To hire H-1B worker, firm first required to file Labor Condition Application (LCA) with DOL attesting that the job will not replace/harm incumbent workers
+            \begin{itemize}
+                \item Not tied to a specific employee, must be filed no more than six months before start date
+                \item Includes information about job type (occupation code), start and end dates, work location, and salary
+            \end{itemize}
+            \item Prior to FY2021, firms required to fill out full paperwork for H-1B (including LCA and filing fees of $\sim$\$500 per applicant). Only forms of lottery winners processed, rest thrown out. 
+            \item Starting FY2021, firms only required to fill out short form and \$10 filing fee to enter lottery, then only lottery winners required to fill out full paperwork. 
+            \begin{itemize}
+                \item Bloomberg investigation\textemdash streamlined process caused fraud to skyrocket (multiple submissions of same employee from different companies)
+            \end{itemize}
+        \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Sources of Variation: Literature and Context}
+    \begin{itemize}
+        \item Quota of 65,000 established in 1990, increased in 1999 then again in 2001, reset to 65,000 + 20,000 ADE in 2004
+        \begin{itemize}
+            \item Older literature using these aggregate increases as source of variation \textcolor{gray}{\footnotesize [Kerr and Lincoln 2010, Peri, Shih and Sparber 2015, Bound, Khanna and Morales 2017]}
+        \end{itemize}
+        \item Initially, visas allocated on a first-come, first-served basis until cap reached 
+        \item In FY2006-7, USCIS ran unannounced pilot lotteries for applicants on day that cap was reached
+        \begin{itemize}
+            \item Small sample of ~3k firms \textbf{but} includes data on lottery losers \textcolor{gray}{\footnotesize [Doran, Gelber and Isen 2022 (DGI)]}
+        \end{itemize}
+        \item In FY2008 (and most future years) the cap was reached on the first day of the filing period, so \textit{all} visas were distributed via lottery
+        \begin{itemize}
+                \item All firms \textbf{but} no data on lottery losers \textcolor{gray}{\footnotesize [Dimmock, Huang and Weisbenner 2022 (DHW); Mahajan et al. 2024 (MMSCB)]}
+                \item Instead, DHW and MMSCB use LCAs as imperfect proxy for H-1B applications
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+
+% \begin{frame}\label{h1bpolicy}
+%     \frametitle{H-1B Policy Context \& Timeline \hyperlink{data}{\beamerreturnbutton{back}}}
+%     \begin{itemize}
+%         \item Cap on H-1B visas 2004-today: 65,000 regular, 20,000 `advanced degree exemption' (ADE)
+%         \begin{itemize}
+%             \item Older literature uses increase in cap in 1999 and decrease in 2004 as source of variation
+%         \end{itemize}
+%         \item H-1B Lottery 
+%         \begin{itemize}
+%             \item H-1B petitions allocated on a first-come, first-served basis starting until cap reached 
+%             \item Most years (FY2008-9 and FY2014 onwards), cap reached immediately so all new H-1B visas allocated via random lottery 
+%             \item In other years, random lottery only for applications submitted on last day before cap reached 
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
+
+\begin{frame}
+    \frametitle{Data}
+    \begin{itemize}
+        \item \textbf{H-1B Data}
+        \begin{itemize}
+            \item Bloomberg FOIA request [FY2021-2024]: microdata on \textit{all H-1B applications}, i.e. both lottery winners and losers
+            \item Previous FOIA request [FY2017-2024]: microdata only on H-1B lottery winners 
+            \item US DOL [FY2009-2024]: microdata on LCAs (used in literature as proxy for employer H-1B demand)
+            \item USCIS Employer Hub [FY2009-2024]: employer-level data on H-1B lottery winners (missing person-level characteristics)
+        \end{itemize} 
+        \item \textbf{Revelio LinkedIn Data}
+        \begin{itemize}
+            \item Position-level data from universe of LinkedIn profiles
+        \end{itemize}
+        \item \textbf{Merging by Employer} (Currently ~60\% of H-1B Employers FY2021-4 linked)
+        \begin{itemize}
+            \item Messy! Limited info with lots of missings, need to merge on name and location only
+            \item Would love to link at the individual level, but limited info on both ends (future todo)
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\section{Initial Idea: Descriptives and Empirical Strategy}
+\begin{frame}
+    \frametitle{Taking Stock}
+    Two main contributions:
+    \begin{enumerate}
+        \item New data source\textemdash can use to answer crowd-out question again
+        \item New ideas/outcomes: what happens to workers?
+    \end{enumerate}
+\end{frame}
+
+\begin{frame}\label{h1bdesc}
+    \frametitle{H-1B Descriptives (FY2023)}
+    \begin{itemize}
+        \item 474k applications, 128k lottery wins [27\%]
+        \item 45k employers submit applications, 23k employers have at least one win [51\%]
+        \item \textbf{Rampant Fraud:} 35\% of applications are `duplicates' (same employee named on an application with a different employer) and 3.7k employers submit more applications than their total number of current U.S. employees (representing 38\% of applications)
+        \item \textbf{Long Right Tail:} 82\% of employers submit five or fewer applications, top 20 employers (incl. Amazon, Google, Meta, etc.) submit 20\% of applications
+        \item \textbf{Limited Origin Country Diversity:} 77\% of applicants from India, 7\% from China, next biggest group Canada (less than 1\%) [similar for lottery winners or excluding `duplicate' applications but more reasonable when restricting to employers with less than 5 applications]
+    \end{itemize}    
+\end{frame}
+
+\begin{frame}
+    \frametitle{Empirical Strategy and Outcomes of Interest}
+    Following DGI, for firm $j$ in year $t$ who applied for an H-1B visa in fiscal year $T$, estimate: 
+    \begin{equation}
+        Y_{jtT} = \beta_0 + \beta_1U_{jT} + \varepsilon_{jtT}
+    \end{equation}
+    where $U_{jT}$ represents `excess' lottery wins above chance (i.e. number of lottery wins net of number of applications $\times$ aggregate win rate).
+
+    \vspace{2mm}
+    I am interested in the following outcomes:
+    \begin{itemize}
+        \item \textbf{First stage:} number of H-1B visas granted (requires additional application after winning)
+        \item \textbf{Hiring:} number of workers hired; number of total workers
+        \item \textbf{Workers:} average promotion rate of new hires; turnover of incumbent workers
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Issues}
+    \begin{itemize}
+        \item Some concern about fraud\textemdash for now results exclude those applicants who have multiple applications (from diff employers) in the system in a given year but I should try harder
+        \item Can't identify ADE vs. regular \textit{applicants} (can only see if lottery winner)
+        \item Time horizon simply too short to look at interesting outcomes, also muddled by COVID 
+        \item (Not necessarily bad) really measuring total effect of H-1B visa win on promotion/turnover, including any effects on ease of switching employers
+    \end{itemize}
+\end{frame}
+
+\section{Alternate Ideas and Brainstorming}
+
+\begin{frame}
+    \frametitle{Some Other Ideas}
+    \begin{itemize}
+        \item Return migration: are H-1B hires more likely to remain in US for longer (via green card or H-1B renewal)? E.g. alternative pathway for Canadians (TN visa) has no pathway to green card.
+        \item If I can get info on previous H-1B applications: what are effects of winning on first try vs. winning on a later try? (descriptively: what do workers who don't win H-1B immediately do in the intervening years?)
+        \item Ethnic Sorting: effect of own-ethnicity hiring manager/past H-1B win on future hires
+    \end{itemize}
+\end{frame}
+
+% \begin{frame}
+%     \frametitle{H-1B Ideas: Overview}
+%     \begin{itemize}
+%         \item \textbf{Data:} FOIA H-1B data + LinkedIn Revelio data 
+%         \begin{itemize}
+%             \item Have data on full universe of H-1B applicants (lottery winners and losers) starting 2020, from 2009-2019 only data on lottery winners + a proxy for employer H-1B demand (LCAs) used in other papers 
+%         \end{itemize}
+%         \item \textbf{Idea One:} Effects of H-1B on Firms \& Workers
+%         \begin{itemize}
+%             \item Mixed results on crowd-out and firm patenting/growth from existing literature 
+%             \item No papers (\textbf{yet}) using new 2020-2024 data (full universe of H-1B applicants)
+%             \item Can answer old questions (crowd-out of H-1B visas) and new questions (Are H-1B hires higher `quality' than counterfactual hires? If crowd-out of incumbents, where do incumbents go? Effects on return migration?)
+%         \end{itemize}
+%         \item \textbf{Idea Two:} Ethnic Sorting of H-1B Workers 
+%         \begin{itemize}
+%             \item Effect of winning additional H-1B visa for worker from origin country $c$ on future hiring from $c$
+%             \item Unclear on how to disentangle mechanisms
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}\label{data}
+%     \frametitle{Available Data}
+%     \textbf{2009-2019: FOIA data + Labor Condition Applications (LCAs)}
+%     \begin{itemize}
+%         \item Full universe of LCAs (firms must submit approved LCA with H-1B application) \hyperlink{h1bfiling}{\beamergotobutton{Filing Process}}
+%         \begin{itemize}
+%             \item Employer information and job information but no employee information 
+%             \item Also no guarantee that LCA is for H-1B
+%         \end{itemize}
+%         \item FOIAed data on H-1B lottery winners: employer name and address, applicant gender, country of origin, \textcolor{gray}{YOB}, \textcolor{gray}{current visa status}, job title, salary, education level, \textcolor{gray}{field of study}, exemption status
+%         \item Lots of papers use LCAs as proxy for total number of H-1B applications
+%     \end{itemize}
+%     \textbf{2020-2024: Bloomberg FOIA data} \hyperlink{h1bdesc}{\beamergotobutton{Descriptives}}
+%     \begin{itemize}
+%             \item Full universe of H-1B lottery applications
+%             \item For losers: only company name and address, applicant gender and country and YOB, preparing `agent' name 
+%             \item For winners: same data from FOIA above 
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}[allowframebreaks]\label{idea2}
+%     \frametitle{Idea One: Revisiting Effects of H-1B on Firms and Workers}
+%     \textbf{Open Questions:} Does H-1B crowd out incumbent workers? Does H-1B improve firm innovation/growth? \hyperlink{h1blit}{\beamergotobutton{Lit Review}}
+%     \begin{itemize}
+%         \item Older papers using DiD with H-1B cap changes mostly suggest crowd-in and pos. effects on innovation \hyperlink{h1bpolicy}{\beamergotobutton{H-1B Context}}
+%         \item Mixed results for recent papers using lottery (different samples, time periods, data)
+%         \begin{itemize}
+%             \item Doran, Gelber and Isen (2022 JPE) [DGI] suggest significant crowd-out with no effect on patents; Dimmock, Huang and Weisbenner (2022 Management Science) [DHW] suggest large innovation effects for high-tech firms; Mahajan et al. (2024 WP) [MMSCB] suggest no crowd-out and large pos. eff. on firm growth
+%         \end{itemize}
+%     \end{itemize}
+%     \framebreak 
+%     \textbf{Potential Contributions:}
+%     \begin{itemize}
+%         \item Does not look like anyone has used the new Bloomberg data in a paper? Could use for better estimate of crowd-out.
+%         \begin{itemize}
+%             \item Benefits of data: data includes both winners and losers (unlike DHW and MMSCB) and all firms are subject to lottery (unlike DGI)
+%             \item Seems likely that someone is already working on this (Bloomberg data released last July) and maybe contribution to literature \textit{alone} not very large
+%         \end{itemize}
+%         \item Preferred idea: Use LinkedIn data + new \& old FOIA data to explore \textbf{what happens to incumbent workers \& new hires at firms who win the lottery vs. firms who don't}
+%         \begin{itemize}
+%             \item If crowd-out via hiring, firms who lose lottery will hire someone else instead. Is the H-1B hire more productive/better (measure via promotions/turnover)?
+%             \item Suggestive evidence that if H-1B hurts incumbents, it is more-tenured/older skilled workers. If this is true, what happens to them (where do they go? Is this an efficient outcome?)
+%             \item Return migration: are H-1B hires more likely to remain in US for longer (via green card or H-1B renewal)? E.g. alternative pathway for Canadians (TN visa) has no pathway to green card.
+%             \item If I can get info on previous H-1B applications: what are effects of winning on first try vs. winning on a later try? (descriptively: what do workers who don't win H-1B immediately do in the intervening years?)
+%             \item Also concerned that someone else might be working on this? (e.g. Khanna and Morales (2024 WP R\&R at AER) use LinkedIn data to measure effects of H-1B on Indian IT industry)
+%         \end{itemize}
+%     \end{itemize} 
+% \end{frame}
+
+
+% \begin{frame}[allowframebreaks]
+%     \frametitle{Idea Two: Ethnic Sorting of High-Skill Workers}
+%     \begin{itemize}
+%         \item \textbf{Firm-level event study:} effect of number of `excess' H-1B wins for employees from origin country $c$ (relative to expectation based on number of applications for employees from $c$ and overall probability of lottery win) on future H-1B applications/new hires from $c$
+%         \begin{itemize}
+%             % \item Controlling for incumbent employee ethnicity country composition, company characteristics (size, industry, etc.), total number of H-1B applications \& applicant country composition
+%             \item \textbf{Identification:} essentially comparing firm A and firm B, both interested in hiring same number of H-1Bs from country $c$ but firm A randomly wins an extra lottery slot for employee from country $c$
+%         \end{itemize}
+%         \framebreak
+%         \item \textbf{Key Roadblock:} I think this will not be as compelling if I can't decompose mechanisms for ethnic sorting\textemdash `employer-side' (learning, information) vs. `employee-side' (referrals/networks, homophily)
+%         \begin{itemize}
+%             \item Could use LinkedIn history to ID employees who plausibly worked/studied together, should have stronger effect if `employee-side' matters (but employer could also be learning about specific workplace/school)
+%             \item Outcomes within same employer but different workplace locations (shuts down homophily but not networks) 
+%             \item Heterogeneity by employee quality (look forward to see how quickly employee gets promoted relative to average hire) could ID employer-side?
+%         \end{itemize}
+%         \item Other issues:
+%         \begin{itemize}
+%             \item Only know country of applicant starting in 2020 (before 2020 only know country of winners, would have to use matching or controls)
+%             \item Not enough origin country heterogeneity? Issues with fraud?
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
+
+
+\appendix 
+
+\begin{frame}[allowframebreaks]\label{h1blit}
+    \frametitle{H-1B Literature Review \hyperlink{intro}{\beamerreturnbutton{back}}}
+    \textbf{Older Estimates} (event study/DiD using changes in H-1B cap from 1990s-early 2000s): 
+    \begin{itemize}
+        \item City-level estimates: Increases in patenting, native employment and wage \textbf{gains} \textcolor{gray}{[Kerr and Lincoln (2010), Peri, Shih and Sparber (2015a, 2015b)]}
+        \item Firm-level estimates: Evidence of crowd-in except maybe older skilled natives, positive eff. on growth \textcolor{gray}{[Kerr, Kerr and Lincoln (2015), Mayda et al. (2023)]}
+        \item Structural: Immigration \textbf{decr.} native emp \& wages in CS occs but incr. native welfare and firm profits via innovation \textcolor{gray}{[Bound, Khanna and Morales (2017)]}
+    \end{itemize}
+    \textbf{Newer Estimates} (using random variation from H-1B lottery): mixed results
+    \begin{itemize}
+        \item Doran, Gelber and Isen (2022): H-1B crowds out incumbent workers (mostly other immigrants) with no effects on patenting or growth
+        \begin{itemize}
+            \item Use only FY2006-7 lotteries, so sample is ~3k firms who applied on last day (tend to be larger firms, more educated applicants)
+            \item Full universe of applications observed; link to IRS admin data + patents 
+        \end{itemize}
+        \item Mahajan et al. (2024): H-1B winning firms expand with no effects for native/incumbent workers (except for incumbent high-tenure college-educated, interp. as most substitutable)
+        \begin{itemize}
+            \item Use FY2008 lottery (all firms subject to lottery)
+            \item Do not observe lottery losers (have to impute using LCAs); link to LEHD
+        \end{itemize}
+        \item Dimmock, Huang and Weisbenner (2022): H-1B winning firms more likely to receive extra VC funding, have more patents/citation
+        \begin{itemize}
+            \item Use later lotteries with larger sample but restrict to high-tech firms
+            \item Also do not observe lottery losers; link to Crunchbase
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+
+
+
+% \begin{frame}[allowframebreaks]\label{h1blit}
+%     \frametitle{H-1B Literature Review \hyperlink{idea2}{\beamerreturnbutton{back}}}
+%     \textbf{Older Estimates} (event study/DiD using changes in H-1B cap from 1990s-early 2000s): 
+%     \begin{itemize}
+%         \item City-level estimates: Increases in patenting, native employment and wage \textbf{gains} \textcolor{gray}{[Kerr and Lincoln (2010), Peri, Shih and Sparber (2015a, 2015b)]}
+%         \item Firm-level estimates: Evidence of crowd-in except maybe older skilled natives, positive eff. on growth \textcolor{gray}{[Kerr, Kerr and Lincoln (2015), Mayda et al. (2023)]}
+%         \item Structural: Immigration \textbf{decr.} native emp \& wages in CS occs but incr. native welfare and firm profits via innovation \textcolor{gray}{[Bound, Khanna and Morales (2017)]}
+%     \end{itemize}
+%     \textbf{Newer Estimates} (using random variation from H-1B lottery): mixed results
+%     \begin{itemize}
+%         \item Doran, Gelber and Isen (2022): H-1B crowds out incumbent workers (mostly other immigrants) with no effects on patenting or growth
+%         \begin{itemize}
+%             \item Use only FY2006-7 lotteries, so sample is ~3k firms who applied on last day (tend to be larger firms, more educated applicants)
+%             \item Full universe of applications observed; link to IRS admin data + patents 
+%         \end{itemize}
+%         \item Mahajan et al. (2024): H-1B winning firms expand with no effects for native/incumbent workers (except for incumbent high-tenure college-educated, interp. as most substitutable)
+%         \begin{itemize}
+%             \item Use FY2008 lottery (all firms subject to lottery)
+%             \item Do not observe lottery losers (have to impute using LCAs); link to LEHD
+%         \end{itemize}
+%         \item Dimmock, Huang and Weisbenner (2022): H-1B winning firms more likely to receive extra VC funding, have more patents/citation
+%         \begin{itemize}
+%             \item Use later lotteries with larger sample but restrict to high-tech firms
+%             \item Also do not observe lottery losers; link to Crunchbase
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}[allowframebreaks]
+%     \label{idea1}
+%     \frametitle{Idea One: Effects of Occupational Sorting on Wages}
+%     \textbf{Question:} What is the effect $\beta$ of occupational ethnic concentration ($N_{o,d,j}^t$ is the number of workers in occupation $j$ from origin country $o$ in MSA $d$ in year $t$) on wages ($w_{o,d,j}^t$ is the average wage of workers in that cell)?
+%     \begin{equation*}
+%         w_{o,d,j}^t = \delta_o + \delta_{d,j} + \beta N_{o,d,j}^t + X'_{o,d,j}\gamma + \varepsilon_{o,d,j}
+%     \end{equation*}
+%     \textbf{Identification:} Obvious endogeneity/reverse causality problem. Can use version of \textcolor{gray}{Burchardi, Chaney and Hassan (2019)} ancestry instrument using destination x occupation cells instead of just destination cells. \hyperlink{fullmodel}{\beamerbutton{Full Model}}
+%     \begin{itemize}
+%         \item First stage: $N_{o,d,j}^{2010} = \delta_o + \delta_{d,j} + \sum_{t<2010} \alpha_t I_{o, -r(d), -k(j)}^t \frac{I_{-c(o),d,j}^t}{I_{-c(o)}^t} + \eta_{o,d,j}$ where $I^t$ represents immigrant inflow in year $t$, $r(d)$ represents census region of $d$, $k(j)$ represents 1-digit occupation group of $j$, $c(o)$ represents continent of country $o$. 
+%         \begin{itemize}
+%             \item Idea: instrument for $N$ by allocating past immigrant inflows $I_o^t$ to occupation x destination cells based on overall popularity among all immigrants ($\frac{I_{d,j}^t}{I^t}$ share of all immigrants that go to $d,j$ in $t$). 
+%             \item But still a problem if large share of immigrants are from $o$ or large share go to $d,j$. So use `excluded' part of inflow $I_{o, -r(d), -k(j)}$ (inflow from $o$ to MSAs in different census region from $d$ and occupations in different 1-digit group from $j$) and interact with `excluded' part of share $\frac{I_{-c(o),d,j}^t}{I_{-c(o)}^t}$ (share of immigrants from countries in different continents from $o$ going to $d,j$)
+%         \end{itemize}
+%         \item Exclusion restriction: unobserved factors that affect avg wages in location $d$ and job $j$ for ethnic group $o$ are not systematically related to settlement and job choice of migrants from other continents or flow of immigrants from $o$ to other jobs in other regions.
+%         \begin{itemize}
+%             \item If you believe BCH2019, I think this is reasonable. \hyperlink{bch2019id}{\beamerbutton{Not sure if I believe BCH2019}}
+%         \end{itemize}
+%         \item Relevance: historical flows to occupation destination cells actually affect ethnic concentration in occupation destination cells today
+%         \begin{itemize}
+%             \item This is a bit harder to buy. BCH2019 use decennial census data from 1880-2000, maybe would be more reasonable to use annual counts (e.g. ACS from 2000-present)? 
+%         \end{itemize}
+%         \item Another issue is power. Especially if using ACS, dividing already small ancestry x destination groups into occupation cells is probably infeasible -- could start with large ancestry groups or large occupation cells and see where that gets me.
+%         \item Might require some initial descriptive work to see how persistent occupational niches are in modern data and how they evolve 
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{Idea One Point Five: Aggregate Effects of Occupational Sorting}
+%     \textbf{Question:} What is the effect of a more/less occupationally segregated labor market on the immigrant-native wage gap? 
+%     \begin{itemize}
+%         \item Not clear on best way to approach this question, maybe an extension after previous idea?
+%         \item Measure labor market segregation by average `HHI' across all occupations
+%         \item Would probably require some sort of structural model 
+%         \item Alternatively, could use BCH instruments from Idea One: sum/average instruments across all origin countries and occupations to get predicted local labor market `HHI', use to instrument for actual local labor market `HHI' (but if regression is at the LLM level, too few observations?)
+%         % \item NB: different from question `what share of imm-native wage gap can be explained by occupation'? more like -- conditional on occupational mix of ethnicity $e$ nationally and conditional on occupational mix of workers in location $d$, what is effect of redistributing workers such that people are completely segregated by ethnicity between locations vs. redistributing workers such that every location has exact same nationally representative ethnic mix
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{Existing literature on causes of immigrant occ sorting}
+%     \begin{itemize}
+%             \item Networks: most widely studied, very important historically and today \textcolor{gray}{\footnotesize [Locke 2024, Kerr and Mandorff 2023, Lafortune and Tessada 2016, Patel and Vella 2013]}
+%             \item Skills/education: less well-documented, smaller role historically \textcolor{gray}{\footnotesize [Locke 2024, Hanson and Liu 2023]}
+%             \item Policy: \textbf{understudied} except specific focus on OPT and H1B changes \textcolor{gray}{\footnotesize [Amuedo-Dorantes and Furtado 2019, Amuedo-Dorantes, Furtado and Xu 2019]}
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}[allowframebreaks]
+%     \frametitle{Idea Two: Immigration Policy and Occupational Sorting}
+%     \textbf{Question:} How does immigration policy affect occupational choice of immigrants? How does is this effect amplified/mediated via networks? 
+%     \begin{itemize}
+%         \item Idea would be to do an event study/DiD based on policy changes 
+%         \begin{itemize}
+%             \item Employment-based immigration (Canada began including employment offers as a criterion in point-based system in ~2010)
+%             \begin{itemize}
+%                 \item Would be interesting (descriptively) to see change in occupation mix
+%                 \item Does employment-based immigration follow the same occupational patterns as pre-existing immigration (i.e. is a company more likely to sponsor you if there are more people from your country working in that occupation/industry already?)
+%             \end{itemize}
+%             \item Occupation x location-specific immigration pathways (Canada's Provincial Nominee Program) 
+%             \begin{itemize}
+%                 \item What is distaste for living far from network? (Revealed preference of how many people apply for PNP vs how many people are potentially eligible)
+%                 \item Could try to estimate a discrete choice model? 
+%             \end{itemize}
+%             \item Occupational licensing requirements (e.g. which medical exams carry over to US varies by state and origin country)
+%             \begin{itemize}
+%                 \item Outcome variable: share of immigrants working in that occupation 
+%                 \item Would expect to see the share go up if an occupation becomes less restrictive, not that interesting (unless precise zero)
+%                 \item But do networks lower `cost' of licensing? E.g. if it's annoying to get a CPA certification but a lot of people from your country are accountants and can help you through the process, would expect CPA restrictions loosening to matter less for you 
+%             \end{itemize}
+%         \end{itemize}
+%     \item Additional thought: how do children of immigrants make occupational decisions? (Is `occupational following' of parents stronger/weaker than for natives?)
+%     \end{itemize}
+% \end{frame}
+
+% \appendix 
+% \begin{frame}
+%     \label{fullmodel}
+%     \frametitle{Full Model \hyperlink{idea1}{\beamerbutton{back}}}
+%     Modelling $N_{o,d,j}^t$ as:
+%     \begin{equation*}
+%         N_{o,d,j}^t = a_{o,t} + a_{d,j,t} + b_t N_{o,d,j}^{t-1} + I_o^t(c_t \frac{I^t_{d,j}}{I^t} + d_t \frac{N_{o,d,j}^{t-1}}{N_o^{t-1}})
+%     \end{equation*}
+%     where 
+%     \begin{itemize}
+%         \item $I_{o}^t$ is `push' component (total flow of new working-age immigrants from country $o$) 
+%         \item $\frac{I^t_{d,j}}{I^t}$ is `pull' component (share of all new working-age immigrants who enter occupation $j$ in MSA $d$)
+%         \item $\frac{N_{o,d,j}^{t-1}}{N_o^{t-1}}$ is `recursive' component (share of everyone from $o$ working in $d,j$ last period)
+%     \end{itemize}
+%     Notes:
+%     \begin{itemize}
+%         \item Might need to do cells separately by gender?
+%         \item Include unemployment as occupation 
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}[allowframebreaks]
+%     \label{bch2019id}
+%     \frametitle{Issue with BCH2019 Ancestry Instruments? \hyperlink{idea1}{\beamerbutton{back}}}
+%     \begin{itemize}
+%         \item Suppose some new tech is suddenly discovered in California that both makes it attractive for FDI from China and incentivizes Chinese immigrants to move to California
+%         \item Obvious endogeneity problem w naive ols (will observe both high FDI and high ancestry in 2010 but for exog reason), so instrument for ancestry with interaction of $I_o^t\times\frac{I_j^t}{I^t}$. 
+%         \item Problem is that Chinese immigrants are large share of all and California arrivals are large share of all. So increase in Chinese immigration to California will inflate both $I_o^t$ and $\frac{I_j^t}{I^t}$ (since more Chinese immigrants are arriving because of California tech and more of all immigrants are going to California because of China). 
+%         \item BCH solution is to use $I_{o,-r(d)}^t\times\frac{I_{-c(o),j}^t}{I_{-c(o)}^t}$, interaction of non-West coast Chinese immigrant flow with share of non-Asian immigrants going to California. But if something is pulling Chinese immigrants to California, couldn't that also divert Chinese immigrants from non-West coast places, reducing $I_{o,-r(d)}$? Similarly, if something is pulling Chinese immigrants to California, maybe that will crowd out immigrants from other places, reducing $\frac{I_{-c(o),j}^t}{I_{-c(o)}^t}$?
+%         \item So then instrument is correlated with unobserved factors affecting China-California-specific FDI, not excluded?
+%     \end{itemize}
+% \end{frame}
+\end{document}

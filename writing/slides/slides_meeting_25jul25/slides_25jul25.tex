@@ -1,0 +1,261 @@
+\documentclass[xcolor=dvipsnames, compress, 12pt, aspectratio=169, handout]{beamer}
+\usepackage{../preamble_slides}
+
+\title{H-1B Visa Project: Updates}
+\author{Amy Kim}
+\date{July 25, 2025}
+
+\begin{document}
+
+\begin{frame}
+    \frametitle{Overview}
+    \textbf{Last Time:}
+    \begin{itemize}
+        \item First pass at matching, using rules to narrow down to sample with good match rate 
+        \item Next step: first pass at regression
+    \end{itemize}    
+    \vspace{2mm}
+    \textbf{Today's Updates:}
+    \begin{itemize}
+        \item Alternate sample construction 
+        \item Some results 
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Merged Sample: Reducing `Multiplicity'}
+    \begin{itemize}
+        \item Baseline strategy: restrict H-1B applications to those from small, non-outsourcing firms and LinkedIn users to those more likely to be on OPT, then merge and filter 
+        \vspace{2mm}
+        \item \textbf{Problem:} `multiplicity' (number of potential matches per H-1B app) still too high  \vspace{2mm}
+        \item \textbf{Last time:} use pre-determined rules to subset to H-1B applications we think will be easier to match (exclude China, India, Anglophone countries)
+        \begin{itemize}
+            \item Low external validity, also low internal validity?
+        \end{itemize} \vspace{2mm}
+        \item \textbf{Different approach:} Cherry-pick firms with low multiplicity \textit{after} merging (try to pick firms that have `ideal' experimental setup)
+        \begin{itemize}
+            \item Low external validity, high internal validity?
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Merged Samples}
+    \begin{enumerate}
+        \item \textbf{Baseline:} merge and filter with existing samples (78.9k H-1B Apps matched to 828k potential matches, multiplicity 10) \vspace{2mm}
+        \item \textbf{`Pre-Filtered':} further filter the H-1B applications (before merging) to exclude applications from China, India, Anglo countries (15.1k H-1B Apps matched to 65.2k potential matches, multiplicity 4) \vspace{2mm}
+        \item \textbf{`Post-Filtered':} filter baseline to only include companies with
+        \begin{itemize}
+            \item All applications matched with low multiplicity ($<$4)
+            \item At least one win and one loss observed in lottery
+            \item Sufficient diversity in LinkedIn user matches (don't want case where the same user is matched to every application)
+        \end{itemize}
+        (10.2k H-1B Apps matched to 23.3k potential matches, multiplicity 2)
+    \end{enumerate}    
+\end{frame}
+
+\begin{frame}
+    \frametitle{Sample Summary Stats Comparison}
+    \centering
+\small
+\resizebox{0.95\textwidth}{!}{
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Variable} & \textbf{All Apps in Sample} & \textbf{1. Baseline} & \textbf{2. Pre-Filtered} & \textbf{3. Post-Filtered} \\
+\midrule
+Share Win Lottery         & 0.38  & 0.41  & 0.34  & 0.45 \\
+Share Female      & 0.39  & 0.37  & 0.33  & 0.41 \\
+Mean Age               & 31.87 & 31.18 & 32.57 & 31.16 \\
+Share from India             & 0.38  & 0.49  & 0.00  & 0.40 \\
+Share from China            & 0.18  & 0.20  & 0.00  & 0.24 \\
+Imputed ADE Prob (From LinkedIn)             & --    & 0.42  & 0.18  & 0.39 \\
+Mean Apps per Employer x Year         & 1.78  & 2.10  & 2.66  & 3.88 \\
+Mean Unique Countries per Employer x Year & 1.34  & 1.49  & 2.00  & 2.12 \\
+N Apps                 & 163{,}474 & 78{,}856 & 15{,}148 & 10{,}206 \\
+\bottomrule
+\end{tabular}
+}
+\end{frame}
+
+
+
+\begin{frame}
+    \frametitle{Empirical Strategy}
+For application $i$ with company $c$ in lottery year $t$:
+\begin{equation*}
+    y_{ict} = \beta_1 win_{ict} + \beta_2 ADE_{ict} + \delta_{ct}  + \varepsilon{ict}
+\end{equation*}
+where $win_{ict}$ indicates winning the H-1B lottery, $ADE_{ict}$ is the estimated probability of an individual being eligible for the ADE lottery (higher chance of winning), and $\delta_{ct}$ are company x lottery year FEs.
+
+\vspace{3mm}
+Outcomes $y_{ict}$:
+\begin{itemize}
+    \item $work1yr$\textemdash Indicator for still working at company one year after lottery 
+    \item $work2yr$\textemdash Indicator for still working at company two years after lottery (3+ years becomes problem for 2023 lottery)
+    \item $update$ \textemdash Indicator for updated LinkedIn profile since lottery 
+    \item $update2yr$ \textemdash Indicator for updated LinkedIn profile since 2yr after lottery 
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Potential Problems with Identification}
+    \begin{itemize}
+        \item Baseline and Pre-Filtered: within companies, not requiring that all applications are matched. Could be that it's easier to match winners and/or those who stay at company longer 
+        \item Pre-Filtered: filtering out some countries. Could be that match rates differ by country (highly likely), and that probability of staying at company also differs by country 
+        \item All: even within post-filtered, possible that winners are more likely to get `better matches' and better matches are also likely to have longer tenure at firm. Would bias results upward.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Does Imputed ADE Status Predict Win Rate?}
+    \centering
+\small
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{\textbf{1. Baseline}} 
+& \multicolumn{2}{c}{\textbf{2. Pre-Filtered}} 
+& \multicolumn{2}{c}{\textbf{3. Post-Filtered}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+Constant &  0.3545***  &   0.3582***    &   0.3134***   &     0.3175***    &    0.4132***    &     0.3993*** \\
+                            & (0.0024)   &   (0.0051)    &    (0.0042) &        (0.0101)   &      (0.0066) & (0.0114)\\
+$ADE$ & 0.1284***  &   0.1196***    &   0.1503***    &     0.1277**    &    0.0944***     &    0.1303***    \\
+& (0.0042)    &  (0.0116)    &    (0.0109)     &    (0.0518)     &    (0.0114)      &    (0.0258) \\
+\midrule
+FEs          & Year & Employer x Year & Year & Employer x Year & Year & Employer x Year \\
+\textbf{Obs.}      & 78856     &    78856      &     15148      &      15148      &      10206        &     10206 \\
+\textbf{R2}         & 0.0119   &     0.0046     &     0.0137     &      0.0041      &     0.0067       &     0.0052 \\
+\bottomrule
+\end{tabular}
+}
+
+\vspace{2mm}
+Yes! 10-15\% boost in odds of winning from ADE status. Can do some back of the envelope math to compute that the implied share of \textit{all} applicants with ADE status is 30-50\% (makes sense and matches what I have).
+\end{frame}
+
+\begin{frame}
+    \frametitle{Regression Results: Working at Company One Year Post Lottery}
+    \centering
+    \small
+\resizebox{0.8\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{\textbf{1. Baseline}} 
+& \multicolumn{2}{c}{\textbf{2. Pre-Filtered}} 
+& \multicolumn{2}{c}{\textbf{3. Post-Filtered}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+Const.            &         0.7154*** &    0.7145***    &   0.7388***    &    0.7428***  &      0.7190***    &     0.6990*** \\
+                       &       (0.0020)    &  (0.0034)     &   (0.0039)      &   (0.0079)     &    (0.0060)   &       (0.0077) \\
+$ADE$           &             -0.0102***   &     0.0064   &    0.0552***   &        0.0427    &      -0.0046      &   0.0498***\\
+                           &   (0.0032)   &   (0.0073)     &   (0.0084)    &     (0.0359)     &   (0.0088)     &     (0.0166)\\
+$win$               &     0.0212***   &   0.0064**  &     0.0245***       &    0.0194     &    0.0183**       &   0.0155**\\
+                           &   (0.0025)    &  (0.0029)     &   (0.0064)       &  (0.0131)       &  (0.0074)     &     (0.0071)\\
+
+\midrule
+FEs          & Year & Employer x Year & Year & Employer x Year & Year & Employer x Year \\
+\textbf{Obs.}      & 78856     &    78856      &     15148      &      15148      &      10206        &     10206 \\
+\textbf{R2}         &0.0010     &   0.0003       &  0.0043     &      0.0031      &     0.0006         &   0.0043\\
+\bottomrule
+\end{tabular}
+}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Regression Results: Working at Company Two Years Post}
+    \centering
+    \small
+\resizebox{0.8\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{\textbf{1. Baseline}} 
+& \multicolumn{2}{c}{\textbf{2. Pre-Filtered}} 
+& \multicolumn{2}{c}{\textbf{3. Post-Filtered}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+Const.            &         0.5784***   &  0.5695***    &   0.6055***     &   0.6123***    &    0.5861***    &     0.5560*** \\
+                            &  (0.0023)   &   (0.0038)   &     (0.0045)      &   (0.0090)    &     (0.0067)    &      (0.0086)\\
+ade                   &      -0.0412***   &    -0.0131   &     0.0210**     &      0.0199     &  -0.0358***  &         0.0372*\\
+                             & (0.0036)     & (0.0082)   &     (0.0101)        & (0.0406)        & (0.0099)     &     (0.0190)\\
+winner                  &     0.0095***   &     0.0026     &    0.0137*         & -0.0056      &     0.0042      &      0.0080\\
+                             & (0.0028)   &   (0.0033)      &  (0.0074)     &    (0.0152)   &      (0.0083)    &      (0.0079)\\
+\midrule
+FEs          & Year & Employer x Year & Year & Employer x Year & Year & Employer x Year \\
+\textbf{Obs.}      & 78856     &    78856      &     15148      &      15148      &      10206        &     10206 \\
+\textbf{R2}         &  0.0020    &    0.0002      &    0.0006      &     0.0003      &     0.0014      &      0.0017\\
+\bottomrule
+\end{tabular}
+}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Regression Results: Update Profile Since Lottery}
+    \centering
+    \small
+\resizebox{0.8\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{\textbf{1. Baseline}} 
+& \multicolumn{2}{c}{\textbf{2. Pre-Filtered}} 
+& \multicolumn{2}{c}{\textbf{3. Post-Filtered}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+Const.            &         0.9834***   &   0.9856***  &     0.9850***     &   0.9846***   &     0.9804***  &       0.9835***\\
+                        &      (0.0005) &     (0.0008)      &  (0.0010)      &   (0.0022)    &     (0.0017)    &      (0.0016)\\
+ade                       &   0.0090***     & 0.0043***   &    0.0067***  &         0.0034   &     0.0143*** &         0.0088**\\
+                            &  (0.0007)     &  (0.0016)      & (0.0020)     &    (0.0084)       &  (0.0019)       &   (0.0035)\\
+winner                   &       0.0009     &    0.0005     &    -0.0006     &      0.0025  &         0.0022     &    6.292e-05\\
+                          &    (0.0006)    &  (0.0007)    &    (0.0017)     &    (0.0038)     &    (0.0018)     &     (0.0015)\\
+\midrule
+FEs          & Year & Employer x Year & Year & Employer x Year & Year & Employer x Year \\
+\textbf{Obs.}      & 78856     &    78856      &     15148      &      15148      &      10206        &     10206 \\
+\textbf{R2}         &  0.0021     &    0.0006     &     0.0006       &    0.0004       &    0.0048       &     0.0020\\
+\bottomrule
+\end{tabular}
+}
+\end{frame}
+
+
+\begin{frame}
+    \frametitle{Regression Results: Update Profile Since Two Years Post Lottery}
+    \centering
+    \small
+\resizebox{0.8\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{\textbf{1. Baseline}} 
+& \multicolumn{2}{c}{\textbf{2. Pre-Filtered}} 
+& \multicolumn{2}{c}{\textbf{3. Post-Filtered}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& (1) & (2) & (3) & (4) & (5) & (6) \\
+\midrule
+const                   &     0.9330***  &    0.9410***   &    0.9325***     &   0.9398***    &    0.9300***     &    0.9405***\\
+                           &   (0.0011)  &     (0.0016)      &  (0.0021)      &   (0.0047)   &      (0.0032)    &      (0.0037)\\
+ade                  &        0.0323***   &   0.0156***  &     0.0308***  &        -0.0017      &  0.0417***    &     0.0205***\\
+                         &     (0.0015)     &  (0.0034)   &     (0.0039)      &   (0.0195)      &   (0.0041)   &       (0.0077)\\
+winner           &              0.0020*   &     -0.0007    &    0.0066**        &   0.0022         & 0.0015     &      -0.0035\\
+                         &     (0.0012)  &     (0.0014)   &     (0.0033)       &  (0.0078)      &   (0.0036)   &       (0.0033)\\
+\midrule
+FEs          & Year & Employer x Year & Year & Employer x Year & Year & Employer x Year \\
+\textbf{Obs.}      & 78856     &    78856      &     15148      &      15148      &      10206        &     10206 \\
+\textbf{R2}         &  0.0067    &     0.0017       &   0.0038     &   5.462e-05      &     0.0097  &          0.0024\\
+\bottomrule
+\end{tabular}
+}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Takeaways}
+    \begin{itemize}
+        \item First results table suggests very small but significant increase in probability of still working at company one year after the lottery!
+        \item But effect seems to disappear by two years post -- maybe because lottery winners also start to leave and are more likely to update their profile?
+        \item \textbf{Fundamental Problem:} Zeros (or small estimates) could be true zeros or mismeasurement
+    \end{itemize}
+\end{frame}
+
+\end{document}

@@ -1,0 +1,381 @@
+\documentclass[xcolor=dvipsnames, compress, 12pt, aspectratio=169, handout]{beamer}
+\usepackage{../preamble_slides}
+
+\title{H-1B Visas \& Worker Outcomes: Updates}
+\author{Amy Kim}
+\date{March 24, 2025}
+
+\begin{document}
+\begin{frame}[plain]
+    \titlepage
+\end{frame}
+
+\section{Overview}
+\begin{frame}
+    \frametitle{Overview}
+    \textbf{Research Question:} do workers at H-1B winning firms have better outcomes than workers at H-1B losing firms?
+    \begin{itemize}
+        \item Key contributions: use new dataset (Bloomberg H-1B data merged with LinkedIn) to (1) answer crowd-out question better and (2) dig into new outcomes
+        \item Empirical strategy: compare hires, promotions, exits at firms who win H-1B lottery vs. lose H-1B lottery
+        \item Progress so far:
+        \begin{enumerate}
+            \item Descriptives and summary stats for both datasets 
+            \item Merging firms\textemdash 65\% merged currently, can almost certainly do better but tabling for now
+            \item Extremely preliminary results on crowd-out 
+        \end{enumerate}
+    \end{itemize}
+\end{frame}
+%%% TABLE OF CONTENTS
+\begin{frame}[plain]{Outline}
+    \tableofcontents
+\end{frame}
+
+%%% TABLE OF CONTENTS -- CURRENT SECTION
+\AtBeginSection[ ]
+{
+\begin{frame}[plain]{Outline}
+    \tableofcontents[currentsection, hideothersubsections]
+    \addtocounter{framenumber}{-1}
+\end{frame}
+}
+
+\section{[SKIP] Background and Data}
+% \begin{frame}
+%     \frametitle{Introduction}
+%     \begin{itemize}
+%         \item H-1B visas: high-profile immigration channel, based on the idea that we need to import talent for particular high-skill jobs
+%         \item H-1B lottery serves as ideal experiment to compare otherwise similar firms who can and can't use H-1B visas
+%         \item Literature: large focus on crowd-out and firm-level outcomes, with mixed results \textcolor{gray}{\footnotesize[Dimmock, Huang and Weisbenner 2022; Doran, Gelber and Isen 2022; Mahajan et al. 2024]}  \hyperlink{h1blit}{\beamergotobutton{Lit Review}}
+%         \item \textbf{No empirical evidence} on worker-level outcomes (e.g. promotions, turnover) at firms who win H-1B visas relative to firms who do not
+%         \item \textbf{Research question:} do workers (both new hires and incumbents) at H-1B winning firms have better outcomes than workers at H-1B losing firms?
+%     \end{itemize}
+% \end{frame}
+
+\begin{frame}
+    \frametitle{H-1B Visas: Policy Overview}
+    \begin{itemize}
+        \item Nonimmigrant visa for workers in `specialty occupations' 
+        \begin{itemize}
+            \item ``A specialty occupation is one that requires the application of a body of \textbf{highly specialized knowledge} and the attainment of at least a bachelor’s degree or its equivalent. The intent of the H-1B provisions is to help employers who \textbf{cannot otherwise obtain needed business skills and abilities from the U.S. workforce...}''
+        \end{itemize}
+        \item Employment-based visa: employer must apply on worker's behalf
+        \begin{itemize}
+            \item 'H-1B portability' between employers introduced in 2000, but lots of friction remains
+            \item 'Dual-intent' visa: employer can sponsor green card for worker 
+        \end{itemize}
+        \item Generally a three-year visa with a three-year extension
+        \item Capped at 65,000 normal visas annually and 20,000 advanced-degree exempt (ADE) visas for U.S. advanced degree holders (some employers exempt from cap)
+    \end{itemize}
+\end{frame}%Literature, Context and Timeline}
+
+\begin{frame}\label{h1bfiling}
+    \frametitle{H-1B Filing Process}
+        \begin{itemize}
+            \item To hire H-1B worker, firm first required to file Labor Condition Application (LCA) with DOL attesting that the job will not replace/harm incumbent workers
+            \begin{itemize}
+                \item Not tied to a specific employee, must be filed no more than six months before start date
+                \item Includes information about job type (occupation code), start and end dates, work location, and salary
+            \end{itemize}
+            \item Prior to FY2021, firms required to fill out full paperwork for H-1B (including LCA and filing fees of $\sim$\$500 per applicant). Only forms of lottery winners processed, rest thrown out. 
+            \item Starting FY2021, firms only required to fill out short form and \$10 filing fee to enter lottery, then only lottery winners required to fill out full paperwork. 
+            \begin{itemize}
+                \item Bloomberg investigation\textemdash streamlined process caused fraud to skyrocket (multiple submissions of same employee from different companies)
+            \end{itemize}
+        \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Sources of Variation: Literature and Context}
+    \begin{itemize}
+        \item Quota of 65,000 established in 1990, increased in 1999 then again in 2001, reset to 65,000 + 20,000 ADE in 2004
+        \begin{itemize}
+            \item Older literature using these aggregate increases as source of variation \textcolor{gray}{\footnotesize [Kerr and Lincoln 2010, Peri, Shih and Sparber 2015, Bound, Khanna and Morales 2017]}
+        \end{itemize}
+        \item Initially, visas allocated on a first-come, first-served basis until cap reached 
+        \item In FY2006-7, USCIS ran unannounced pilot lotteries for applicants on day that cap was reached
+        \begin{itemize}
+            \item Small sample of ~3k firms \textbf{but} includes data on lottery losers \textcolor{gray}{\footnotesize [Doran, Gelber and Isen 2022 (DGI)]}
+        \end{itemize}
+        \item In FY2008 (and most future years) the cap was reached on the first day of the filing period, so \textit{all} visas were distributed via lottery
+        \begin{itemize}
+                \item All firms \textbf{but} no data on lottery losers \textcolor{gray}{\footnotesize [Dimmock, Huang and Weisbenner 2022 (DHW); Mahajan et al. 2024 (MMSCB)]}
+                \item Instead, DHW and MMSCB use LCAs as imperfect proxy for H-1B applications
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Data}
+    \begin{itemize}
+        \item \textbf{H-1B Data}
+        \begin{itemize}
+            \item Bloomberg FOIA request [FY2021-2024]: microdata on \textit{all H-1B applications}, i.e. both lottery winners and losers
+            \item Previous FOIA request [FY2017-2024]: microdata only on H-1B lottery winners 
+            \item US DOL [FY2009-2024]: microdata on LCAs (used in literature as proxy for employer H-1B demand)
+            \item USCIS Employer Hub [FY2009-2024]: employer-level data on H-1B lottery winners (missing person-level characteristics)
+        \end{itemize} 
+        \item \textbf{Revelio LinkedIn Data}
+        \begin{itemize}
+            \item Position-level data from universe of LinkedIn profiles
+        \end{itemize}
+        \item \textbf{Merging by Employer} (Currently ~60\% of H-1B Employers FY2021-4 linked)
+        \begin{itemize}
+            \item Messy! Limited info with lots of missings, need to merge on name and location only
+            \item Would love to link at the individual level, but limited info on both ends (future todo)
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\section{H-1B Data: Descriptives and Challenges}
+\begin{frame}
+    \frametitle{Bloomberg Data: Summary}
+    \begin{itemize}
+        \item Covers four years of lotteries: FY2021 (March 2020 Lottery)-FY2024 (March 2023 Lottery) 
+        \item Includes lottery application data and lottery status for all H-1B applicants \textit{subject to the lottery}
+        \begin{itemize}
+            \item Includes both regular and Advanced Degree Exempt (ADE) applicants (subject to different lotteries) \textbf{but does not identify the group into which the applicant falls}
+            \item Does not include any information on cap-exempt employers (non-profits, higher ed, etc.), applications for change in employer or visa extension
+            \item \textcolor{maincolor}{Contrast to previous FOIA data} which has no information on lottery losers 
+        \end{itemize}
+        \item Additionally, includes information from I-129 (H-1B Visa Application Form) for lottery applicants who won \textbf{and} submitted form (66\% of winners)
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Sample Sizes: All Years of Bloomberg Data}
+    \centering
+    \includegraphics[width=0.7\textwidth]{\outputpath/sankey_allbb.png}
+\end{frame}
+
+
+\begin{frame}\label{app_hist_binned}
+    \frametitle{Lottery App Dist. (Firm x Year Counts FY2021-2024)}
+    \centering
+    \includegraphics[width=0.6\textwidth]{\outputpath/app_hist_binned.png}
+
+    \hyperlink{app_hist_raw}{\beamergotobutton{Raw Histogram}}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Company Sample Selection}
+    \begin{itemize}
+        \item Very long right tail
+        \begin{itemize}
+            \item Top 20 employers submit 20\% of applications
+        \end{itemize}
+        \item Well-documented issue with outsourcing/IT staffing companies flooding H-1B lottery 
+        \item Want a sample of small companies most likely to see effect of H-1B win on workers and not dependent on H-1Bs
+        \item \textbf{Preferred Sample:} Non-staffing companies with fewer than 50 H-1B lottery applications [138k emp x lottery years (80\% of total employers; 24\% of total applications)]
+        \begin{itemize}
+            \item Staffing companies IDed as those with at least 50\% of applications marked as duplicate entries (can probably do better)
+            \item $<4$\% of employers submit 50 or more applications 
+            \item Preferred sample [PS] has much higher win rate (36\% vs. 30\% for out of sample [OOS]), likely from higher share of ADE applicants
+            \item Applicants from OOS firms overwhelmingly from India (85\% vs. 51\% in PS) 
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}\label{win_stats}
+    \frametitle{H-1B Lottery Winners and Losers (Preferred Sample)}
+    \begin{table}
+    \centering 
+        \begin{tabular}{lcc}
+            \hline
+            & Lottery Winners & Lottery Losers \\ 
+            \hline
+            \% Born in India & 52.0\% & 49.8\%\\ 
+            \% Born in China & 18.4\% & 14.0\% \\
+            \% Female & 37.4\% & 34.9\% \\
+            Avg Age at Application & 30.6 & 31.8 \\
+            \hline
+            N & 156,560 & 273,052 \\
+            \hline 
+        \end{tabular}        
+    \end{table}
+    \begin{itemize}
+        \item All differences significant at 99\% level 
+        \item Likely represent differences in winning probability between normal applicants and ADE applicants\textemdash this is most concerning empirical issue currently
+    \end{itemize}
+    \centering 
+    \hyperlink{app_age_hist_bywin}{\beamergotobutton{Age Distribution}}
+\end{frame}
+
+\begin{frame}\label{excess_wins_hist}
+    \frametitle{Dist. of Excess Wins (Firm $j$ x Year $t$ Counts FY2021-2024)}
+    \centering
+    \includegraphics[width=0.55\textwidth]{\outputpath/excess_wins_hist.png}
+
+    
+    $\text{Excess Wins}_{jt} = \text{Lottery Apps}_{jt}\times \text{Total Win Rate}_t - \text{Actual Wins}_{jt}$ 
+    
+    \hyperlink{win_rate_hist}{\beamergotobutton{Distribution of Win Rates}}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Complier Characteristics}
+    Much more information on those who submit I-129s (win lottery and subsequently apply for visa):
+    \begin{itemize}
+        \item 42.4\% new admit, 57.4\% change status 
+        \begin{itemize}
+            \item Lots of missings in current visa field, but of those who report vast majority on F1 (65\%), otherwise L (multinational corp), H4 (spouse of H1B) TN (Canada and Mexico)
+        \end{itemize}
+        \item 76\% applying regularly, 24\% applying with ADE 
+        \begin{itemize}
+            \item Approx. 100\% of ADE applicants have more than a bachelor's degree 
+            \item Even of regular applicants, 45\% have a master's or doctorate 
+        \end{itemize}
+        \item 70\% computer/EE related occupations
+        \item 47\% at firms with NAICS code 5415 (Computer Systems Design and Related Services)
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Dist. of Compensation Paid}
+    \centering
+    \includegraphics[width=0.65\textwidth]{\outputpath/hist_wage.png}
+\end{frame}
+
+\section{Merging with Revelio Data}
+
+\begin{frame}
+    \frametitle{Merging Strategy}
+    \textbf{Current Merge (66\% of Preferred Sample):} 
+    \begin{itemize}
+        \item Keep at company x lottery year level (inconsistent identifiers across years)
+        \item Initial (tokenized) matching on company name
+        \item Coarse filter on matches based on name similarity, name rarity, employer/worksite state, NAICS code (if reported)
+        \item Matched firms submit more applications and lose slightly more on average than unmatched firms 
+    \end{itemize}
+    \textbf{Future Merge:}
+    \begin{itemize}
+        \item Include more detailed info on location 
+        \item Probabilistic linking 
+        \item Better de-duplication of both datasets
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Merging Balance: Applications by Merge}
+    \centering 
+    \includegraphics[width=0.6\textwidth]{\outputpath/app_hist_bymatch.png}
+
+    Matched Mean is 3.3, Unmatched Mean is $2.7^{***}$
+\end{frame}
+
+\begin{frame}
+    \frametitle{Merging Balance: Excess Wins by Merge}
+    \centering
+    \includegraphics[width=0.6\textwidth]{\outputpath/excess_wins_hist_bymatch.png}
+
+    Matched Mean is -0.07, Unmatched Mean is $-0.02^{***}$
+\end{frame}
+
+\section{Initial Results}
+\begin{frame}
+    \frametitle{Ideal Empirical Strategy and Outcomes of Interest}
+    Following DGI, for firm $j$ in year $t$ who applied for an H-1B visa in fiscal year $T$, estimate: 
+    \begin{equation}
+        Y_{jtT} = \beta_0 + \beta_1U_{jT} + \varepsilon_{jtT}
+    \end{equation}
+    where $U_{jT}$ represents `excess' lottery wins above chance (i.e. number of lottery wins net of number of applications $\times$ aggregate win rate).
+
+    \vspace{2mm}
+    I am interested in the following outcomes:
+    \begin{itemize}
+        \item \textbf{First stage:} number of H-1B visas granted (requires additional application after winning)
+        \item \textbf{Hiring:} number of workers hired; number of total workers
+        \item \textbf{Workers:} average promotion rate of new hires; turnover of incumbent workers
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{First Pass at First Stage}
+    Subset to firms that only submit one application in a given lottery year to simplify visualization:
+    \begin{itemize}
+        \item Balanced sample of firms from preferred sample that are matched and can be consistently and uniquely identified in the H-1B data in all four years 
+        \item Subset to firms that submitted one application in 2022 (n = 1135)
+        \item Plot mean number of H-1B visas approved
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{H-1B Visa Approvals by Lottery Win by Fiscal Year}
+    \centering
+    \includegraphics[width=0.6\textwidth]{\outputpath/fs_balanced_raw_ly2023.png}
+\end{frame}
+
+\begin{frame}
+    \frametitle{First Pass at Some Results}
+    Subset to firms that only submit one application in a given lottery year to simplify visualization:
+    \begin{itemize}
+        \item Unbalanced sample of firms from preferred sample that are matched
+        \item Subset to firms that submitted one application in 2022 (n = 13,758)
+        \item Plot mean number of new hires and total employment in LinkedIn data
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{New Hires by Lottery Win by Quarter}
+    \centering
+    \includegraphics[width=0.6\textwidth]{\outputpath/new_hires_by_win_ly2023.png}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Total Employment by Lottery Win by Quarter}
+    \centering
+    \includegraphics[width=0.6\textwidth]{\outputpath/n_emp_bywin_ly2023.png}
+\end{frame}
+
+\section{Next Steps}
+
+\begin{frame}
+    \frametitle{Next Steps}
+    \begin{enumerate}
+        \item Look into merging on individual level 
+        \item Run regressions on first stage and crowd-out
+        \item Construct measure of promotion/turnover 
+    \end{enumerate}
+\end{frame}
+
+% \begin{frame}
+%     \frametitle{Issues}
+%     \begin{itemize}
+%         \item Some concern about fraud\textemdash for now results exclude those applicants who have multiple applications (from diff employers) in the system in a given year but I should try harder
+%         \item Can't identify ADE vs. regular \textit{applicants} (can only see if lottery winner)
+%         \item Time horizon simply too short to look at interesting outcomes, also muddled by COVID 
+%         \item (Not necessarily bad) really measuring total effect of H-1B visa win on promotion/turnover, including any effects on ease of switching employers
+%     \end{itemize}
+% \end{frame}
+
+% \section{Alternate Ideas and Brainstorming}
+
+% \begin{frame}
+%     \frametitle{Some Other Ideas}
+%     \begin{itemize}
+%         \item Return migration: are H-1B hires more likely to remain in US for longer (via green card or H-1B renewal)? E.g. alternative pathway for Canadians (TN visa) has no pathway to green card.
+%         \item If I can get info on previous H-1B applications: what are effects of winning on first try vs. winning on a later try? (descriptively: what do workers who don't win H-1B immediately do in the intervening years?)
+%         \item Ethnic Sorting: effect of own-ethnicity hiring manager/past H-1B win on future hires
+%     \end{itemize}
+% \end{frame}
+
+\appendix 
+\begin{frame}\label{app_hist_raw}
+    \frametitle{Raw Lottery App Dist. (Firm x Year Counts FY2021-2024) \hyperlink{app_hist_binned}{\beamerreturnbutton{back}}}
+    \centering
+    \includegraphics[width=0.7\textwidth]{\outputpath/app_hist_raw.png}
+\end{frame}
+
+\begin{frame}\label{app_age_hist_bywin}
+    \frametitle{Dist. of Age at Application (Preferred Sample FY2021-2024) \hyperlink{win_stats}{\beamerreturnbutton{back}}}
+    \centering
+    \includegraphics[width=0.6\textwidth]{\outputpath/app_age_hist_bywin.png}
+\end{frame}
+
+\begin{frame}\label{win_rate_hist}
+    \frametitle{Dist. of Win Rates (Firm x Year Counts FY2021-2024) \hyperlink{excess_wins_hist}{\beamerreturnbutton{back}}}
+    \centering
+    \includegraphics[width=0.6\textwidth]{\outputpath/win_rate_hist.png}
+\end{frame}
+
+
+\end{document}
