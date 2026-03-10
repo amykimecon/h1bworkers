@@ -159,6 +159,8 @@ MERGE_FILT_STRICT_PARQUET = PATHS["merge_filt_strict_parquet"]
 BUILD_OVERWRITE = _as_bool(BUILD_CFG.get("overwrite"), False)
 BUILD_PREFILT_SQL = _as_optional_str(BUILD_CFG.get("prefilt_sql")) or ""
 BUILD_FIRM_YEAR_USER_DEDUP = _as_bool(BUILD_CFG.get("firm_year_user_dedup"), True)
+BUILD_FIRM_YEAR_USER_DEDUP_OPTIMAL = _as_bool(BUILD_CFG.get("firm_year_user_dedup_optimal"), False)
+OPTIMAL_DEDUP_PREDEDUP_PARQUET = PATHS.get("optimal_dedup_prededup_parquet", "")
 BUILD_AMBIGUITY_WEIGHT_GAP_CUTOFF = _as_float(
     BUILD_CFG.get("ambiguity_weight_gap_cutoff"), 0.03
 )
@@ -189,10 +191,13 @@ BUILD_FIRM_NAME_MATCH_THRESHOLD = _as_float(
 BUILD_SUBREGION_BOOST_ALPHA = _as_float(
     BUILD_CFG.get("subregion_boost_alpha"), 0.4
 )
+BUILD_COUNTRY_COMPETITION_WEIGHT = _as_float(BUILD_CFG.get("country_competition_weight"), 0.0)
+BUILD_COUNTRY_COMPETITION_THRESHOLD = _as_float(BUILD_CFG.get("country_competition_threshold"), 0.0)
 BUILD_W_COUNTRY = _as_float(BUILD_CFG.get("w_country"), 0.70)
 BUILD_W_YOB = _as_float(BUILD_CFG.get("w_yob"), 0.20)
 BUILD_W_GENDER = _as_float(BUILD_CFG.get("w_gender"), 0.10)
 BUILD_W_OCC = _as_float(BUILD_CFG.get("w_occ"), 0.0)
+BUILD_MULTIPLICATIVE_SCORE = _as_bool(BUILD_CFG.get("multiplicative_score"), False)
 BUILD_OCC_SCORE_HALFLIFE = _as_float(BUILD_CFG.get("occ_score_halflife"), 500.0)
 BUILD_FOIA_OCC_RANK_CUTOFF = _as_optional_int(BUILD_CFG.get("foia_occ_rank_cutoff"))
 

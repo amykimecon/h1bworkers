@@ -3,6 +3,7 @@ run_tag: "feb2026"
 build:
   overwrite: true
   firm_year_user_dedup: true   # within a lottery_year, keep each revelio user_id at most once (matched to their highest-scoring applicant). set false to revert to m:1 matching.
+  firm_year_user_dedup_optimal: true  # if true (requires firm_year_user_dedup=true): use maximum weight bipartite matching (Jonker-Volgenant) instead of greedy per-user best-match; also enforces each foia_indiv_id appears at most once; output parquet files get _opt suffix
   prefilt_sql: "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan' AND country != 'Singapore' AND country != 'New Zealand' AND country != 'Ireland'"
   ambiguity_weight_gap_cutoff: 0.03
   no_country_min_subregion_score: 0.20
@@ -14,10 +15,13 @@ build:
   bad_match_guard_total_score_lt: 0.10
   firm_name_match_threshold: 0.85  # jaro_winkler threshold for position-history rescue
   subregion_boost_alpha: 0.4  # blend: 0=pure country specificity, 1=pure subregion evidence
+  country_competition_weight: 0.0      # downweight country_score when user has strong other-country evidence; 0 = disabled
+  country_competition_threshold: 0.0   # min other-country score before penalty kicks in (e.g. 0.5 ignores weak signals)
   w_country: 0.70             # weight on country_score in total_score (w_country+w_yob+w_gender must sum to 1)
   w_yob: 0.20                 # weight on yob signal
   w_gender: 0.10              # weight on gender signal
   w_occ: 0.1                  # occupation score weight; 0 = no change; e.g. 0.05 means 5% on occ, 95% on (country+yob+gender)
+  multiplicative_score: false  # if true, use weighted geometric mean (POWER(score, weight)) instead of weighted sum
   occ_score_halflife: 500     # hyperbolic half-life rank K: at rank K, occ_score=0.5; higher K = gentler decay (rank 100 -> 0.83, rank 500 -> 0.50, rank 2000 -> 0.20)
   foia_occ_rank_cutoff: null  # null = no cutoff; integer = only keep users whose best H-1B occ rank <= this value
   # strict sample: post-hoc filter on baseline for high-precision (low false positive) analysis
@@ -64,3 +68,5 @@ paths:
   merge_filt_mult6_parquet_legacy: "{root}/data/int/merge_filt_mult6_sep8.parquet"
 
   merge_filt_strict_parquet: "{root}/data/int/merge_filt_strict_${run_tag}.parquet"
+
+  optimal_dedup_prededup_parquet: "{root}/data/int/optimal_dedup_prededup_${run_tag}.parquet"

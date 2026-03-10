@@ -4,6 +4,7 @@
 
 # Imports and Paths
 import argparse
+import datetime
 import duckdb as ddb
 import pandas as pd
 import numpy as np
@@ -11,6 +12,10 @@ import os
 import re
 import sys
 import time
+
+# Used as default enddatenull in get_long_by_year — update dynamically so positions with
+# null enddates are imputed as "still active through the current calendar year."
+CURRENT_YEAR = str(datetime.datetime.now().year)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True, write_through=True)
@@ -342,7 +347,7 @@ def _pick_testing_subset(
     return str(picked.iloc[0]["foia_firm_uid"]), str(picked.iloc[0]["lottery_year"])
 
 
-def _build_stage_weighted_query(stage_input_query, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, firm_year_user_dedup = True, W_COUNTRY = 0.70, W_YOB = 0.20, W_GENDER = 0.10, W_OCC = 0.0, OCC_SCORE_HALFLIFE = 500.0):
+def _build_stage_weighted_query(stage_input_query, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, firm_year_user_dedup = True, W_COUNTRY = 0.70, W_YOB = 0.20, W_GENDER = 0.10, W_OCC = 0.0, OCC_SCORE_HALFLIFE = 500.0, MULTIPLICATIVE_SCORE = False):
     # Principled firm quality multiplier: P(right firm) in [0, 1].
     # - NULL score (legacy matches): COALESCE to 100 → mult = 1.0 (unchanged)
     # - has_name_match_pos = 1: position history confirms firm → override to 1.0
@@ -359,9 +364,34 @@ def _build_stage_weighted_query(stage_input_query, YOB_BUFFER = 5, F_PROB_BUFFER
     occ_score_expr = f"""CASE WHEN min_h1b_occ_rank IS NULL THEN 0.5
              ELSE 1.0 / (1.0 + (GREATEST(1, min_h1b_occ_rank) - 1)::FLOAT / {OCC_SCORE_HALFLIFE})
         END"""
+    # YOB score: extracted to a variable so it can be reused in both scoring modes.
+    yob_score_expr = f"""CASE
+                WHEN est_yob IS NULL THEN 0.5
+                WHEN ABS(est_yob - yob::INTEGER) <= {YOB_BUFFER}
+                    THEN 1.0 - ABS(est_yob - yob::INTEGER)::FLOAT / ({YOB_BUFFER} + 1.0)
+                ELSE 0.0
+            END"""
+    if MULTIPLICATIVE_SCORE:
+        # Weighted geometric mean: score^weight for each signal. Equivalent to a weighted sum in
+        # log-space, so the same weights (w_country=0.70, w_yob=0.20, w_gender=0.10) preserve the
+        # relative downweighting of YOB and gender vs country. A small floor (1e-9) prevents any
+        # single signal from zeroing the total score (e.g. yob outside buffer but known).
+        # w_occ: since it's typically 0, use a hybrid blend for the occ component (same as additive).
+        base_score_expr = (
+            f"POWER(GREATEST(country_score, 1e-9), {W_COUNTRY})"
+            f" * POWER(GREATEST({yob_score_expr}, 1e-9), {W_YOB})"
+            f" * POWER(GREATEST(f_score, 1e-9), {W_GENDER})"
+        )
+        total_score_expr = f"({base_score_expr} * (1 - {W_OCC}) + ({occ_score_expr}) * {W_OCC}) * {firm_quality_mult_expr}"
+    else:
+        # Additive (weighted sum): original formula.
+        total_score_expr = (
+            f"(({yob_score_expr} * {W_YOB} + f_score * {W_GENDER} + country_score * {W_COUNTRY})"
+            f" * (1 - {W_OCC}) + ({occ_score_expr}) * {W_OCC}) * {firm_quality_mult_expr}"
+        )
     return f"""
     SELECT *, total_score/(SUM(total_score) OVER(PARTITION BY foia_indiv_id)) AS weight_norm FROM (
-        SELECT foia_indiv_id, foia_firm_uid, FEIN, lottery_year, rcid, llm_match_score, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, {COUNTRY_UNCERTAIN_SELECT}, country_rank_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_since_grad, n_apps, status_type, ade_ind, ade_year, last_grad_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, high_rep_emp_ind, no_rep_emp_ind, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt, COALESCE(has_name_match_pos, 0) AS has_name_match_pos,
+        SELECT foia_indiv_id, foia_firm_uid, FEIN, lottery_year, rcid, llm_match_score, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, {COUNTRY_UNCERTAIN_SELECT}, country_rank_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, updatediff_activity, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_since_grad, n_apps, status_type, ade_ind, ade_year, last_grad_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, high_rep_emp_ind, no_rep_emp_ind, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt, COALESCE(has_name_match_pos, 0) AS has_name_match_pos,
             (COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY foia_firm_uid, lottery_year))/n_apps AS share_apps_matched_emp,
             COUNT(DISTINCT user_id) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_rev_users_emp,
             (COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year))/(COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY foia_firm_uid, lottery_year)) AS match_mult_emp,
@@ -371,15 +401,7 @@ def _build_stage_weighted_query(stage_input_query, YOB_BUFFER = 5, F_PROB_BUFFER
             {llm_match_score_norm_expr} AS llm_match_score_norm,
             {firm_quality_mult_expr} AS firm_match_quality_mult,
             {occ_score_expr} AS occ_score,
-            ((CASE
-                WHEN est_yob IS NULL THEN 0.5
-                WHEN ABS(est_yob - yob::INTEGER) <= {YOB_BUFFER}
-                    THEN 1.0 - ABS(est_yob - yob::INTEGER)::FLOAT / ({YOB_BUFFER} + 1.0)
-                ELSE 0.0
-            END * {W_YOB} +
-            f_score * {W_GENDER} +
-            country_score * {W_COUNTRY}) * (1 - {W_OCC}) +
-            ({occ_score_expr}) * {W_OCC}) * {firm_quality_mult_expr} AS total_score
+            {total_score_expr} AS total_score
         FROM ({stage_input_query})
         {dedup_clause}
     )
@@ -487,17 +509,18 @@ def _build_merge_filt_stage_queries(
     COUNTRY_SCORE_CUTOFF = 0.03,
     COUNTRY_FALLBACK_TOPN = 3,
     COUNTRY_TOTAL_MARGIN = 0.08,
-    MONTH_BUFFER = 6,
+    MONTH_BUFFER = 0,  # deprecated: date filters are now year-level; kept for API compatibility
     YOB_BUFFER = 5,
     F_PROB_BUFFER = 0.8,
     GRAD_YEAR_BUFFER = (15, 35),
-    firm_year_user_dedup = True,
+    firm_year_user_dedup = False,
     W_COUNTRY = 0.70,
     W_YOB = 0.20,
     W_GENDER = 0.10,
     W_OCC = 0.0,
     OCC_SCORE_HALFLIFE = 500.0,
     FOIA_OCC_RANK_CUTOFF = None,
+    MULTIPLICATIVE_SCORE = False,
     NO_COUNTRY_MIN_SUBREGION_SCORE = icfg.BUILD_NO_COUNTRY_MIN_SUBREGION_SCORE,
     NO_COUNTRY_MIN_TOTAL_SCORE = icfg.BUILD_NO_COUNTRY_MIN_TOTAL_SCORE,
     NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL = icfg.BUILD_NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL,
@@ -532,11 +555,11 @@ def _build_merge_filt_stage_queries(
     FROM {merge_raw_tab}
     WHERE f_score >= 1 - {F_PROB_BUFFER}
       AND (ABS(yob::INTEGER - est_yob) <= {YOB_BUFFER} OR (est_yob IS NULL AND yob::INTEGER <= max_yob))
-      AND startdatediff <= {0 + MONTH_BUFFER}
-      AND startdatediff >= {-36 - MONTH_BUFFER}
-      AND enddatediff >= {0 - MONTH_BUFFER}
+      -- Year-level date filters (robust to LinkedIn 01-01 placeholder dates)
+      AND YEAR(first_startdate) - (lottery_year::INT - 1) BETWEEN -4 AND 0
+      AND YEAR(last_enddate) >= (lottery_year::INT - 1)
       AND (last_grad_year IS NULL OR (last_grad_year::INTEGER - yob::INTEGER) BETWEEN {GRAD_YEAR_BUFFER[0]} AND {GRAD_YEAR_BUFFER[1]})
-      AND (months_since_grad IS NULL OR months_since_grad < {36 + MONTH_BUFFER})
+      AND (grad_years_since IS NULL OR grad_years_since <= 4)
     """
 
     stage_match_filt = f"""
@@ -559,8 +582,7 @@ def _build_merge_filt_stage_queries(
             ) AS app_country_rank
         FROM ({stage_match_order})
         WHERE match_order_ind = 1
-          AND (stem_ind IS NULL OR stem_ind = 1)
-          AND (foia_occ_ind IS NULL OR (foia_occ_ind = 1{f" AND min_h1b_occ_rank <= {FOIA_OCC_RANK_CUTOFF}" if FOIA_OCC_RANK_CUTOFF is not None else ""}))
+          AND (stem_ind IS NULL OR stem_ind = 1 OR foia_occ_ind IS NULL OR (foia_occ_ind = 1{f" AND min_h1b_occ_rank <= {FOIA_OCC_RANK_CUTOFF}" if FOIA_OCC_RANK_CUTOFF is not None else ""}))
     )
     SELECT *,
         COUNT(*) OVER(PARTITION BY foia_indiv_id) AS n_match_filt
@@ -597,6 +619,7 @@ def _build_merge_filt_stage_queries(
         W_GENDER = W_GENDER,
         W_OCC = W_OCC,
         OCC_SCORE_HALFLIFE = OCC_SCORE_HALFLIFE,
+        MULTIPLICATIVE_SCORE = MULTIPLICATIVE_SCORE,
     )
     stage_final = _build_stage_final_query(
         stage_weighted,
@@ -626,12 +649,13 @@ def _build_stage_queries_from_match_filt(
     REV_MULT_COEFF = 1,
     YOB_BUFFER = 5,
     F_PROB_BUFFER = 0.8,
-    firm_year_user_dedup = True,
+    firm_year_user_dedup = False,
     W_COUNTRY = 0.70,
     W_YOB = 0.20,
     W_GENDER = 0.10,
     W_OCC = 0.0,
     OCC_SCORE_HALFLIFE = 500.0,
+    MULTIPLICATIVE_SCORE = False,
     AMBIGUITY_WEIGHT_GAP_CUTOFF = icfg.BUILD_AMBIGUITY_WEIGHT_GAP_CUTOFF,
     BAD_MATCH_GUARD_ENABLED = icfg.BUILD_BAD_MATCH_GUARD_ENABLED,
     BAD_MATCH_GUARD_SUBREGION_SCORE_LT = icfg.BUILD_BAD_MATCH_GUARD_SUBREGION_SCORE_LT,
@@ -655,6 +679,7 @@ def _build_stage_queries_from_match_filt(
         W_GENDER = W_GENDER,
         W_OCC = W_OCC,
         OCC_SCORE_HALFLIFE = OCC_SCORE_HALFLIFE,
+        MULTIPLICATIVE_SCORE = MULTIPLICATIVE_SCORE,
     )
     stage_final = _build_stage_final_query(
         stage_weighted,
@@ -869,7 +894,7 @@ def _print_readable_testing_samples(
 
 
 # GET DF 
-def merge_df(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0.03, COUNTRY_FALLBACK_TOPN = 3, COUNTRY_TOTAL_MARGIN = 0.08, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, GRAD_YEAR_BUFFER = (15, 35), NO_COUNTRY_MIN_SUBREGION_SCORE = None, NO_COUNTRY_MIN_TOTAL_SCORE = None, NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL = None, AMBIGUITY_WEIGHT_GAP_CUTOFF = None, BAD_MATCH_GUARD_ENABLED = None, BAD_MATCH_GUARD_SUBREGION_SCORE_LT = None, BAD_MATCH_GUARD_F_SCORE_LT = None, BAD_MATCH_GUARD_TOTAL_SCORE_LT = None, verbose = False, testing = False, test_sample_matches = 5, test_random_seed = None, test_firm_uid = None, test_lottery_year = None, test_materialize_intermediate_tables = None, test_table_prefix = None, con = con_indiv):
+def merge_df(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, COUNTRY_SCORE_CUTOFF = 0.03, COUNTRY_FALLBACK_TOPN = 3, COUNTRY_TOTAL_MARGIN = 0.08, MONTH_BUFFER = 0, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, GRAD_YEAR_BUFFER = (15, 35), NO_COUNTRY_MIN_SUBREGION_SCORE = None, NO_COUNTRY_MIN_TOTAL_SCORE = None, NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL = None, AMBIGUITY_WEIGHT_GAP_CUTOFF = None, BAD_MATCH_GUARD_ENABLED = None, BAD_MATCH_GUARD_SUBREGION_SCORE_LT = None, BAD_MATCH_GUARD_F_SCORE_LT = None, BAD_MATCH_GUARD_TOTAL_SCORE_LT = None, verbose = False, testing = False, test_sample_matches = 5, test_random_seed = None, test_firm_uid = None, test_lottery_year = None, test_materialize_intermediate_tables = None, test_table_prefix = None, con = con_indiv):
     return con.sql(
         merge(
             rev_tab = rev_tab,
@@ -908,11 +933,7 @@ def merge_df(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False
     ).df()
 
 # WRAPPER
-def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, FIRM_NAME_MATCH_THRESHOLD = None, COUNTRY_SCORE_CUTOFF = 0.03, COUNTRY_FALLBACK_TOPN = 3, COUNTRY_TOTAL_MARGIN = 0.08, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, GRAD_YEAR_BUFFER = (15, 35), NO_COUNTRY_MIN_SUBREGION_SCORE = None, NO_COUNTRY_MIN_TOTAL_SCORE = None, NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL = None, AMBIGUITY_WEIGHT_GAP_CUTOFF = None, BAD_MATCH_GUARD_ENABLED = None, BAD_MATCH_GUARD_SUBREGION_SCORE_LT = None, BAD_MATCH_GUARD_F_SCORE_LT = None, BAD_MATCH_GUARD_TOTAL_SCORE_LT = None, verbose = False, testing = False, test_sample_matches = 5, test_random_seed = None, test_firm_uid = None, test_lottery_year = None, test_materialize_intermediate_tables = None, test_table_prefix = None, con = con_indiv):
-    if MONTH_BUFFER >= 9:
-        print(
-            "Warning! Month buffer of 9+ months will include positions started in the calendar year after the lottery, which may result in issues downstream"
-        )
+def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, foia_prefilt = '', subregion = True, FIRM_NAME_MATCH_THRESHOLD = None, COUNTRY_SCORE_CUTOFF = 0.03, COUNTRY_FALLBACK_TOPN = 3, COUNTRY_TOTAL_MARGIN = 0.08, MONTH_BUFFER = 0, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, GRAD_YEAR_BUFFER = (15, 35), NO_COUNTRY_MIN_SUBREGION_SCORE = None, NO_COUNTRY_MIN_TOTAL_SCORE = None, NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL = None, AMBIGUITY_WEIGHT_GAP_CUTOFF = None, BAD_MATCH_GUARD_ENABLED = None, BAD_MATCH_GUARD_SUBREGION_SCORE_LT = None, BAD_MATCH_GUARD_F_SCORE_LT = None, BAD_MATCH_GUARD_TOTAL_SCORE_LT = None, verbose = False, testing = False, test_sample_matches = 5, test_random_seed = None, test_firm_uid = None, test_lottery_year = None, test_materialize_intermediate_tables = None, test_table_prefix = None, con = con_indiv):
     if NO_COUNTRY_MIN_SUBREGION_SCORE is None:
         NO_COUNTRY_MIN_SUBREGION_SCORE = icfg.BUILD_NO_COUNTRY_MIN_SUBREGION_SCORE
     if NO_COUNTRY_MIN_TOTAL_SCORE is None:
@@ -985,7 +1006,7 @@ def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, p
         BAD_MATCH_GUARD_ENABLED = BAD_MATCH_GUARD_ENABLED,
         BAD_MATCH_GUARD_SUBREGION_SCORE_LT = BAD_MATCH_GUARD_SUBREGION_SCORE_LT,
         BAD_MATCH_GUARD_F_SCORE_LT = BAD_MATCH_GUARD_F_SCORE_LT,
-        BAD_MATCH_GUARD_TOTAL_SCORE_LT = BAD_MATCH_GUARD_TOTAL_SCORE_LT,
+        BAD_MATCH_GUARD_TOTAL_SCORE_LT = BAD_MATCH_GUARD_TOTAL_SCORE_LT
     )
     base_final_query = stage_queries["final"]
     str_out = base_final_query
@@ -1048,7 +1069,7 @@ def merge(rev_tab = 'rev_indiv', foia_tab = 'foia_indiv', with_t_vars = False, p
 # REV X FOIA MERGE FUNCTIONS
 #####################
 # MERGE 
-def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True, pos_tab = 'merged_pos_clean', FIRM_NAME_MATCH_THRESHOLD = None, ALPHA = 0.4):
+def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True, pos_tab = 'merged_pos_clean', FIRM_NAME_MATCH_THRESHOLD = None, ALPHA = 0.4, COMPETITION_WEIGHT = 0.0, COMPETITION_THRESHOLD = 0.0):
     if subregion:
         mergekey = 'subregion'
     else:
@@ -1105,28 +1126,85 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True, pos_t
     pos_country AS (
         SELECT DISTINCT user_id, country
         FROM {pos_tab}
+    ),
+    -- Country competition: for each (user_id, country), compute a country score equivalent using
+    -- the same formula as the main country_score (incl. position term). Used to identify users
+    -- with strong evidence for a different country than the current FOIA match.
+    country_cs AS (
+        SELECT ri.user_id, ri.country,
+               GREATEST(COALESCE(ri.inst_score, 0.0),
+                   (pc_all.user_id IS NOT NULL)::FLOAT,
+                   {ALPHA} * LEAST(1.0, GREATEST(ri.nanat_subregion_score, ri.nt_subregion_score))
+                   + (1.0 - {ALPHA}) * LEAST(1.0, ri.nanat_score / GREATEST(ri.nanat_subregion_score, 0.01))
+               ) AS cs_equiv
+        FROM {rev_tab} ri
+        LEFT JOIN pos_country pc_all ON ri.user_id = pc_all.user_id AND ri.country = pc_all.country
+    ),
+    user_country_ranked AS (
+        SELECT user_id, country, cs_equiv,
+               ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY cs_equiv DESC, country) AS cs_rank
+        FROM country_cs
+    ),
+    user_top2_cs AS (
+        -- Top-2 pattern: for each (user, match_country), max_other_cs = rank2 if current==rank1, else rank1.
+        SELECT user_id,
+               MAX(CASE WHEN cs_rank = 1 THEN cs_equiv ELSE NULL END) AS max1_cs,
+               MAX(CASE WHEN cs_rank = 1 THEN country ELSE NULL END) AS max1_country,
+               COALESCE(MAX(CASE WHEN cs_rank = 2 THEN cs_equiv ELSE NULL END), 0.0) AS max2_cs
+        FROM user_country_ranked
+        WHERE cs_rank <= 2
+        GROUP BY user_id
+    ),
+    -- Most recent startdate across all positions AND educations per user.
+    -- Better proxy for "when did this user last update their profile" than updated_dt
+    -- (which reflects Revelio's scrape refresh, not the user's own profile activity).
+    max_activity_startdate AS (
+        SELECT user_id, MAX(startdate_all) AS max_startdate_all
+        FROM (
+            SELECT user_id, startdate AS startdate_all FROM {pos_tab}
+            UNION ALL
+            SELECT user_id, ed_startdate AS startdate_all FROM rev_educ_clean
+        )
+        GROUP BY user_id
     )"""
+    # Build max_other_cs expression (reused in country_score and as a standalone column)
+    max_other_cs_expr = f"CASE WHEN b.country = uts.max1_country THEN uts.max2_cs ELSE COALESCE(uts.max1_cs, 0.0) END"
+    # Competition penalty multiplier: 1 when disabled (weight=0) or max_other below threshold
+    if COMPETITION_WEIGHT == 0.0:
+        competition_mult_expr = "1.0"
+    else:
+        competition_mult_expr = (
+            f"GREATEST(0.0, 1.0 - {COMPETITION_WEIGHT}"
+            f" * GREATEST(0.0, ({max_other_cs_expr}) - {COMPETITION_THRESHOLD}))"
+        )
     str_out = f"""WITH {name_match_cte}
     SELECT *, a.country AS foia_country, b.country AS rev_country, COUNT(*) OVER(PARTITION BY foia_indiv_id) AS n_match_raw,
             DATEDIFF('month', ((a.lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, first_startdate) AS startdatediff,
             DATEDIFF('month', ((a.lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, last_enddate) AS enddatediff,
             DATEDIFF('month', led.grad_enddate::DATETIME,
                      ((a.lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME) AS months_since_grad,
+            (a.lottery_year::INT - 1) - YEAR(led.grad_enddate::DATE) AS grad_years_since,
             SUBSTRING(min_startdate, 1, 4)::INTEGER - 16 AS max_yob,
             DATEDIFF('month', ((a.lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, updated_dt::DATETIME) AS updatediff,
+            -- updatediff_activity: months from pre-lottery reference to the most recent position/educ startdate.
+            -- Captures when the user last *added* an entry, not just when Revelio refreshed the profile.
+            DATEDIFF('month', ((a.lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, mas.max_startdate_all::DATETIME) AS updatediff_activity,
             (f_prob + COALESCE(f_prob_nt, f_prob))/2 AS f_prob_avg,
             1 - ABS(female_ind - (f_prob + COALESCE(f_prob_nt, f_prob))/2) AS f_score,
             {llm_match_score_expr} AS llm_match_score,
             -- subregion_evidence: bounded [0,1]; combines both name models
             LEAST(1.0, GREATEST(nanat_subregion_score, nt_subregion_score)) AS subregion_score,
             -- country_score: alpha-blend of subregion_evidence and country_specificity,
-            --   with institution and position overrides (GREATEST natural since inst_score penalises ambiguity)
+            --   with institution and position overrides (GREATEST natural since inst_score penalises ambiguity).
+            --   Optionally downweighted by competition_mult when user has strong other-country evidence.
             CASE WHEN a.country = b.country THEN GREATEST(
                 COALESCE(inst_score, 0.0),
                 (pc.user_id IS NOT NULL)::FLOAT,
                 {ALPHA} * LEAST(1.0, GREATEST(nanat_subregion_score, nt_subregion_score))
                 + (1.0 - {ALPHA}) * LEAST(1.0, nanat_score / GREATEST(nanat_subregion_score, 0.01))
-            ) ELSE 0.0 END AS country_score,
+            ) * {competition_mult_expr} ELSE 0.0 END AS country_score,
+            -- max country score for other countries (for inspection and debugging)
+            {max_other_cs_expr} AS max_other_country_score,
             a.highest_ed_level AS foia_highest_ed_level, b.highest_ed_level AS rev_highest_ed_level,
             COALESCE((nmp.user_id IS NOT NULL), FALSE)::INTEGER AS has_name_match_pos,
             (pc.user_id IS NOT NULL)::INTEGER AS position_score
@@ -1134,17 +1212,15 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True, pos_t
         LEFT JOIN {rev_tab} AS b ON a.foia_firm_uid = b.foia_firm_uid AND a.{mergekey} = b.{mergekey}
         LEFT JOIN name_match_pos nmp ON b.user_id = nmp.user_id AND a.foia_firm_uid = nmp.foia_firm_uid
         LEFT JOIN latest_educ_enddate led ON b.user_id = led.user_id AND a.lottery_year::INT = led.lottery_year
-        LEFT JOIN pos_country pc ON b.user_id = pc.user_id AND a.country = pc.country"""
+        LEFT JOIN pos_country pc ON b.user_id = pc.user_id AND a.country = pc.country
+        LEFT JOIN user_top2_cs uts ON b.user_id = uts.user_id
+        LEFT JOIN max_activity_startdate mas ON b.user_id = mas.user_id"""
     return str_out
 
 # FILTERS
 # postfilt can be 'indiv' (filter on n_match_filt (# matches per app), then post-filter), 'emp' (filter on everything at employer level including match_mult_emp (avg # matches per app at employer level)), or anything else (no post-filtering)
 
-def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, COUNTRY_SCORE_CUTOFF = 0.03, COUNTRY_FALLBACK_TOPN = 3, COUNTRY_TOTAL_MARGIN = 0.08, MONTH_BUFFER = 6, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, GRAD_YEAR_BUFFER = (15, 35), NO_COUNTRY_MIN_SUBREGION_SCORE = icfg.BUILD_NO_COUNTRY_MIN_SUBREGION_SCORE, NO_COUNTRY_MIN_TOTAL_SCORE = icfg.BUILD_NO_COUNTRY_MIN_TOTAL_SCORE, NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL = icfg.BUILD_NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL, AMBIGUITY_WEIGHT_GAP_CUTOFF = icfg.BUILD_AMBIGUITY_WEIGHT_GAP_CUTOFF, BAD_MATCH_GUARD_ENABLED = icfg.BUILD_BAD_MATCH_GUARD_ENABLED, BAD_MATCH_GUARD_SUBREGION_SCORE_LT = icfg.BUILD_BAD_MATCH_GUARD_SUBREGION_SCORE_LT, BAD_MATCH_GUARD_F_SCORE_LT = icfg.BUILD_BAD_MATCH_GUARD_F_SCORE_LT, BAD_MATCH_GUARD_TOTAL_SCORE_LT = icfg.BUILD_BAD_MATCH_GUARD_TOTAL_SCORE_LT, W_COUNTRY = icfg.BUILD_W_COUNTRY, W_YOB = icfg.BUILD_W_YOB, W_GENDER = icfg.BUILD_W_GENDER):
-
-    # warnings
-    if MONTH_BUFFER >= 9:
-        print('Warning! Month buffer of 9+ months will include positions started in the calendar year after the lottery, which may result in issues downstream')
+def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV_MULT_COEFF = 1, COUNTRY_SCORE_CUTOFF = 0.03, COUNTRY_FALLBACK_TOPN = 3, COUNTRY_TOTAL_MARGIN = 0.08, MONTH_BUFFER = 0, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, GRAD_YEAR_BUFFER = (15, 35), NO_COUNTRY_MIN_SUBREGION_SCORE = icfg.BUILD_NO_COUNTRY_MIN_SUBREGION_SCORE, NO_COUNTRY_MIN_TOTAL_SCORE = icfg.BUILD_NO_COUNTRY_MIN_TOTAL_SCORE, NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL = icfg.BUILD_NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL, AMBIGUITY_WEIGHT_GAP_CUTOFF = icfg.BUILD_AMBIGUITY_WEIGHT_GAP_CUTOFF, BAD_MATCH_GUARD_ENABLED = icfg.BUILD_BAD_MATCH_GUARD_ENABLED, BAD_MATCH_GUARD_SUBREGION_SCORE_LT = icfg.BUILD_BAD_MATCH_GUARD_SUBREGION_SCORE_LT, BAD_MATCH_GUARD_F_SCORE_LT = icfg.BUILD_BAD_MATCH_GUARD_F_SCORE_LT, BAD_MATCH_GUARD_TOTAL_SCORE_LT = icfg.BUILD_BAD_MATCH_GUARD_TOTAL_SCORE_LT, W_COUNTRY = icfg.BUILD_W_COUNTRY, W_YOB = icfg.BUILD_W_YOB, W_GENDER = icfg.BUILD_W_GENDER):
 
     return _build_merge_filt_stage_queries(
         merge_raw_tab,
@@ -1348,9 +1424,19 @@ def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 =
         SUM(total_compensation * frac_t) AS agg_compensation,
         COUNT(*) AS n_pos,
         COUNT(CASE WHEN start_before = 0 THEN 1 END) AS n_pos_startafter,
-        SUM(frac_t) AS frac_t
+        SUM(frac_t) AS frac_t,
+        -- Non-updating bias diagnostics:
+        -- Fraction of active positions in year t with null enddate (still-active from imputation, not observed enddate)
+        AVG(CASE WHEN enddate IS NULL THEN 1.0 ELSE 0.0 END) AS frac_null_enddate,
+        -- Binary: at original firm ONLY due to null-enddate imputation (no new post-lottery position added at that firm)
+        MAX(CASE WHEN same_company = 1 AND enddate IS NULL AND pos_start_t < 1
+                      AND has_new_pos_same_firm = 0
+                 THEN 1 ELSE 0 END) AS null_enddate_stayer
     FROM (
-        SELECT *, COUNT(CASE WHEN start_before = 0 THEN 1 ELSE NULL END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_start_after 
+        SELECT *,
+            COUNT(CASE WHEN start_before = 0 THEN 1 ELSE NULL END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_start_after,
+            -- has_new_pos_same_firm: 1 if any post-lottery position at the same FOIA firm exists in this year
+            MAX(CASE WHEN same_company = 1 AND pos_start_t >= 1 THEN 1 ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS has_new_pos_same_firm
         FROM ({poslong})
         ) 
     WHERE t IS NOT NULL AND (start_before = 0 OR n_start_after = 0)
@@ -1389,7 +1475,7 @@ def _educ_rawmerge_query(merge_tab, educ_tab):
     )
 
 
-def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddatenull = '2025', rawmerge_tab = None):
+def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddatenull = CURRENT_YEAR, rawmerge_tab = None):
     """ Takes output of merge function and a table long on user_id x event and returns SQL string for table long on merge x event x t where t is relative to lottery year
 
     Parameters
@@ -1444,6 +1530,122 @@ def write_query_to_parquet(query, out_path, overwrite = False, con = con_indiv):
     print(f"Wrote: {out_path} ({_fmt_elapsed(elapsed)})")
 
 
+def _apply_optimal_dedup(con, weighted_table, out_table = "_optimal_dedup_pairs"):
+    """Maximum weight bipartite matching for firm-year-user deduplication.
+
+    For each lottery_year, finds the 1:1 assignment (user_id <-> foia_indiv_id) that
+    maximizes the sum of total_score over all matched pairs, subject to:
+      - Each user_id is matched to at most one foia_indiv_id per year
+      - Each foia_indiv_id is matched to at most one user_id per year (new constraint)
+
+    Algorithm: scipy.optimize.linear_sum_assignment (LAPJV, Jonker–Volgenant 1987)
+    applied per connected component within each year. The bipartite CC decomposition
+    decomposes the graph into independent subproblems, making this tractable even at
+    scale — most components are tiny since candidates are clustered within firms.
+
+    References:
+      - Kuhn (1955) / Munkres (1957): Hungarian algorithm
+      - Jonker & Volgenant (1987): LAPJV, O(n^2 * m), used by scipy
+
+    Args:
+        con: DuckDB connection
+        weighted_table: name of a materialized DuckDB table containing at minimum
+            columns (lottery_year, foia_indiv_id, user_id, total_score)
+        out_table: name of the DuckDB table to create with winning pairs
+
+    Creates DuckDB table `out_table` with columns (lottery_year, foia_indiv_id, user_id).
+    """
+    from scipy.optimize import linear_sum_assignment
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    t0 = time.perf_counter()
+
+    # Aggregate to unique triplets (take max score if multiple rows per triplet)
+    df = con.sql(f"""
+        SELECT lottery_year, foia_indiv_id, user_id, MAX(total_score) AS total_score
+        FROM {weighted_table}
+        GROUP BY lottery_year, foia_indiv_id, user_id
+    """).df()
+
+    n_years = df["lottery_year"].nunique()
+    print(f"  Optimal dedup: {len(df):,} candidate (year, app, user) triplets across {n_years} years")
+
+    winning_pairs = []
+
+    for year, grp in df.groupby("lottery_year"):
+        grp = grp.reset_index(drop=True)
+
+        # Build integer indices for apps and users in this year
+        unique_apps = grp["foia_indiv_id"].unique()
+        unique_users = grp["user_id"].unique()
+        app_to_idx = {a: i for i, a in enumerate(unique_apps)}
+        user_to_idx = {u: i for i, u in enumerate(unique_users)}
+        n_apps = len(unique_apps)
+        n_users = len(unique_users)
+
+        app_idxs = grp["foia_indiv_id"].map(app_to_idx).values
+        user_idxs = grp["user_id"].map(user_to_idx).values
+        scores = grp["total_score"].values
+
+        # Build bipartite adjacency for connected component decomposition.
+        # Represent as (n_apps + n_users) x (n_apps + n_users) graph:
+        #   Apps occupy nodes 0..n_apps-1, Users occupy nodes n_apps..n_apps+n_users-1
+        n_total = n_apps + n_users
+        bi_rows = np.concatenate([app_idxs, user_idxs + n_apps])
+        bi_cols = np.concatenate([user_idxs + n_apps, app_idxs])
+        adj = csr_matrix(
+            (np.ones(len(bi_rows), dtype=np.float32), (bi_rows, bi_cols)),
+            shape=(n_total, n_total),
+        )
+        n_comp, labels = connected_components(adj, directed=False)
+
+        n_matched = 0
+        for comp_id in range(n_comp):
+            comp_nodes = np.where(labels == comp_id)[0]
+            comp_app_nodes = comp_nodes[comp_nodes < n_apps]
+            comp_user_nodes = comp_nodes[comp_nodes >= n_apps] - n_apps
+
+            if len(comp_app_nodes) == 0 or len(comp_user_nodes) == 0:
+                continue
+
+            # Find all edges in this component
+            mask = np.isin(app_idxs, comp_app_nodes) & np.isin(user_idxs, comp_user_nodes)
+            nc_a = len(comp_app_nodes)
+            nc_u = len(comp_user_nodes)
+            app_local = {a: i for i, a in enumerate(comp_app_nodes)}
+            user_local = {u: i for i, u in enumerate(comp_user_nodes)}
+
+            # Build dense cost matrix for this component
+            cost = np.zeros((nc_a, nc_u), dtype=np.float64)
+            for ai, ui, sc in zip(app_idxs[mask], user_idxs[mask], scores[mask]):
+                cost[app_local[ai], user_local[ui]] = sc
+
+            # Maximize total score: negate cost matrix for linear_sum_assignment (minimizes)
+            # Rectangular matrices OK — unmatched nodes on the larger side get no assignment
+            row_ind, col_ind = linear_sum_assignment(-cost)
+
+            for ri, ci in zip(row_ind, col_ind):
+                if cost[ri, ci] > 0:
+                    winning_pairs.append((
+                        year,
+                        unique_apps[comp_app_nodes[ri]],
+                        unique_users[comp_user_nodes[ci]],
+                    ))
+                    n_matched += 1
+
+        print(f"    Year {year}: {len(grp):,} edges, {n_comp:,} components → {n_matched:,} matched pairs")
+
+    # Register result as DuckDB table
+    pairs_df = pd.DataFrame(winning_pairs, columns=["lottery_year", "foia_indiv_id", "user_id"])
+    con.register("_optimal_dedup_pairs_tmp", pairs_df)
+    con.sql(f"CREATE OR REPLACE TABLE {out_table} AS SELECT * FROM _optimal_dedup_pairs_tmp")
+    con.unregister("_optimal_dedup_pairs_tmp")
+
+    elapsed = time.perf_counter() - t0
+    print(f"  Optimal dedup complete: {len(pairs_df):,} winning pairs ({_fmt_elapsed(elapsed)})")
+
+
 def materialize_table(table_name, query, con = con_indiv):
     t0 = time.perf_counter()
     con.sql(f"CREATE OR REPLACE TABLE {table_name} AS {query}")
@@ -1463,6 +1665,9 @@ def _tvars_pivot_query(pos_long_tab, educ_long_tab, t0 = -1, t1 = 2):
         "change_company", "change_position", "agg_compensation",
         "still_at_firm", "promoted",
         "n_pos", "n_pos_startafter", "frac_t",
+        # Non-updating bias diagnostics:
+        "frac_null_enddate",   # fraction of active positions with null enddate (still-active from imputation)
+        "null_enddate_stayer", # at original firm only due to null-enddate imputation
     ]
     educ_cols = [
         "no_educations", "educ_in_us", "educ_in_home_country", "masters", "doctors",
@@ -1592,7 +1797,7 @@ def build_reg_inputs(
     country_score_cutoff = 0.03
     country_fallback_topn = 3
     country_total_margin = 0.08
-    month_buffer = 6
+    month_buffer = 0  # deprecated: date filters are now year-level; kept for API compatibility
     yob_buffer = 5
     f_prob_buffer = 0.8
     rev_mult_coeff = 1
@@ -1605,6 +1810,7 @@ def build_reg_inputs(
     bad_match_guard_f_score_lt = icfg.BUILD_BAD_MATCH_GUARD_F_SCORE_LT
     bad_match_guard_total_score_lt = icfg.BUILD_BAD_MATCH_GUARD_TOTAL_SCORE_LT
     firm_year_user_dedup = icfg.BUILD_FIRM_YEAR_USER_DEDUP
+    firm_year_user_dedup_optimal = icfg.BUILD_FIRM_YEAR_USER_DEDUP_OPTIMAL
     alpha = icfg.BUILD_SUBREGION_BOOST_ALPHA
     w_country = icfg.BUILD_W_COUNTRY
     w_yob = icfg.BUILD_W_YOB
@@ -1612,7 +1818,10 @@ def build_reg_inputs(
     w_occ = icfg.BUILD_W_OCC
     occ_score_halflife = icfg.BUILD_OCC_SCORE_HALFLIFE
     foia_occ_rank_cutoff = icfg.BUILD_FOIA_OCC_RANK_CUTOFF
-    print(f"firm_year_user_dedup: {firm_year_user_dedup}")
+    multiplicative_score = icfg.BUILD_MULTIPLICATIVE_SCORE
+    competition_weight = icfg.BUILD_COUNTRY_COMPETITION_WEIGHT
+    competition_threshold = icfg.BUILD_COUNTRY_COMPETITION_THRESHOLD
+    print(f"firm_year_user_dedup: {firm_year_user_dedup}, optimal: {firm_year_user_dedup_optimal}")
     print(
         "Merge quality controls: "
         f"no_country_min_subregion={no_country_min_subregion}, "
@@ -1622,11 +1831,13 @@ def build_reg_inputs(
         f"ambiguity_weight_gap_cutoff={ambiguity_weight_gap_cutoff}"
     )
     print(f"Occupation score: w_occ={w_occ}, occ_score_halflife={occ_score_halflife}, foia_occ_rank_cutoff={foia_occ_rank_cutoff}")
+    print(f"Score mode: {'multiplicative (weighted geometric mean)' if multiplicative_score else 'additive (weighted sum)'}")
+    print(f"Country competition: weight={competition_weight}, threshold={competition_threshold}")
 
     print("Building shared raw/base stages...")
     materialize_table(
         "_merge_raw_base",
-        merge_raw_func("rev_indiv", "foia_indiv", foia_prefilt = "", subregion = True, ALPHA = alpha),
+        merge_raw_func("rev_indiv", "foia_indiv", foia_prefilt = "", subregion = True, ALPHA = alpha, COMPETITION_WEIGHT = competition_weight, COMPETITION_THRESHOLD = competition_threshold),
         con = con,
     )
     base_stage = _build_merge_filt_stage_queries(
@@ -1655,23 +1866,77 @@ def build_reg_inputs(
         W_OCC = w_occ,
         OCC_SCORE_HALFLIFE = occ_score_halflife,
         FOIA_OCC_RANK_CUTOFF = foia_occ_rank_cutoff,
+        MULTIPLICATIVE_SCORE = multiplicative_score,
     )
     materialize_table("_merge_match_filt_base", base_stage["match_filt"], con = con)
-    materialize_table(
-        "_merge_baseline_base",
-        _build_stage_queries_from_match_filt(
-            "_merge_match_filt_base",
-            postfilt = "none",
-            MATCH_MULT_CUTOFF = 4,
-            REV_MULT_COEFF = rev_mult_coeff,
+
+    # For optimal dedup: compute scores on the full candidate set, run maximum weight
+    # bipartite matching, then pre-filter match_filt to winning pairs only. All downstream
+    # stages then use the pre-filtered table with firm_year_user_dedup_sql=False (the SQL
+    # QUALIFY clause is no longer needed since dedup was already applied in Python).
+    match_filt_tab_base = "_merge_match_filt_base"
+    firm_year_user_dedup_sql = firm_year_user_dedup
+    if firm_year_user_dedup and firm_year_user_dedup_optimal:
+        print("Computing optimal dedup for base branch (maximum weight bipartite matching)...")
+        _tmp_weighted_q = _build_stage_weighted_query(
+            "SELECT * FROM _merge_match_filt_base",
+            firm_year_user_dedup = False,
             YOB_BUFFER = yob_buffer,
             F_PROB_BUFFER = f_prob_buffer,
-            firm_year_user_dedup = firm_year_user_dedup,
             W_COUNTRY = w_country,
             W_YOB = w_yob,
             W_GENDER = w_gender,
             W_OCC = w_occ,
             OCC_SCORE_HALFLIFE = occ_score_halflife,
+            MULTIPLICATIVE_SCORE = multiplicative_score,
+        )
+        materialize_table("_merge_weighted_tmp", _tmp_weighted_q, con = con)
+        _apply_optimal_dedup(con, "_merge_weighted_tmp", out_table = "_optimal_dedup_pairs_base")
+        # Save slim pre-dedup edge table so spotcheck_matches.py --od can inspect networks post-hoc
+        if icfg.OPTIMAL_DEDUP_PREDEDUP_PARQUET:
+            write_query_to_parquet("""
+                SELECT
+                    w.lottery_year, w.foia_indiv_id, w.user_id,
+                    MAX(w.total_score)          AS total_score,
+                    MAX(w.weight_norm)          AS weight_norm,
+                    ANY_VALUE(w.foia_firm_uid)  AS foia_firm_uid,
+                    ANY_VALUE(w.foia_country)   AS foia_country,
+                    ANY_VALUE(w.yob)            AS yob,
+                    ANY_VALUE(w.fullname)       AS fullname,
+                    ANY_VALUE(w.est_yob)        AS est_yob,
+                    ANY_VALUE(w.rev_country)    AS rev_country,
+                    MAX(CASE WHEN p.foia_indiv_id IS NOT NULL THEN 1 ELSE 0 END) AS is_selected
+                FROM _merge_weighted_tmp w
+                LEFT JOIN _optimal_dedup_pairs_base p
+                    USING (lottery_year, foia_indiv_id, user_id)
+                GROUP BY w.lottery_year, w.foia_indiv_id, w.user_id
+            """, icfg.OPTIMAL_DEDUP_PREDEDUP_PARQUET, overwrite=True, con=con)
+            print(f"  Saved pre-dedup edges to {icfg.OPTIMAL_DEDUP_PREDEDUP_PARQUET}")
+        materialize_table(
+            "_merge_match_filt_deduped",
+            "SELECT m.* FROM _merge_match_filt_base m JOIN _optimal_dedup_pairs_base p USING (lottery_year, foia_indiv_id, user_id)",
+            con = con,
+        )
+        con.sql("DROP TABLE IF EXISTS _merge_weighted_tmp")
+        match_filt_tab_base = "_merge_match_filt_deduped"
+        firm_year_user_dedup_sql = False  # SQL QUALIFY dedup already applied via pre-filter
+
+    materialize_table(
+        "_merge_baseline_base",
+        _build_stage_queries_from_match_filt(
+            match_filt_tab_base,
+            postfilt = "none",
+            MATCH_MULT_CUTOFF = 4,
+            REV_MULT_COEFF = rev_mult_coeff,
+            YOB_BUFFER = yob_buffer,
+            F_PROB_BUFFER = f_prob_buffer,
+            firm_year_user_dedup = firm_year_user_dedup_sql,
+            W_COUNTRY = w_country,
+            W_YOB = w_yob,
+            W_GENDER = w_gender,
+            W_OCC = w_occ,
+            OCC_SCORE_HALFLIFE = occ_score_halflife,
+            MULTIPLICATIVE_SCORE = multiplicative_score,
             AMBIGUITY_WEIGHT_GAP_CUTOFF = ambiguity_weight_gap_cutoff,
             BAD_MATCH_GUARD_ENABLED = bad_match_guard_enabled,
             BAD_MATCH_GUARD_SUBREGION_SCORE_LT = bad_match_guard_subregion_lt,
@@ -1685,7 +1950,7 @@ def build_reg_inputs(
         print("Building prefilt base with one extra raw pass...")
         materialize_table(
             "_merge_raw_prefilt",
-            merge_raw_func("rev_indiv", "foia_indiv", foia_prefilt = prefilt, subregion = True, ALPHA = alpha),
+            merge_raw_func("rev_indiv", "foia_indiv", foia_prefilt = prefilt, subregion = True, ALPHA = alpha, COMPETITION_WEIGHT = competition_weight, COMPETITION_THRESHOLD = competition_threshold),
             con = con,
         )
         prefilt_stage = _build_merge_filt_stage_queries(
@@ -1714,23 +1979,51 @@ def build_reg_inputs(
             W_OCC = w_occ,
             OCC_SCORE_HALFLIFE = occ_score_halflife,
             FOIA_OCC_RANK_CUTOFF = foia_occ_rank_cutoff,
+            MULTIPLICATIVE_SCORE = multiplicative_score,
         )
         materialize_table("_merge_match_filt_prefilt", prefilt_stage["match_filt"], con = con)
-        materialize_table(
-            "_merge_prefilt_base",
-            _build_stage_queries_from_match_filt(
-                "_merge_match_filt_prefilt",
-                postfilt = "none",
-                MATCH_MULT_CUTOFF = 4,
-                REV_MULT_COEFF = rev_mult_coeff,
+
+        match_filt_tab_prefilt = "_merge_match_filt_prefilt"
+        if firm_year_user_dedup and firm_year_user_dedup_optimal:
+            print("Computing optimal dedup for prefilt branch...")
+            _tmp_weighted_q = _build_stage_weighted_query(
+                "SELECT * FROM _merge_match_filt_prefilt",
+                firm_year_user_dedup = False,
                 YOB_BUFFER = yob_buffer,
                 F_PROB_BUFFER = f_prob_buffer,
-                firm_year_user_dedup = firm_year_user_dedup,
                 W_COUNTRY = w_country,
                 W_YOB = w_yob,
                 W_GENDER = w_gender,
                 W_OCC = w_occ,
                 OCC_SCORE_HALFLIFE = occ_score_halflife,
+                MULTIPLICATIVE_SCORE = multiplicative_score,
+            )
+            materialize_table("_merge_weighted_tmp", _tmp_weighted_q, con = con)
+            _apply_optimal_dedup(con, "_merge_weighted_tmp", out_table = "_optimal_dedup_pairs_prefilt")
+            materialize_table(
+                "_merge_match_filt_prefilt_deduped",
+                "SELECT m.* FROM _merge_match_filt_prefilt m JOIN _optimal_dedup_pairs_prefilt p USING (lottery_year, foia_indiv_id, user_id)",
+                con = con,
+            )
+            con.sql("DROP TABLE IF EXISTS _merge_weighted_tmp")
+            match_filt_tab_prefilt = "_merge_match_filt_prefilt_deduped"
+
+        materialize_table(
+            "_merge_prefilt_base",
+            _build_stage_queries_from_match_filt(
+                match_filt_tab_prefilt,
+                postfilt = "none",
+                MATCH_MULT_CUTOFF = 4,
+                REV_MULT_COEFF = rev_mult_coeff,
+                YOB_BUFFER = yob_buffer,
+                F_PROB_BUFFER = f_prob_buffer,
+                firm_year_user_dedup = firm_year_user_dedup_sql,
+                W_COUNTRY = w_country,
+                W_YOB = w_yob,
+                W_GENDER = w_gender,
+                W_OCC = w_occ,
+                OCC_SCORE_HALFLIFE = occ_score_halflife,
+                MULTIPLICATIVE_SCORE = multiplicative_score,
                 AMBIGUITY_WEIGHT_GAP_CUTOFF = ambiguity_weight_gap_cutoff,
                 BAD_MATCH_GUARD_ENABLED = bad_match_guard_enabled,
                 BAD_MATCH_GUARD_SUBREGION_SCORE_LT = bad_match_guard_subregion_lt,
@@ -1747,18 +2040,19 @@ def build_reg_inputs(
         materialize_table(
             f"_merge_mult{cutoff}_base",
             _build_stage_queries_from_match_filt(
-                "_merge_match_filt_base",
+                match_filt_tab_base,
                 postfilt = "indiv",
                 MATCH_MULT_CUTOFF = cutoff,
                 REV_MULT_COEFF = rev_mult_coeff,
                 YOB_BUFFER = yob_buffer,
                 F_PROB_BUFFER = f_prob_buffer,
-                firm_year_user_dedup = firm_year_user_dedup,
+                firm_year_user_dedup = firm_year_user_dedup_sql,
                 W_COUNTRY = w_country,
                 W_YOB = w_yob,
                 W_GENDER = w_gender,
                 W_OCC = w_occ,
                 OCC_SCORE_HALFLIFE = occ_score_halflife,
+                MULTIPLICATIVE_SCORE = multiplicative_score,
                 AMBIGUITY_WEIGHT_GAP_CUTOFF = ambiguity_weight_gap_cutoff,
                 BAD_MATCH_GUARD_ENABLED = bad_match_guard_enabled,
                 BAD_MATCH_GUARD_SUBREGION_SCORE_LT = bad_match_guard_subregion_lt,
@@ -1829,6 +2123,10 @@ def build_reg_inputs(
         ("mult6", "_merge_mult6_base", icfg.MERGE_FILT_MULT6_PARQUET),
         ("strict", "_merge_strict_base", icfg.MERGE_FILT_STRICT_PARQUET),
     ]
+    # Optimal dedup outputs go to separate files with _opt suffix so they don't
+    # overwrite the standard (greedy) outputs.
+    if firm_year_user_dedup and firm_year_user_dedup_optimal:
+        outputs = [(name, tab, path.replace(".parquet", "_opt.parquet")) for name, tab, path in outputs]
 
     for name, base_table, out_path in outputs:
         print(f"Building {name}...")

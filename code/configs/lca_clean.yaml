@@ -1,0 +1,22 @@
+run_tag: "lca_v1"
+
+testing:
+  enabled: false
+  n_rows: 5000        # rows per file when testing
+
+lca_raw_dir: "{root}/data/raw/lca_disclosures"   # fresh downloads go here
+lca_legacy_dir: "{root}/data/raw/lca"             # existing messy folder (FY2005-2007 fallback)
+output_dir: "{root}/data/int"
+
+# Fiscal years to process. FY2008 = first year of random H-1B lottery.
+# FY2005-2007 rely on local legacy files (MDB/CSV); FY2008-2019 downloaded from DOL.
+years: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019]
+
+dol_base_url: "https://www.dol.gov/sites/dolgov/files/ETA/oflc/pdfs"
+
+# Certified-Withdrawn: employer filed LCA but later withdrew; some papers count these as
+# evidence of intent. Set false for strictest "certified only" proxy.
+include_withdrawn: false
+
+# H-1B visa class filter (newer disclosure files include H-1B1, E-3 as well)
+visa_class_filter: ["H-1B"]

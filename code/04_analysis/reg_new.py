@@ -56,13 +56,17 @@ OUTPUT_DIR = Path(CFG["output_dir"])
 PRIMARY_FE_SPEC = CFG.get("primary_fe_spec", "firm_year")
 BALANCE_TABLE = bool(CFG.get("balance_table", True))
 HET_EFFECTS = bool(CFG.get("het_effects", True))
+RUN_UPDATING_DIAGNOSTICS = bool(CFG.get("run_updating_diagnostics", True))
+RUN_MATCH_QUALITY_CHECK = bool(CFG.get("run_match_quality_check", False))
 OUTCOME_GROUPS: dict = CFG.get("outcomes", {})
 FE_SPECS: list = CFG.get("fe_specs", ["firm_year"])
 VARIANTS: list = CFG.get("variants", [])
+USE_OPTIMAL_DEDUP: bool = bool(CFG.get("use_optimal_dedup", False))
 
 print(f"=== reg_new.py ===")
-print(f"run_tag:  {CFG.get('run_tag', 'feb2026')}")
-print(f"testing:  {'ENABLED (n=' + str(TESTING_N_APPS) + ')' if TESTING_ENABLED else 'disabled'}")
+print(f"run_tag:         {CFG.get('run_tag', 'feb2026')}")
+print(f"use_optimal_dedup: {USE_OPTIMAL_DEDUP}")
+print(f"testing:         {'ENABLED (n=' + str(TESTING_N_APPS) + ')' if TESTING_ENABLED else 'disabled'}")
 print(f"variants: {[v['name'] for v in VARIANTS]}")
 print(f"fe_specs: {FE_SPECS}")
 print()
@@ -166,7 +170,12 @@ def collapse_to_app_level(df: pd.DataFrame) -> pd.DataFrame:
         "in_home_country1", "in_home_country2", "in_home_country3",
         "new_educ1", "new_educ2", "new_educ3",
         "agg_compensation1", "agg_compensation2", "agg_compensation3",
-        "graddiff",
+        # graddiff removed — already captured as graddiff_agg in id_cols (weighted avg per applicant)
+        # Non-updating bias diagnostics (weighted avg across candidate matches):
+        "updatediff",          # months from pre-lottery ref to Revelio's profile refresh date
+        "updatediff_activity", # months from pre-lottery ref to most recent position/educ startdate
+        "frac_null_enddate1", "frac_null_enddate2",   # fraction of yr-t positions with null enddate
+        "null_enddate_stayer1", "null_enddate_stayer2", # at orig. firm only via null-enddate imputation
     ]
     outcomes = [v for v in candidate_outcomes if v in df.columns]
 
@@ -190,7 +199,9 @@ def collapse_to_app_level(df: pd.DataFrame) -> pd.DataFrame:
         [["foia_indiv_id", "firm_key"]]
     )
 
-    # Step 2: Collapse outcomes to applicant level via weighted average
+    # Step 2: Collapse outcomes to applicant level via weighted average.
+    # Group by foia_indiv_id only (not all id_cols) to avoid duplicate rows when
+    # any id_col has inconsistent values across candidate rows for the same applicant.
     agg_dict = {
         var: (var, lambda x, var=var: (
             np.average(x.dropna(), weights=df.loc[x.dropna().index, "weight_norm"])
@@ -200,7 +211,26 @@ def collapse_to_app_level(df: pd.DataFrame) -> pd.DataFrame:
     }
     agg_dict["weight_norm"] = ("weight_norm", "sum")  # total match weight per applicant
 
-    app_df = df.groupby(id_cols).agg(**agg_dict).reset_index()
+    app_df = df.groupby("foia_indiv_id").agg(**agg_dict).reset_index()
+
+    # Merge applicant-level constants back in (take first value per applicant)
+    id_cols_no_id = [c for c in id_cols if c != "foia_indiv_id"]
+    id_vals = df.groupby("foia_indiv_id")[id_cols_no_id].first().reset_index()
+
+    # Diagnostic: flag any id_cols that actually vary across rows for the same applicant.
+    # These should be constant (all come from FOIA table keyed by foia_indiv_id), but
+    # if any vary, .first() silently picks an arbitrary value — useful to know.
+    _vary_check = df.groupby("foia_indiv_id")[id_cols_no_id].nunique()
+    _varying = [c for c in id_cols_no_id if (_vary_check[c] > 1).any()]
+    if _varying:
+        print(f"  [WARN] id_cols that vary per applicant (using .first()): {_varying}")
+        for c in _varying:
+            n_bad = int((_vary_check[c] > 1).sum())
+            print(f"    {c}: {n_bad:,} applicants with >1 unique value")
+    else:
+        print("  [OK] All id_cols are constant per applicant")
+
+    app_df = app_df.merge(id_vals, on="foia_indiv_id", how="left")
 
     # Step 3: Attach best firm_key
     app_df = app_df.merge(firm_weights, on="foia_indiv_id", how="left")
@@ -259,7 +289,7 @@ def _build_panel_df(df: pd.DataFrame, fe_spec: str) -> pd.DataFrame:
 
 def _fe_formula(outcome: str, fe_spec: str, df: pd.DataFrame) -> str:
     """Build the PanelOLS formula string for a given FE spec."""
-    base = f"{outcome} ~ winner + ade"
+    base = f"{outcome} ~ winner + ade + winner:ade"
     if fe_spec == "none":
         return base + " + 1"
     elif fe_spec == "firm_year":
@@ -294,6 +324,18 @@ def run_regression(
         print(f"    [SKIP] {outcome} ({fe_spec}): too few obs ({len(sub)})")
         return None
 
+    # Drop singleton entities — required for PanelOLS (nobs must exceed nentity).
+    # For none/firm_year entity = firm_year_fe; for firm_plus_year entity = firm_key.
+    entity_col = "firm_key" if fe_spec == "firm_plus_year" else "firm_year_fe"
+    entity_counts = sub.groupby(entity_col)[entity_col].transform("count")
+    n_before = len(sub)
+    sub = sub[entity_counts > 1].copy()
+    if len(sub) < n_before:
+        print(f"    [INFO] {outcome} ({fe_spec}): dropped {n_before - len(sub):,} singleton {entity_col}s")
+    if len(sub) < 10:
+        print(f"    [SKIP] {outcome} ({fe_spec}): too few obs after dropping singletons ({len(sub)})")
+        return None
+
     # Add year dummies before building panel index (needed for firm_plus_year)
     if fe_spec == "firm_plus_year":
         years = sorted(sub["lottery_year"].unique())[1:]
@@ -309,7 +351,13 @@ def run_regression(
             data=panel_df,
             weights=panel_df["weight_norm"],
         )
-        result = model.fit(cov_type="clustered", cluster_entity=True)
+        # Always cluster at firm level.
+        # firm_plus_year: entity IS firm_key → cluster_entity=True is correct.
+        # none/firm_year: entity is firm_year_fe → pass firm_key column explicitly.
+        if fe_spec == "firm_plus_year":
+            result = model.fit(cov_type="clustered", cluster_entity=True)
+        else:
+            result = model.fit(cov_type="clustered", clusters=panel_df["firm_key"])
         return result
     except Exception as e:
         print(f"    [ERR] {outcome} ({fe_spec}): {e}")
@@ -338,8 +386,11 @@ def run_all_outcomes(
                 if res is not None:
                     coef = res.params.get("winner", np.nan)
                     se = res.std_errors.get("winner", np.nan)
+                    coef_int = res.params.get("winner:ade", np.nan)
+                    se_int = res.std_errors.get("winner:ade", np.nan)
                     n = int(res.nobs)
-                    print(f"    {outcome:30s}  winner={coef:+.4f} ({se:.4f})  N={n:,}")
+                    print(f"    {outcome:30s}  winner={coef:+.4f} ({se:.4f})  "
+                          f"winner:ade={coef_int:+.4f} ({se_int:.4f})  N={n:,}")
 
     return results
 
@@ -384,7 +435,7 @@ def make_regression_table(
     verbose   : if True, also print linearmodels compare() table to console
     """
     if row_vars is None:
-        row_vars = ["winner", "ade"]
+        row_vars = ["winner", "ade", "winner:ade"]
 
     valid = {lab: res for lab, res in zip(col_labels, results) if res is not None}
 
@@ -438,8 +489,13 @@ def save_table(latex: str, path: Path, verbose: bool = True):
 
 def make_balance_table(df_app: pd.DataFrame, variant_name: str, output_dir: Path):
     """
-    Compare pre-lottery covariates by winner status.
-    Prints and saves a LaTeX table with mean(winner=0), mean(winner=1), p-value.
+    Compare pre-lottery covariates by winner status, separately within ADE=0 and ADE=1 subgroups.
+
+    For all variables except `ade` itself, means and t-test p-values are computed within each
+    ADE subgroup (ADE=0 and ADE=1) to assess within-group balance.
+    For `ade`, the comparison is done on the full sample (conditioning on ADE is meaningless there).
+
+    LaTeX output has 7 columns: Variable | ADE=0 Loser | ADE=0 Winner | ADE=0 p | ADE=1 Loser | ADE=1 Winner | ADE=1 p
     """
     balance_vars = [
         ("age",              "Age at lottery"),
@@ -451,50 +507,104 @@ def make_balance_table(df_app: pd.DataFrame, variant_name: str, output_dir: Path
         ("high_rep_emp_ind", "High-reputation employer"),
     ]
 
+    df_ade0 = df_app[df_app["ade"] == 0]
+    df_ade1 = df_app[df_app["ade"] == 1]
+
+    def _compute_row(col, label, df):
+        """Compute balance stats for one variable in a given subsample."""
+        if col not in df.columns:
+            return None
+        g0 = df.loc[df["winner"] == 0, col].dropna()
+        g1 = df.loc[df["winner"] == 1, col].dropna()
+        if len(g0) < 2 or len(g1) < 2:
+            return None
+        _, pval = stats.ttest_ind(g0, g1, equal_var=False)
+        return {
+            "label": label,
+            "mean_0": g0.mean(),
+            "mean_1": g1.mean(),
+            "pval": pval,
+            "n0": len(g0),
+            "n1": len(g1),
+        }
+
     rows = []
     for col, label in balance_vars:
         if col not in df_app.columns:
             continue
-        g0 = df_app.loc[df_app["winner"] == 0, col].dropna()
-        g1 = df_app.loc[df_app["winner"] == 1, col].dropna()
-        if len(g0) < 2 or len(g1) < 2:
-            continue
-        _, pval = stats.ttest_ind(g0, g1, equal_var=False)
-        rows.append({
-            "label": label,
-            "mean_0": g0.mean(),
-            "mean_1": g1.mean(),
-            "diff": g1.mean() - g0.mean(),
-            "pval": pval,
-            "n0": len(g0),
-            "n1": len(g1),
-        })
+        if col == "ade":
+            # Full-sample comparison for ADE itself
+            r_full = _compute_row(col, label, df_app)
+            if r_full is None:
+                continue
+            rows.append({"label": label, "col": col, "full": r_full, "ade0": None, "ade1": None})
+        else:
+            r0 = _compute_row(col, label, df_ade0)
+            r1 = _compute_row(col, label, df_ade1)
+            if r0 is None and r1 is None:
+                continue
+            rows.append({"label": label, "col": col, "full": None, "ade0": r0, "ade1": r1})
 
     if not rows:
         print(f"  [balance] No variables available for {variant_name}")
         return
 
+    # --- Console print ---
+    def _stars(p):
+        return "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.1 else ""
+
     print(f"\n=== Balance Table: {variant_name} ===")
-    hdr = f"{'Variable':<35} {'Loser':>8} {'Winner':>8} {'Diff':>8} {'p-val':>7}"
+    hdr = (f"{'Variable':<35} {'ADE=0 L':>8} {'ADE=0 W':>8} {'p':>7}  "
+           f"{'ADE=1 L':>8} {'ADE=1 W':>8} {'p':>7}")
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
-        stars = "***" if r["pval"] < 0.01 else "**" if r["pval"] < 0.05 else "*" if r["pval"] < 0.1 else ""
-        print(f"  {r['label']:<33} {r['mean_0']:8.3f} {r['mean_1']:8.3f} "
-              f"{r['diff']:+8.3f} {r['pval']:7.3f}{stars}")
+        if r["col"] == "ade":
+            f = r["full"]
+            print(f"  {r['label']:<33} {f['mean_0']:8.3f} {f['mean_1']:8.3f} "
+                  f"{f['pval']:7.3f}{_stars(f['pval'])}  (full sample)")
+        else:
+            r0, r1 = r["ade0"], r["ade1"]
+            s0 = (f"{r0['mean_0']:8.3f} {r0['mean_1']:8.3f} {r0['pval']:7.3f}{_stars(r0['pval'])}"
+                  if r0 else f"{'—':>8} {'—':>8} {'—':>7}")
+            s1 = (f"{r1['mean_0']:8.3f} {r1['mean_1']:8.3f} {r1['pval']:7.3f}{_stars(r1['pval'])}"
+                  if r1 else f"{'—':>8} {'—':>8} {'—':>7}")
+            print(f"  {r['label']:<33} {s0}  {s1}")
 
-    # LaTeX
+    # --- LaTeX ---
     latex = f"% Balance table: {variant_name}\n"
-    latex += "\\begin{tabular}{lrrrr}\n\\toprule\n"
-    latex += "Variable & Loser & Winner & Diff & p-val \\\\\n\\midrule\n"
+    latex += "\\begin{tabular}{lrrrrrr}\n\\toprule\n"
+    latex += ("& \\multicolumn{3}{c}{ADE = 0} & \\multicolumn{3}{c}{ADE = 1} \\\\\n"
+              "\\cmidrule(lr){2-4}\\cmidrule(lr){5-7}\n")
+    latex += "Variable & Loser & Winner & p-val & Loser & Winner & p-val \\\\\n\\midrule\n"
+
     for r in rows:
-        stars = "***" if r["pval"] < 0.01 else "**" if r["pval"] < 0.05 else "*" if r["pval"] < 0.1 else ""
-        latex += (f"{r['label']} & {r['mean_0']:.3f} & {r['mean_1']:.3f} & "
-                  f"{r['diff']:+.3f} & {r['pval']:.3f}{stars} \\\\\n")
-    n0 = rows[0]["n0"] if rows else 0
-    n1 = rows[0]["n1"] if rows else 0
+        if r["col"] == "ade":
+            f = r["full"]
+            stars = _stars(f["pval"])
+            # Span across all 6 data columns: show full-sample stats in first 3, dashes in last 3
+            latex += (f"{r['label']} & {f['mean_0']:.3f} & {f['mean_1']:.3f} & "
+                      f"{f['pval']:.3f}{stars} & \\multicolumn{{3}}{{c}}{{(full sample)}} \\\\\n")
+        else:
+            r0, r1 = r["ade0"], r["ade1"]
+            if r0:
+                s0 = f"{r0['mean_0']:.3f} & {r0['mean_1']:.3f} & {r0['pval']:.3f}{_stars(r0['pval'])}"
+            else:
+                s0 = "— & — & —"
+            if r1:
+                s1 = f"{r1['mean_0']:.3f} & {r1['mean_1']:.3f} & {r1['pval']:.3f}{_stars(r1['pval'])}"
+            else:
+                s1 = "— & — & —"
+            latex += f"{r['label']} & {s0} & {s1} \\\\\n"
+
+    # N footer: ADE=0 and ADE=1 separately
+    n0_l = int((df_ade0["winner"] == 0).sum())
+    n0_w = int((df_ade0["winner"] == 1).sum())
+    n1_l = int((df_ade1["winner"] == 0).sum())
+    n1_w = int((df_ade1["winner"] == 1).sum())
     latex += "\\midrule\n"
-    latex += f"N (losers / winners) & {n0:,} & {n1:,} & & \\\\\n"
+    latex += (f"N (ADE=0: losers / winners) & {n0_l:,} & {n0_w:,} & & & & \\\\\n")
+    latex += (f"N (ADE=1: losers / winners) & & & & {n1_l:,} & {n1_w:,} & \\\\\n")
     latex += "\\bottomrule\n\\end{tabular}"
 
     save_table(latex, output_dir / "tables" / f"balance_{variant_name}.tex", verbose=False)
@@ -599,7 +709,7 @@ def run_het_effects(
                 yr_terms = " + ".join(f"yr_{yr}" for yr in years)
                 fe_term = f"EntityEffects + {yr_terms}"
 
-            formula = f"{outcome} ~ winner * graddiff3 + ade + {fe_term}"
+            formula = f"{outcome} ~ winner * graddiff3 + ade + winner:ade + {fe_term}"
             try:
                 int_res = PanelOLS.from_formula(
                     formula, data=panel_sub, weights=panel_sub["weight_norm"]
@@ -613,7 +723,7 @@ def run_het_effects(
             title = f"Het effects (graddiff) — {outcome} — {variant_name}"
             latex = make_regression_table(
                 res_list, col_labels,
-                row_vars=["winner", "ade", "graddiff3", "winner:graddiff3"],
+                row_vars=["winner", "ade", "winner:ade", "graddiff3", "winner:graddiff3"],
                 title=title, verbose=True,
             )
             save_table(
@@ -621,6 +731,71 @@ def run_het_effects(
                 output_dir / "tables" / f"het_{variant_name}_graddiff_{outcome}.tex",
                 verbose=False,
             )
+
+
+###############################################################################
+# NON-UPDATING BIAS DIAGNOSTICS
+###############################################################################
+
+def run_profile_recency_subsample(df_app: pd.DataFrame, variant_name: str, output_dir: Path):
+    """
+    Robustness check for non-updating bias: split sample by whether the Revelio
+    profile shows evidence of recent activity before vs. after the lottery, then
+    compare treatment effects on main mobility outcomes across subgroups.
+
+    Uses updatediff_activity (months from pre-lottery ref to most recent position/educ
+    startdate) if available, falls back to updatediff (Revelio refresh date).
+
+    - updatediff_activity <= 0: last profile activity was BEFORE the pre-lottery
+      reference date (lottery_year-1, March) → profile was stale, any updating
+      cannot be caused by winning the lottery. If treatment effects persist in
+      this subsample, differential updating is NOT the main driver.
+    - updatediff_activity >= 12: last activity at least 1 year after the reference
+      date → profile was updated post-lottery. Effects here may be contaminated.
+    """
+    uvar = (
+        "updatediff_activity" if "updatediff_activity" in df_app.columns
+        else "updatediff" if "updatediff" in df_app.columns
+        else None
+    )
+    if uvar is None:
+        print("  [diag] updatediff not available, skipping profile recency diagnostics")
+        return
+
+    print(f"  [diag] Running profile recency subsample analysis using '{uvar}'")
+    mobility_outcomes = [
+        o for o in ["change_company1", "change_company2", "promoted1", "promoted2"]
+        if o in df_app.columns
+    ]
+    if not mobility_outcomes:
+        return
+
+    spec = PRIMARY_FE_SPEC
+    subgroups = {
+        "All":                    df_app,
+        "Pre-lottery activity":   df_app[df_app[uvar] <= 0],
+        "Post-lottery activity":  df_app[df_app[uvar] >= 12],
+    }
+
+    (output_dir / "tables").mkdir(parents=True, exist_ok=True)
+    for outcome in mobility_outcomes:
+        res_list, col_labels = [], []
+        for label, sub in subgroups.items():
+            if len(sub) < 50:
+                print(f"    [diag] Skipping '{label}' for {outcome} (n={len(sub)} < 50)")
+                continue
+            res = run_regression(sub, outcome, spec)
+            res_list.append(res)
+            col_labels.append(label)
+        if any(r is not None for r in res_list):
+            latex = make_regression_table(
+                res_list, col_labels,
+                title=f"Profile recency robustness — {outcome} — {variant_name}",
+                verbose=True,
+            )
+            out_path = output_dir / "tables" / f"diag_recency_{variant_name}_{outcome}.tex"
+            save_table(latex, out_path, verbose=False)
+            print(f"    [diag] Saved {out_path.name}")
 
 
 ###############################################################################
@@ -632,13 +807,16 @@ def process_variant(variant: dict, output_dir: Path):
     name = variant["name"]
     parquet_key = variant["parquet_key"]
 
-    # Resolve parquet path via icfg
+    # Resolve parquet path via icfg; optionally redirect to _opt files
     primary_path = getattr(icfg, parquet_key, None)
     legacy_path = getattr(icfg, parquet_key + "_LEGACY", None)
 
     if primary_path is None:
         print(f"  [SKIP] Unknown parquet key: {parquet_key}")
         return
+    if USE_OPTIMAL_DEDUP:
+        primary_path = primary_path.replace(".parquet", "_opt.parquet")
+        legacy_path = None  # no legacy variant for optimal dedup outputs
     parquet_path = icfg.choose_path(primary_path, legacy_path)
     if not os.path.exists(parquet_path):
         print(f"  [SKIP] Parquet not found: {parquet_path}")
@@ -691,6 +869,17 @@ def process_variant(variant: dict, output_dir: Path):
     if HET_EFFECTS:
         print(f"\n  Running heterogeneous effects...")
         run_het_effects(df_app, name, output_dir)
+
+    # 8. Non-updating bias diagnostics
+    if RUN_UPDATING_DIAGNOSTICS:
+        print(f"\n  Running non-updating bias diagnostics...")
+        run_profile_recency_subsample(df_app, name, output_dir)
+
+    # 9. Ex-post match quality check
+    if RUN_MATCH_QUALITY_CHECK:
+        print(f"\n  Running ex-post match quality check...")
+        from match_quality_check import run_match_quality_check
+        run_match_quality_check(name, CFG.get("run_tag", icfg.RUN_TAG), output_dir, parquet_path)
 
     print(f"\n  Done with {name} ({time.time()-t_start:.1f}s total)")
 

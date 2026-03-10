@@ -1,0 +1,33 @@
+run_tag: "feb2026"
+
+# Path to TRK_12704 raw FOIA xlsx files (pre-2021 H-1B approvals)
+trk_data_dir: "{root}/data/raw/H-1B Data"
+
+# Crosswalk: PET_FIRM_NAME + PET_STATE → foia_firm_uid (built by extend_foia_dedup_trk12704.py)
+trk_crosswalk: "{root}/data/int/trk12704_to_foiafirm.csv"
+
+# Cached TRK institution supplement (built once from xlsx, reused across runs)
+trk_supplement_cache: "{root}/data/int/trk_institution_supplement.parquet"
+
+# Revelio WRDS raw education data (has field/field_raw columns not in rev_educ_long)
+# Path uses {run_tag} substitution applied at load time
+wrds_users_parquet: "{root}/data/int/wrds_users_{run_tag}.parquet"
+
+# Output directory for match quality plots and parquet scores
+# LaTeX tables go to output_dir/tables/ (shared with reg_new.py)
+output_dir: "{root}/output/match_quality"
+
+# Fuzzy similarity thresholds
+thresholds:
+  institution: 0.85   # Lev+JW threshold for institution name match
+  field_str: 0.80     # Lev+JW threshold for field-of-study string match
+  title: 0.75         # Lev+JW threshold for job title match (lower: titles vary)
+
+# Testing mode: subsample to n_apps applicants
+testing:
+  enabled: false
+  n_apps: 200
+  seed: 42
+
+# Force rebuild of TRK institution supplement even if cache exists
+force_rebuild_supplement: false

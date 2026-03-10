@@ -1,4 +1,5 @@
 run_tag: "feb2026"
+use_optimal_dedup: true  # if true, load _opt parquet files (from firm_year_user_dedup_optimal in indiv_merge)
 
 testing:
   enabled: false
@@ -11,10 +12,10 @@ output_dir: "{root}/output/reg"
 variants:
   - name: "baseline"
     parquet_key: "MERGE_FILT_BASELINE_PARQUET"
-  - name: "mult2"
-    parquet_key: "MERGE_FILT_MULT2_PARQUET"
-  - name: "mult4"
-    parquet_key: "MERGE_FILT_MULT4_PARQUET"
+  # - name: "mult2"
+  #   parquet_key: "MERGE_FILT_MULT2_PARQUET"
+  # - name: "mult4"
+  #   parquet_key: "MERGE_FILT_MULT4_PARQUET"
   - name: "mult6"
     parquet_key: "MERGE_FILT_MULT6_PARQUET"
   - name: "prefilt"
@@ -55,6 +56,16 @@ outcomes:
   compensation:
     - agg_compensation1
     - agg_compensation2
+  # Non-updating bias diagnostics — regresses winner on profile-update proxies and null-enddate measures.
+  # If winner predicts updatediff/updatediff_activity, there is differential profile updating.
+  # If winner predicts null_enddate_stayer (negatively), losers are more stuck via imputation.
+  diagnostic:
+    - updatediff          # months from pre-lottery ref to Revelio's profile refresh date
+    - updatediff_activity # months from pre-lottery ref to most recent position/educ startdate (better proxy)
+    - frac_null_enddate1  # fraction of yr+1 active positions with null enddate
+    - frac_null_enddate2
+    - null_enddate_stayer1 # at orig. firm in yr+1 ONLY due to null-enddate imputation
+    - null_enddate_stayer2
 
 # Balance table comparing pre-lottery covariates by winner status
 balance_table: true
@@ -62,3 +73,12 @@ balance_table: true
 # Heterogeneous effects (subgroup + interaction regressions)
 # Runs on all retention outcomes using the primary FE spec
 het_effects: true
+
+# Non-updating bias diagnostics: split sample by profile recency and compare treatment effects
+# on mobility outcomes. See run_profile_recency_subsample() in reg_new.py.
+run_updating_diagnostics: true
+
+# Ex-post match quality check: compare FOIA characteristics (institution, field, ed level,
+# job title) to linked Revelio profile data, producing weighted match rates per variant.
+# See 04_analysis/match_quality_check.py and configs/match_quality.yaml.
+run_match_quality_check: false

@@ -48,6 +48,12 @@ parser.add_argument("--n-highmult",     type=int, default=1, help="HIGH-MULT sam
 parser.add_argument("--n-no-firm-pos",  type=int, default=1, help="NO-FIRM-POS samples: matched user has no positions at FOIA firm rcid (default 1)")
 parser.add_argument("--firms", nargs="+", metavar="FIRM_UID",
                     help="Restrict spotcheck to these foia_firm_uid values (space-separated)")
+parser.add_argument("--od", action="store_true",
+                    help="Optimal dedup network spotcheck: sample small pre-dedup bipartite networks to see how the matching resolved conflicts")
+parser.add_argument("--od-n-sample", type=int, default=5, metavar="N",
+                    help="Number of networks to sample in --od mode (default 5)")
+parser.add_argument("--od-max-nodes", type=int, default=8, metavar="N",
+                    help="Max nodes (apps + users) per sampled network in --od mode (default 8)")
 parser.add_argument("--max-cands",   type=int, default=5,
                     help="Max Revelio candidates shown per applicant (default 5)")
 parser.add_argument("--max-pos",     type=int, default=5,
@@ -853,9 +859,130 @@ def run_fn_analysis(n_firms):
     print("Done.")
 
 
+# =============================================================================
+# PART C: Optimal dedup network spotcheck (--od mode)
+# =============================================================================
+
+def run_od_spotcheck():
+    """Sample small connected components from the pre-dedup bipartite match graph.
+
+    Requires that build_reg_inputs() was run with firm_year_user_dedup_optimal=true,
+    which saves a slim pre-dedup parquet (optimal_dedup_prededup_parquet in config).
+    Each printed network shows all (app, user) candidate edges with scores, and marks
+    the pairs selected by the maximum-weight bipartite matching with *** SELECTED.
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+    import numpy as np
+
+    path = icfg.OPTIMAL_DEDUP_PREDEDUP_PARQUET
+    if not path or not os.path.exists(path):
+        print(f"[error] Pre-dedup parquet not found: {path}")
+        print("  Run build_reg_inputs() with firm_year_user_dedup_optimal=true first.")
+        return
+
+    df = con.sql(f"SELECT * FROM read_parquet('{path}')").df()
+    print(f"Loaded {len(df):,} pre-dedup edges from {os.path.basename(path)}")
+
+    n_sample  = args.od_n_sample
+    max_nodes = args.od_max_nodes
+
+    # Pull FOIA employer names for display
+    foia_ids_sql = ", ".join(f"'{x}'" for x in df.foia_indiv_id.unique())
+    emp_df = con.sql(f"""
+        SELECT DISTINCT ON (foia_indiv_id) foia_indiv_id, employer_name
+        FROM foia_indiv
+        WHERE foia_indiv_id IN ({foia_ids_sql})
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY foia_indiv_id ORDER BY foia_indiv_id) = 1
+    """).df().set_index("foia_indiv_id")
+
+    # Reconstruct bipartite connected components per lottery_year and collect eligible networks.
+    # Eligible = 3..max_nodes total nodes AND at least one real conflict (>=2 apps or >=2 users).
+    eligible = []
+    for year, grp in df.groupby("lottery_year"):
+        grp = grp.reset_index(drop=True)
+        unique_apps  = grp["foia_indiv_id"].unique()
+        unique_users = grp["user_id"].unique()
+        app_to_idx   = {a: i for i, a in enumerate(unique_apps)}
+        user_to_idx  = {u: i for i, u in enumerate(unique_users)}
+        n_a = len(unique_apps)
+
+        app_idxs  = grp["foia_indiv_id"].map(app_to_idx).values
+        user_idxs = grp["user_id"].map(user_to_idx).values
+        n_total   = n_a + len(unique_users)
+        bi_rows   = np.concatenate([app_idxs, user_idxs + n_a])
+        bi_cols   = np.concatenate([user_idxs + n_a, app_idxs])
+        adj       = csr_matrix(
+            (np.ones(len(bi_rows), dtype=np.float32), (bi_rows, bi_cols)),
+            shape=(n_total, n_total),
+        )
+        _, labels = connected_components(adj, directed=False)
+
+        for comp_id in np.unique(labels):
+            nodes      = np.where(labels == comp_id)[0]
+            comp_apps  = nodes[nodes < n_a]
+            comp_users = nodes[nodes >= n_a] - n_a
+            nc_a, nc_u = len(comp_apps), len(comp_users)
+            if nc_a + nc_u < 3 or nc_a + nc_u > max_nodes:
+                continue
+            if nc_a < 2 and nc_u < 2:
+                continue  # trivial 1-app-1-user: not interesting
+            mask = np.isin(app_idxs, comp_apps) & np.isin(user_idxs, comp_users)
+            eligible.append({
+                "year":  year,
+                "apps":  unique_apps[comp_apps],
+                "users": unique_users[comp_users],
+                "edges": grp[mask],
+            })
+
+    if not eligible:
+        print(f"[od] No eligible networks found with 3–{max_nodes} nodes and a real conflict.")
+        return
+
+    sampled = random.sample(eligible, min(n_sample, len(eligible)))
+
+    print()
+    print_divider()
+    print(f"OPTIMAL DEDUP NETWORK SPOTCHECK — {len(sampled)} of {len(eligible):,} eligible networks")
+    print(f"  (criteria: 3–{max_nodes} nodes, ≥2 apps or ≥2 users per network)")
+    print_divider()
+
+    for i, comp in enumerate(sampled, 1):
+        year  = comp["year"]
+        apps  = comp["apps"]
+        users = comp["users"]
+        edges = comp["edges"].sort_values("total_score", ascending=False)
+        print(f"\n--- Network {i}  year={year}  "
+              f"{len(apps)} app(s) × {len(users)} user(s)  "
+              f"{len(edges)} edge(s) ---")
+
+        for app_id in apps:
+            employer = emp_df.loc[app_id, "employer_name"] if app_id in emp_df.index else "?"
+            row = edges[edges.foia_indiv_id == app_id].iloc[0]
+            print(f"  APP  {app_id}  firm={str(employer)[:40]}  "
+                  f"country={row.foia_country}  yob={row.yob}")
+
+        for user_id in users:
+            row = edges[edges.user_id == user_id].iloc[0]
+            print(f"  USER {user_id}  name={str(row.fullname)[:35]}  "
+                  f"est_yob={row.est_yob}  country={row.rev_country}")
+
+        print()
+        for _, e in edges.iterrows():
+            sel = "  *** SELECTED" if e.is_selected else ""
+            print(f"  {e.foia_indiv_id} → {e.user_id}  "
+                  f"score={fmt_float(e.total_score)}  weight={fmt_float(e.weight_norm)}{sel}")
+
+    print()
+    print_divider()
+    print("Done.")
+
+
 # ---------- Entry point ----------
 
-if args.fn:
+if args.od:
+    run_od_spotcheck()
+elif args.fn:
     run_fn_analysis(args.fn_firms)
 else:
     run_spotcheck()

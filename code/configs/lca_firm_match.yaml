@@ -1,0 +1,12 @@
+run_tag: "v2"
+
+testing:
+  enabled: false
+  n_firms: 500        # sample this many LCA firms when testing
+
+lca_input:           "{root}/data/int/lca_firm_year.parquet"
+foia_firms_extended: "{root}/data/int/foia_firms_dedup_extended.csv"
+output_dir:          "{root}/data/int"
+
+# Stage 2: minimum rapidfuzz token_sort_ratio on name_base (0-100)
+fuzzy_threshold: 90
