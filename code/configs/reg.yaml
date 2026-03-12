@@ -1,5 +1,5 @@
 run_tag: "feb2026"
-use_optimal_dedup: true  # if true, load _opt parquet files (from firm_year_user_dedup_optimal in indiv_merge)
+use_optimal_dedup: false  # if true, load _opt parquet files (from firm_year_user_dedup_optimal in indiv_merge)
 
 testing:
   enabled: false
@@ -12,10 +12,10 @@ output_dir: "{root}/output/reg"
 variants:
   - name: "baseline"
     parquet_key: "MERGE_FILT_BASELINE_PARQUET"
-  # - name: "mult2"
-  #   parquet_key: "MERGE_FILT_MULT2_PARQUET"
-  # - name: "mult4"
-  #   parquet_key: "MERGE_FILT_MULT4_PARQUET"
+  - name: "mult2"
+    parquet_key: "MERGE_FILT_MULT2_PARQUET"
+  - name: "mult4"
+    parquet_key: "MERGE_FILT_MULT4_PARQUET"
   - name: "mult6"
     parquet_key: "MERGE_FILT_MULT6_PARQUET"
   - name: "prefilt"
@@ -35,24 +35,44 @@ primary_fe_spec: "firm_year"
 
 # Outcome variable groups (only variables present in data will be used)
 outcomes:
+  # WORK STATUS: exhaustive + mutually exclusive (still_at_firm + diff_firm + other = 1)
   retention:
-    - still_at_firm1   # still at same foia_firm_uid (any position, incl. original)
+    - still_at_firm1
     - still_at_firm2
     - still_at_firm3
   mobility:
-    - change_company1  # at a different foia_firm_uid post-lottery
-    - change_company2
-    - change_company3
+    - diff_firm1          # active position at any different foia_firm_uid
+    - diff_firm2
+    - diff_firm3
+    - new_diff_firm1      # diff_firm, position started post-lottery
+    - new_diff_firm2
+    - old_diff_firm1      # diff_firm, position started pre-lottery
+    - old_diff_firm2
+    - other1              # no active position anywhere
+    - other2
+  # CONDITIONAL ON still_at_firm: exhaustive within still_at_firm=1
+  within_firm:
+    - same_firm_new_position1   # new post-lottery position at same firm
+    - same_firm_new_position2
+    - same_firm_new_position3
+    - same_pos_null_end1        # same position, null enddate (imputed active)
+    - same_pos_null_end2
+    - same_pos_nonnull_end1     # same position, explicit non-null enddate
+    - same_pos_nonnull_end2
+  # LOCATION BASELINE: combined position + education (in_us + in_home_country + non_us_non_home + loc_null = 1)
+  location:
     - in_us1
     - in_us2
     - in_home_country1
     - in_home_country2
-  career:
-    - promoted1        # new position at same firm post-lottery
-    - promoted2
-    - promoted3
-    - new_educ1
+    - non_us_non_home1
+    - non_us_non_home2
+  # EDUCATION: exhaustive (new_educ + continuing_educ + no_educations = 1)
+  education:
+    - new_educ1           # active education started after lottery (snapshot at t)
     - new_educ2
+    - continuing_educ1    # active education started before lottery (snapshot at t)
+    - continuing_educ2
   compensation:
     - agg_compensation1
     - agg_compensation2
@@ -81,4 +101,4 @@ run_updating_diagnostics: true
 # Ex-post match quality check: compare FOIA characteristics (institution, field, ed level,
 # job title) to linked Revelio profile data, producing weighted match rates per variant.
 # See 04_analysis/match_quality_check.py and configs/match_quality.yaml.
-run_match_quality_check: false
+run_match_quality_check: true

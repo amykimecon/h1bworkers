@@ -1282,18 +1282,21 @@ SELECT * FROM (
 
     -- taking original revelio user data, collapsing to user level and creating necessary variables
     FROM (
-        SELECT user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt, MAX(stem_ind_postsec) AS stem_ind, ARRAY_AGG(field_clean) FILTER (WHERE field_clean IS NOT NULL) AS fields, 
-        CASE WHEN MAX(CASE WHEN degree_clean = 'Doctor' THEN 1 ELSE 0 END) = 1 THEN 'Doctor' 
+        SELECT user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt, MAX(stem_ind_postsec) AS stem_ind, ARRAY_AGG(field_clean) FILTER (WHERE field_clean IS NOT NULL) AS fields,
+        CASE WHEN MAX(CASE WHEN degree_clean = 'Doctor' THEN 1 ELSE 0 END) = 1 THEN 'Doctor'
             WHEN MAX(CASE WHEN degree_clean IN ('Master', 'MBA') THEN 1 ELSE 0 END) = 1 THEN 'Master'
             WHEN MAX(CASE WHEN degree_clean IN ('Bachelor') THEN 1 ELSE 0 END) = 1 THEN 'Bachelor'
             WHEN MAX(CASE WHEN degree_clean IS NOT NULL THEN 1 ELSE 0 END) = 1 THEN 'Other'
-            ELSE NULL END AS highest_ed_level
+            ELSE NULL END AS highest_ed_level,
+        -- profile-level location fields (user-level, constant within user)
+        ANY_VALUE(user_location) AS user_location,
+        ANY_VALUE(user_country) AS user_country
         FROM (
             SELECT user_id, CASE WHEN degree_clean IN ('Non-Degree', 'High School', 'Associate') THEN 0 ELSE stem_ind END AS stem_ind_postsec,
-                {help.get_est_yob()} AS est_yob, 
+                {help.get_est_yob()} AS est_yob,
                 MAX(CASE WHEN degree_clean = 'High School' THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS hs_ind,
                 MAX(CASE WHEN degree_clean NOT IN ('Non-Degree', 'Master', 'Doctor', 'MBA') AND (ed_enddate IS NOT NULL OR ed_startdate IS NOT NULL) THEN 1 ELSE 0 END) OVER(PARTITION BY user_id) AS valid_postsec, updated_dt, field_clean, degree_clean,
-                f_prob, fullname FROM rev_users_filt
+                f_prob, fullname, user_location, user_country FROM rev_users_filt
         ) GROUP BY user_id, est_yob, f_prob, fullname, hs_ind, valid_postsec, updated_dt
     ) AS a 
 

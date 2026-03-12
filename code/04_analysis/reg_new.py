@@ -11,6 +11,10 @@ import sys
 import time
 from pathlib import Path
 
+# Ensure stdout is line-buffered so nohup logs update in real time (no-op in IPython)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
 import numpy as np
 import pandas as pd
 import yaml
@@ -28,6 +32,7 @@ else:
 
 _CODE_DIR = os.path.dirname(_THIS_DIR)
 sys.path.append(_CODE_DIR)
+sys.path.append(_THIS_DIR)
 sys.path.append(os.path.join(_CODE_DIR, "03_indiv_merge"))
 
 import indiv_merge_config as icfg
@@ -143,8 +148,19 @@ def load_and_clean(parquet_path: str) -> pd.DataFrame:
         .values
     )
 
-    # Outcome variables (still_at_firm, promoted, change_company, in_us, in_home_country,
-    # new_educ, agg_compensation) come directly from the merged parquet (built in indiv_merge.py).
+    # Outcome variables come directly from the merged parquet (built in indiv_merge.py).
+
+    # --- Profile location indicators (static, from user_location/user_country) ---
+    if "user_country" in df.columns:
+        us_country_codes = {"US", "USA", "United States"}
+        df["profile_in_us"] = df["user_country"].isin(us_country_codes).astype(int)
+        df["profile_in_home_country"] = (
+            df["user_country"].str.upper() == df["foia_country"].str.upper()
+        ).fillna(False).astype(int)
+        df["profile_non_us"] = (
+            (df["profile_in_us"] == 0) & df["user_country"].notna()
+        ).astype(int)
+        df["profile_loc_null"] = df["user_country"].isna().astype(int)
 
     # --- Panel index columns ---
     df["lottery_year"] = df["lottery_year"].astype(int)
@@ -163,19 +179,30 @@ def collapse_to_app_level(df: pd.DataFrame) -> pd.DataFrame:
     """
     # Candidate outcomes to aggregate (only include if present in data)
     candidate_outcomes = [
-        "still_at_firm1", "still_at_firm2", "still_at_firm3",   # still at same foia_firm_uid
-        "change_company1", "change_company2", "change_company3", # at different foia_firm_uid (post-lottery)
-        "promoted1", "promoted2", "promoted3",                   # same firm, new position (post-lottery)
+        # WORK STATUS (exhaustive: still_at_firm + diff_firm + other = 1)
+        "still_at_firm1", "still_at_firm2", "still_at_firm3",
+        "diff_firm1", "diff_firm2", "diff_firm3",           # active position at different firm
+        "new_diff_firm1", "new_diff_firm2", "new_diff_firm3",   # diff_firm, position started post-lottery
+        "old_diff_firm1", "old_diff_firm2", "old_diff_firm3",   # diff_firm, position started pre-lottery
+        "other1", "other2", "other3",                       # no active position anywhere
+        # CONDITIONAL ON still_at_firm (exhaustive within still_at_firm=1)
+        "same_firm_new_position1", "same_firm_new_position2", "same_firm_new_position3",
+        "same_pos_null_end1", "same_pos_null_end2",         # same position, null enddate (imputed active)
+        "same_pos_nonnull_end1", "same_pos_nonnull_end2",   # same position, explicit non-null enddate
+        # LOCATION BASELINE (combined position + education; in_us + in_home_country + non_us_non_home + loc_null = 1)
         "in_us1", "in_us2", "in_us3",
         "in_home_country1", "in_home_country2", "in_home_country3",
+        "non_us_non_home1", "non_us_non_home2", "non_us_non_home3",
+        # EDUCATION (exhaustive: new_educ + continuing_educ + no_educations = 1)
         "new_educ1", "new_educ2", "new_educ3",
+        "continuing_educ1", "continuing_educ2", "continuing_educ3",
+        # COMPENSATION
         "agg_compensation1", "agg_compensation2", "agg_compensation3",
-        # graddiff removed — already captured as graddiff_agg in id_cols (weighted avg per applicant)
-        # Non-updating bias diagnostics (weighted avg across candidate matches):
+        # NON-UPDATING BIAS DIAGNOSTICS (weighted avg across candidate matches)
         "updatediff",          # months from pre-lottery ref to Revelio's profile refresh date
         "updatediff_activity", # months from pre-lottery ref to most recent position/educ startdate
-        "frac_null_enddate1", "frac_null_enddate2",   # fraction of yr-t positions with null enddate
-        "null_enddate_stayer1", "null_enddate_stayer2", # at orig. firm only via null-enddate imputation
+        "frac_null_enddate1", "frac_null_enddate2",
+        "null_enddate_stayer1", "null_enddate_stayer2",
     ]
     outcomes = [v for v in candidate_outcomes if v in df.columns]
 
@@ -325,16 +352,18 @@ def run_regression(
         return None
 
     # Drop singleton entities — required for PanelOLS (nobs must exceed nentity).
-    # For none/firm_year entity = firm_year_fe; for firm_plus_year entity = firm_key.
-    entity_col = "firm_key" if fe_spec == "firm_plus_year" else "firm_year_fe"
-    entity_counts = sub.groupby(entity_col)[entity_col].transform("count")
-    n_before = len(sub)
-    sub = sub[entity_counts > 1].copy()
-    if len(sub) < n_before:
-        print(f"    [INFO] {outcome} ({fe_spec}): dropped {n_before - len(sub):,} singleton {entity_col}s")
-    if len(sub) < 10:
-        print(f"    [SKIP] {outcome} ({fe_spec}): too few obs after dropping singletons ({len(sub)})")
-        return None
+    # Only applies when entity FEs are actually estimated (firm_year or firm_plus_year).
+    # For fe_spec == "none", no EntityEffects are absorbed so singletons are harmless.
+    if fe_spec != "none":
+        entity_col = "firm_key" if fe_spec == "firm_plus_year" else "firm_year_fe"
+        entity_counts = sub.groupby(entity_col)[entity_col].transform("count")
+        n_before = len(sub)
+        sub = sub[entity_counts > 1].copy()
+        if len(sub) < n_before:
+            print(f"    [INFO] {outcome} ({fe_spec}): dropped {n_before - len(sub):,} singleton {entity_col}s")
+        if len(sub) < 10:
+            print(f"    [SKIP] {outcome} ({fe_spec}): too few obs after dropping singletons ({len(sub)})")
+            return None
 
     # Add year dummies before building panel index (needed for firm_plus_year)
     if fe_spec == "firm_plus_year":
@@ -460,13 +489,27 @@ def make_regression_table(
     latex += "\\textbf{N} & " + " & ".join(obs_strs) + " \\\\\n"
 
     dv_means = []
+    ctrl_means = []
     for res in results:
         if res is None:
             dv_means.append("")
+            ctrl_means.append("")
         else:
             dv_series = res.model.dependent.dataframe.squeeze()
             dv_means.append(f"{dv_series.mean():.3f}")
+            exog_df = res.model.exog.dataframe
+            if "winner" in exog_df.columns:
+                ctrl_mask = exog_df["winner"] == 0
+                ctrl_means.append(f"{dv_series[ctrl_mask].mean():.3f}")
+            else:
+                ctrl_means.append("")
     latex += "\\textbf{DV mean} & " + " & ".join(dv_means) + " \\\\\n"
+    latex += "\\textbf{Control mean} & " + " & ".join(ctrl_means) + " \\\\\n"
+
+    if verbose and any(m != "" for m in ctrl_means):
+        print("Control mean (losers): " + "  ".join(
+            f"{lab}={m}" for lab, m in zip(col_labels, ctrl_means) if m != ""
+        ))
 
     latex += "\\bottomrule\n"
     latex += "\\end{tabular}"
@@ -764,7 +807,8 @@ def run_profile_recency_subsample(df_app: pd.DataFrame, variant_name: str, outpu
 
     print(f"  [diag] Running profile recency subsample analysis using '{uvar}'")
     mobility_outcomes = [
-        o for o in ["change_company1", "change_company2", "promoted1", "promoted2"]
+        o for o in ["diff_firm1", "diff_firm2", "new_diff_firm1", "new_diff_firm2",
+                    "same_firm_new_position1", "same_firm_new_position2"]
         if o in df_app.columns
     ]
     if not mobility_outcomes:

@@ -1271,20 +1271,55 @@ def get_rel_year_inds_wide(merge_tab, t0 = -1, t1 = 2, pos_tab = 'merged_pos_cle
 def get_rel_year_inds_wide_by_t(merge_tab, t0 = -1, t1 = 2, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
     """Faster wide construction via one pass + conditional aggregation."""
     pos_cols = [
-        "no_positions", "in_us", "in_home_country", "loc_null",
-        "change_company", "change_position", "agg_compensation",
-        "still_at_firm", "promoted",
+        "no_positions",
+        # work status (exhaustive: still_at_firm + diff_firm + other = 1)
+        "still_at_firm", "diff_firm", "new_diff_firm", "old_diff_firm",
+        # conditional on still_at_firm
+        "same_firm_new_position", "same_pos_null_end", "same_pos_nonnull_end",
+        # position-only location (prefixed pos_; combined below)
+        "pos_in_us", "pos_in_home_country", "pos_non_us_non_home", "pos_loc_null",
+        "agg_compensation",
         "n_pos", "n_pos_startafter", "frac_t",
+        "frac_null_enddate", "null_enddate_stayer",
     ]
     educ_cols = [
-        "no_educations", "educ_in_us", "educ_in_home_country", "masters", "doctors",
-        "new_educ_in_us", "new_educ_in_home_country", "new_masters", "new_doctors", "new_educ",
+        # education status (exhaustive: new_educ + continuing_educ + no_educations = 1)
+        "no_educations", "new_educ", "continuing_educ",
+        # education location
+        "educ_in_us", "educ_in_home_country", "educ_non_us_non_home",
+        "new_educ_in_us", "new_educ_in_home_country", "new_masters", "new_doctors",
+        "masters", "doctors",
     ]
+    # All columns are snapshots at t (no more cumulative new_educ* columns).
     wide_exprs = []
     for t in range(t0, t1 + 1):
         for c in pos_cols + educ_cols:
-            # Keep legacy naming convention: <var><t>, e.g. change_company1, no_positions-1
             wide_exprs.append(f"MAX(CASE WHEN t = {t} THEN {c} END) AS \"{c}{t}\"")
+
+    # Combined location indicators (position OR education) and derived 'other', built per t
+    combined_exprs = []
+    for t in range(t0, t1 + 1):
+        combined_exprs += [
+            # Combined baseline location (active position OR education)
+            f"""CASE WHEN COALESCE("pos_in_us{t}", 0) = 1 OR COALESCE("educ_in_us{t}", 0) = 1 THEN 1 ELSE 0 END AS "in_us{t}" """,
+            f"""CASE WHEN COALESCE("pos_in_us{t}", 0) = 0 AND COALESCE("educ_in_us{t}", 0) = 0
+                      AND (COALESCE("pos_in_home_country{t}", 0) = 1 OR COALESCE("educ_in_home_country{t}", 0) = 1)
+                 THEN 1 ELSE 0 END AS "in_home_country{t}" """,
+            f"""CASE WHEN COALESCE("pos_in_us{t}", 0) = 0 AND COALESCE("educ_in_us{t}", 0) = 0
+                      AND COALESCE("pos_in_home_country{t}", 0) = 0 AND COALESCE("educ_in_home_country{t}", 0) = 0
+                      AND (COALESCE("pos_non_us_non_home{t}", 0) = 1 OR COALESCE("educ_non_us_non_home{t}", 0) = 1)
+                 THEN 1 ELSE 0 END AS "non_us_non_home{t}" """,
+            # loc_null = 1 - in_us - in_home_country - non_us_non_home (derived)
+            f"""CASE WHEN COALESCE("pos_in_us{t}", 0) = 0 AND COALESCE("educ_in_us{t}", 0) = 0
+                      AND COALESCE("pos_in_home_country{t}", 0) = 0 AND COALESCE("educ_in_home_country{t}", 0) = 0
+                      AND COALESCE("pos_non_us_non_home{t}", 0) = 0 AND COALESCE("educ_non_us_non_home{t}", 0) = 0
+                 THEN 1 ELSE 0 END AS "loc_null{t}" """,
+            # Work status: other = no active positions anywhere
+            f"""CASE WHEN COALESCE("still_at_firm{t}", 0) = 0 AND COALESCE("diff_firm{t}", 0) = 0 THEN 1 ELSE 0 END AS "other{t}" """,
+        ]
+
+    wide_sql = ", ".join(wide_exprs)
+    combined_sql = ", ".join(combined_exprs)
 
     return f"""
     WITH pos AS ({get_rel_year_inds_pos(merge_tab, pos_tab = pos_tab, t0 = t0, t1 = t1)}),
@@ -1298,10 +1333,14 @@ def get_rel_year_inds_wide_by_t(merge_tab, t0 = -1, t1 = 2, pos_tab = 'merged_po
                ON p.foia_indiv_id = e.foia_indiv_id
               AND p.user_id = e.user_id
               AND p.t = e.t
+         ),
+         wide AS (
+             SELECT foia_indiv_id, user_id, {wide_sql}
+             FROM joined
+             GROUP BY foia_indiv_id, user_id
          )
-    SELECT foia_indiv_id, user_id, {", ".join(wide_exprs)}
-    FROM joined
-    GROUP BY foia_indiv_id, user_id
+    SELECT *, {combined_sql}
+    FROM wide
     """
 
 def get_rel_year_inds_educ(merge_tab, educ_tab = 'rev_educ_clean', t0 = -1, t1 = 5, rawmerge_tab = None):
@@ -1324,6 +1363,8 @@ def get_rel_year_inds_educ(merge_tab, educ_tab = 'rev_educ_clean', t0 = -1, t1 =
         SELECT *,
             -- indicator for education being in US
                 CASE WHEN match_country = 'United States' THEN 1 ELSE 0 END AS educ_in_us,
+            -- indicator for education location being null
+                CASE WHEN match_country IS NULL THEN 1 ELSE 0 END AS educ_loc_null,
             -- indicator for education being in country of birth
                 CASE WHEN match_country = foia_country THEN 1 ELSE 0 END AS educ_in_home_country,
             -- indicator for masters
@@ -1335,20 +1376,27 @@ def get_rel_year_inds_educ(merge_tab, educ_tab = 'rev_educ_clean', t0 = -1, t1 =
             -- total number of educations in t
                 COUNT(DISTINCT education_number) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_educ_t
         FROM ({get_long_by_year(merge_tab, educ_tab, long_tab_vars = ', degree_clean, match_country, startdate, enddate, education_number', t0 = t0, t1 = t1, enddatenull = "(CASE WHEN degree_clean = 'Master' OR degree_clean = 'MBA' THEN SUBSTRING(startdate, 1, 4)::INT + 2 ELSE SUBSTRING(startdate, 1, 4)::INT + 4 END)", rawmerge_tab = rawmerge_tab)})
-        ORDER BY foia_indiv_id, user_id, t 
+        ORDER BY foia_indiv_id, user_id, t
     """
 
-    educgroup = f""" 
-    SELECT 
+    educgroup = f"""
+    SELECT
         foia_indiv_id, user_id, t,
+        -- EDUCATION STATUS (exhaustive, mutually exclusive: new_educ + continuing_educ + no_educations = 1)
         CASE WHEN COUNT(DISTINCT education_number) = 0 THEN 1 ELSE 0 END AS no_educations,
+        -- new_educ: active education started after lottery (start_before = 0)
+        MAX(CASE WHEN start_before = 0 THEN 1 ELSE 0 END) AS new_educ,
+        -- continuing_educ: active education started before lottery (start_before = 1)
+        MAX(CASE WHEN start_before = 1 THEN 1 ELSE 0 END) AS continuing_educ,
+        -- EDUCATION LOCATION
         MAX(educ_in_us) AS educ_in_us, MAX(educ_in_home_country) AS educ_in_home_country,
+        -- educ_non_us_non_home: non-null location, not US, not home country
+        MAX(CASE WHEN educ_in_us = 0 AND educ_in_home_country = 0 AND educ_loc_null = 0 THEN 1 ELSE 0 END) AS educ_non_us_non_home,
         MAX(masters) AS masters, MAX(doctors) AS doctors,
         MAX(CASE WHEN start_before = 0 AND educ_in_us = 1 THEN 1 ELSE 0 END) AS new_educ_in_us,
-        MAX(CASE WHEN start_before = 0 AND educ_in_home_country = 1 THEN 1 ELSE 0 END) AS new_educ_in_home_country, 
-        MAX(CASE WHEN start_before = 0 AND masters = 1 THEN 1 ELSE 0 END) AS new_masters, 
-        MAX(CASE WHEN start_before = 0 AND doctors = 1 THEN 1 ELSE 0 END) AS new_doctors,
-        MAX(CASE WHEN start_before = 0 THEN 1 ELSE 0 END) AS new_educ
+        MAX(CASE WHEN start_before = 0 AND educ_in_home_country = 1 THEN 1 ELSE 0 END) AS new_educ_in_home_country,
+        MAX(CASE WHEN start_before = 0 AND masters = 1 THEN 1 ELSE 0 END) AS new_masters,
+        MAX(CASE WHEN start_before = 0 AND doctors = 1 THEN 1 ELSE 0 END) AS new_doctors
     FROM ({educlong}) WHERE t IS NOT NULL
     GROUP BY foia_indiv_id, user_id, t"""
 
@@ -1383,11 +1431,11 @@ def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 =
     poslong = f"""
         SELECT *,
         -- indicator for position being in US
-            CASE WHEN country = 'United States' THEN 1 ELSE 0 END AS in_us,
-        -- indicator for position being null
-            CASE WHEN country IS NULL THEN 1 ELSE 0 END AS loc_null,
+            CASE WHEN country = 'United States' THEN 1 ELSE 0 END AS pos_in_us,
+        -- indicator for position location being null
+            CASE WHEN country IS NULL THEN 1 ELSE 0 END AS pos_loc_null,
         -- indicator for position being in country of birth
-            CASE WHEN country = foia_country THEN 1 ELSE 0 END AS in_home_country,
+            CASE WHEN country = foia_country THEN 1 ELSE 0 END AS pos_in_home_country,
         -- indicator for being at same company as matched on in lottery
             CASE WHEN pos_foia_firm_uid = ref_foia_firm_uid THEN 1 ELSE 0 END AS same_company,
         -- creating reference position number variable (first when all positions with t <= 0 ordered by t desc, position number asc)
@@ -1407,20 +1455,50 @@ def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 =
         ORDER BY foia_indiv_id, user_id, t
     """
 
+    # Step 1: add pre-filter window functions (n_start_after, has_new_pos_same_firm)
+    prefilt = f"""(
+        SELECT *,
+            COUNT(CASE WHEN start_before = 0 THEN 1 ELSE NULL END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_start_after,
+            -- has_new_pos_same_firm: 1 if any position at same FOIA firm starting post-lottery exists this year
+            MAX(CASE WHEN same_company = 1 AND pos_start_t >= 0 THEN 1 ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS has_new_pos_same_firm
+        FROM ({poslong})
+    )"""
+
+    # Step 2: apply start_before filter, then add any_same_company_postfilt so that
+    # diff_firm can be defined as mutually exclusive with still_at_firm.
+    postfilt = f"""(
+        SELECT *,
+            MAX(CASE WHEN same_company = 1 THEN 1 ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS any_same_company_postfilt
+        FROM {prefilt}
+        WHERE t IS NOT NULL AND (start_before = 0 OR n_start_after = 0)
+    )"""
+
     # Filtering and grouping by t
-    posgroup = f""" 
-    SELECT 
+    posgroup = f"""
+    SELECT
         foia_indiv_id, user_id, t,
         CASE WHEN COUNT(DISTINCT position_number) = 0 THEN 1 ELSE 0 END AS no_positions,
-        MAX(in_us) AS in_us, MAX(in_home_country) AS in_home_country,
-        MAX(loc_null) AS loc_null,
-        -- at_diff_firm: started a new position at a DIFFERENT firm post-lottery (pos_start_t >= 1)
-        MAX(CASE WHEN pos_start_t >= 1 AND same_company = 0 THEN 1 ELSE 0 END) AS change_company,
-        MAX(CASE WHEN start_before = 0 AND same_position = 0 THEN 1 ELSE 0 END) AS change_position,
-        -- still_at_firm: has any active position at same foia_firm_uid in this year (incl. original position)
+        -- POSITION-ONLY LOCATION (prefixed pos_; combined with education in wide table)
+        MAX(pos_in_us) AS pos_in_us, MAX(pos_in_home_country) AS pos_in_home_country,
+        MAX(CASE WHEN pos_in_us = 0 AND pos_in_home_country = 0 AND pos_loc_null = 0 THEN 1 ELSE 0 END) AS pos_non_us_non_home,
+        MAX(pos_loc_null) AS pos_loc_null,
+        -- WORK STATUS (exhaustive, mutually exclusive: still_at_firm + diff_firm + other = 1)
+        -- still_at_firm: has any active position at same foia_firm_uid in this year
         MAX(CASE WHEN same_company = 1 THEN 1 ELSE 0 END) AS still_at_firm,
-        -- promoted: new position at same firm started post-lottery (pos_start_t >= 1), different role
-        MAX(CASE WHEN pos_start_t >= 1 AND same_company = 1 AND same_position = 0 THEN 1 ELSE 0 END) AS promoted,
+        -- diff_firm: conditioned on any_same_company_postfilt = 0 so it is mutually exclusive with still_at_firm
+        MAX(CASE WHEN same_company = 0 AND any_same_company_postfilt = 0 THEN 1 ELSE 0 END) AS diff_firm,
+        -- new_diff_firm: subset of diff_firm where position started after lottery (start_before = 0)
+        MAX(CASE WHEN same_company = 0 AND any_same_company_postfilt = 0 AND start_before = 0 THEN 1 ELSE 0 END) AS new_diff_firm,
+        -- old_diff_firm: subset of diff_firm where position started before lottery (start_before = 1)
+        MAX(CASE WHEN same_company = 0 AND any_same_company_postfilt = 0 AND start_before = 1 THEN 1 ELSE 0 END) AS old_diff_firm,
+        -- (other = 1 - still_at_firm - diff_firm, derived in wide table)
+        -- CONDITIONAL OUTCOMES (within still_at_firm, exhaustive/mutually exclusive)
+        -- same_firm_new_position: new post-lottery position at same firm (different role)
+        MAX(CASE WHEN same_company = 1 AND same_position = 0 AND start_before = 0 THEN 1 ELSE 0 END) AS same_firm_new_position,
+        -- same_pos_null_end: at reference position, enddate is null (still-active by imputation)
+        MAX(CASE WHEN same_company = 1 AND same_position = 1 AND enddate IS NULL THEN 1 ELSE 0 END) AS same_pos_null_end,
+        -- same_pos_nonnull_end: at reference position, enddate is non-null (explicitly ongoing)
+        MAX(CASE WHEN same_company = 1 AND same_position = 1 AND enddate IS NOT NULL THEN 1 ELSE 0 END) AS same_pos_nonnull_end,
         SUM(total_compensation * frac_t) AS agg_compensation,
         COUNT(*) AS n_pos,
         COUNT(CASE WHEN start_before = 0 THEN 1 END) AS n_pos_startafter,
@@ -1429,17 +1507,10 @@ def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 =
         -- Fraction of active positions in year t with null enddate (still-active from imputation, not observed enddate)
         AVG(CASE WHEN enddate IS NULL THEN 1.0 ELSE 0.0 END) AS frac_null_enddate,
         -- Binary: at original firm ONLY due to null-enddate imputation (no new post-lottery position added at that firm)
-        MAX(CASE WHEN same_company = 1 AND enddate IS NULL AND pos_start_t < 1
+        MAX(CASE WHEN same_company = 1 AND enddate IS NULL AND pos_start_t < 0
                       AND has_new_pos_same_firm = 0
                  THEN 1 ELSE 0 END) AS null_enddate_stayer
-    FROM (
-        SELECT *,
-            COUNT(CASE WHEN start_before = 0 THEN 1 ELSE NULL END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_start_after,
-            -- has_new_pos_same_firm: 1 if any post-lottery position at the same FOIA firm exists in this year
-            MAX(CASE WHEN same_company = 1 AND pos_start_t >= 1 THEN 1 ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS has_new_pos_same_firm
-        FROM ({poslong})
-        ) 
-    WHERE t IS NOT NULL AND (start_before = 0 OR n_start_after = 0)
+    FROM {postfilt}
     GROUP BY foia_indiv_id, user_id, t"""
 
     return posgroup
@@ -1659,24 +1730,49 @@ def _tvars_pivot_query(pos_long_tab, educ_long_tab, t0 = -1, t1 = 2):
 
     Splits the expensive part of get_rel_year_inds_wide_by_t into a cheap
     final step so pos and educ can be materialized separately first.
+    Mirrors the logic in get_rel_year_inds_wide_by_t — keep in sync.
     """
     pos_cols = [
-        "no_positions", "in_us", "in_home_country", "loc_null",
-        "change_company", "change_position", "agg_compensation",
-        "still_at_firm", "promoted",
+        "no_positions",
+        "still_at_firm", "diff_firm", "new_diff_firm", "old_diff_firm",
+        "same_firm_new_position", "same_pos_null_end", "same_pos_nonnull_end",
+        "pos_in_us", "pos_in_home_country", "pos_non_us_non_home", "pos_loc_null",
+        "agg_compensation",
         "n_pos", "n_pos_startafter", "frac_t",
-        # Non-updating bias diagnostics:
-        "frac_null_enddate",   # fraction of active positions with null enddate (still-active from imputation)
-        "null_enddate_stayer", # at original firm only due to null-enddate imputation
+        "frac_null_enddate", "null_enddate_stayer",
     ]
     educ_cols = [
-        "no_educations", "educ_in_us", "educ_in_home_country", "masters", "doctors",
-        "new_educ_in_us", "new_educ_in_home_country", "new_masters", "new_doctors", "new_educ",
+        "no_educations", "new_educ", "continuing_educ",
+        "educ_in_us", "educ_in_home_country", "educ_non_us_non_home",
+        "new_educ_in_us", "new_educ_in_home_country", "new_masters", "new_doctors",
+        "masters", "doctors",
     ]
+    # All columns are snapshots at t.
     wide_exprs = []
     for t in range(t0, t1 + 1):
         for c in pos_cols + educ_cols:
             wide_exprs.append(f"MAX(CASE WHEN t = {t} THEN {c} END) AS \"{c}{t}\"")
+
+    combined_exprs = []
+    for t in range(t0, t1 + 1):
+        combined_exprs += [
+            f"""CASE WHEN COALESCE("pos_in_us{t}", 0) = 1 OR COALESCE("educ_in_us{t}", 0) = 1 THEN 1 ELSE 0 END AS "in_us{t}" """,
+            f"""CASE WHEN COALESCE("pos_in_us{t}", 0) = 0 AND COALESCE("educ_in_us{t}", 0) = 0
+                      AND (COALESCE("pos_in_home_country{t}", 0) = 1 OR COALESCE("educ_in_home_country{t}", 0) = 1)
+                 THEN 1 ELSE 0 END AS "in_home_country{t}" """,
+            f"""CASE WHEN COALESCE("pos_in_us{t}", 0) = 0 AND COALESCE("educ_in_us{t}", 0) = 0
+                      AND COALESCE("pos_in_home_country{t}", 0) = 0 AND COALESCE("educ_in_home_country{t}", 0) = 0
+                      AND (COALESCE("pos_non_us_non_home{t}", 0) = 1 OR COALESCE("educ_non_us_non_home{t}", 0) = 1)
+                 THEN 1 ELSE 0 END AS "non_us_non_home{t}" """,
+            f"""CASE WHEN COALESCE("pos_in_us{t}", 0) = 0 AND COALESCE("educ_in_us{t}", 0) = 0
+                      AND COALESCE("pos_in_home_country{t}", 0) = 0 AND COALESCE("educ_in_home_country{t}", 0) = 0
+                      AND COALESCE("pos_non_us_non_home{t}", 0) = 0 AND COALESCE("educ_non_us_non_home{t}", 0) = 0
+                 THEN 1 ELSE 0 END AS "loc_null{t}" """,
+            f"""CASE WHEN COALESCE("still_at_firm{t}", 0) = 0 AND COALESCE("diff_firm{t}", 0) = 0 THEN 1 ELSE 0 END AS "other{t}" """,
+        ]
+
+    wide_sql = ", ".join(wide_exprs)
+    combined_sql = ", ".join(combined_exprs)
 
     return f"""
     WITH joined AS (
@@ -1688,10 +1784,14 @@ def _tvars_pivot_query(pos_long_tab, educ_long_tab, t0 = -1, t1 = 2):
           ON p.foia_indiv_id = e.foia_indiv_id
          AND p.user_id = e.user_id
          AND p.t = e.t
+    ),
+    wide AS (
+        SELECT foia_indiv_id, user_id, {wide_sql}
+        FROM joined
+        GROUP BY foia_indiv_id, user_id
     )
-    SELECT foia_indiv_id, user_id, {", ".join(wide_exprs)}
-    FROM joined
-    GROUP BY foia_indiv_id, user_id
+    SELECT *, {combined_sql}
+    FROM wide
     """
 
 
