@@ -1,0 +1,1318 @@
+\documentclass[xcolor=dvipsnames, compress, 12pt, aspectratio=169, handout]{beamer}
+\usepackage{../preamble_slides}
+
+\title{Staying Power: The Individual Effects of the H-1B Visa Lottery}
+\author{Amy Kim \\ \small Princeton University, Department of Economics}
+\date{Midwest Economics Association: SOLE \\ March 22, 2026}
+
+\begin{document}
+\begin{frame}[plain]
+    \titlepage
+    \addtocounter{framenumber}{-1}
+\end{frame}
+
+\section{Introduction}
+\begin{frame}
+    \frametitle{Motivation}
+    \begin{itemize}
+        \item Large literature: effects of immigration on labor market \& firms (cites)
+        \begin{itemize}
+            \item Especially in current political climate, push to quantify tradeoff between benefits to productivity, innovation, and growth vs. costs to native workers
+        \end{itemize}
+        % very extensive, very old literature in labor economics on the effects of immigration on the labor market
+        \vspace{4mm}
+        \item \textbf{H-1B visas}: tied to employer-worker pair, allocated via lottery %common setting to study this question: h-1b visa lottery
+        \begin{itemize}
+            \item H-1B lottery applications in 2024 exceeded availability by 5.6x 
+        \end{itemize}
+        \vspace{4mm}
+        \item Existing literature: firm and local labor market effects %conflicting results -- why? also, when we see firm-level responses to h1b lottery, mechanism hard to understand -- very important from policy perspective; at worker level, understanding what happens to workers who lose the lottery (CF) also important . fundamentally, for policymaking we want to know how these visas are actively being used by firms, and what the counterfactual is. 
+        \begin{itemize}
+            \item Skipping crucial variation: what happens to individual workers?
+            \item Important for global efficiency + policy counterfactual 
+        \end{itemize}
+        \vspace{4mm}
+        \item \textcolor{maincolor}{\textbf{This Project:}} New application-level data + linkage strategy $\rightarrow$ first to estimate worker-level effects of winning H-1B lottery
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{This Paper}
+    \textbf{Research Question:} What are the effects of winning an H-1B visa on the worker?
+    \begin{enumerate}
+        \item Constructing analysis panel 
+        \begin{itemize}
+            \item Focus on specific subsample of H-1B lottery applicants: those already working at firm at time of application (pre-H-1B visa holders)
+            \item Probabilistic linkage strategy to construct worker-level panel data on xxx H-1B lottery applicants 
+        \end{itemize}
+        \vspace{3mm}
+        \item Individual-level analysis 
+        \begin{itemize}
+            \item Direct effects on employment and migration 
+            \begin{itemize}
+                \item \textbf{Preview:} Winners only slightly more likely to stay in U.S., at same firm 
+            \end{itemize}
+            \item Mechanisms for lottery losers
+            \begin{itemize}
+                \item \textbf{Preview:} Lottery losers more likely to enter education in U.S.; suggestive evidence that firms keep workers using different visas 
+            \end{itemize}
+        \end{itemize}
+        \item Firm-level analysis
+        \begin{itemize}
+            \item \textbf{Preview:} 
+        \end{itemize}
+    \end{enumerate}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Project Overview}
+    Empirical hurdles in estimating worker-level H-1B effects:
+    \vspace{2mm}
+    \begin{enumerate}
+        \item Lack of information on H-1B lottery losers or activity outside U.S. 
+        \begin{itemize}
+            \item \textbf{This Project:} New data on universe of H-1B applicants + LinkedIn profiles
+        \end{itemize}
+        \vspace{2mm}
+        \item No personal identifiers (name, ID number) in H-1B data 
+        \begin{itemize}
+            \item \textbf{This Project:} Probabilistic linking across many sparse fields (including firm) 
+        \end{itemize}
+        \vspace{2mm}
+        \item Don't observe workers' outcomes unless they win visa 
+        \begin{itemize}
+            \item Traditional view of H-1B: firm hires worker if they win visa, otherwise don't 
+            \vspace{2mm}
+            \item \textbf{Today:} In reality, majority of H-1B applicants are \textit{already working at firm} on a different temporary visa
+            \begin{itemize}
+                \item New view of H-1B: firm employs worker who stays if they win visa, otherwise leaves 
+            \end{itemize}
+            \vspace{2mm}
+            \item \textbf{This Project:} Link by subsetting to workers already at firm at time of application
+        \end{itemize}
+    \end{enumerate}
+    \vspace{2mm}
+    \textbf{End Product:} Individual-level panel data on 118k H-1B lottery applicants over four years
+\end{frame}
+
+% \begin{frame}
+%     \frametitle{My Project: Solving Empirical Hurdles}
+%     \begin{enumerate}
+%         \item Reframing `treatment' of H-1B visa lottery 
+%         \vspace{2mm}
+%         \begin{itemize}
+%             \item Current literature: firm-level effects of winning H-1B visa
+%             \vspace{2mm}
+%             \item Implicit assumption: H-1B applicant joins firm iff win visa (winning is treatment)
+%             \vspace{2mm}
+%             \item \textbf{Today:} $x-y$\% of H-1B applicants are \textit{already working at the firm} on a different temporary visa (losing is treatment)
+%         \end{itemize}
+%         \vspace{2mm}
+%         \item Solving an empirical roadblock: worker-level data on H-1B applicants 
+%         \vspace{2mm}
+%         \begin{itemize}
+%             \item Empirical hurdles in measuring individual-level effects:
+%             \begin{enumerate}
+%                 \item Lack of information on H-1B lottery losers
+%                 \item No personal identifiers in H-1B data
+%             \end{enumerate}
+%             \vspace{2mm}
+%             \item \textbf{In progress:} construction of worker-level panel data on $\sim$n H-1B lottery applicants
+%             \begin{enumerate}
+%                 \item New data on universe of H-1B applicants + universe of LinkedIn profiles
+%                 \item Novel linking strategy: probabilistic matching on workers who start \textit{prior to} H-1B app.
+%             \end{enumerate}
+%         \end{itemize}
+%     \end{enumerate}
+%     % \begin{itemize}
+%     %     \item Current literature: firm-level effects of winning H-1B visa
+%     %     \vspace{2mm}
+%     %     \item Implicit assumption: H-1B applicant joins firm iff win visa (winning is treatment)
+%     %     \begin{itemize}
+%     %         \item \textbf{Today:} Many H-1B applicants are \textit{already working at the firm} on a different temporary visa (losing is treatment)
+%     %     \end{itemize}
+%     %     \vspace{2mm}
+%     %     \item 
+        
+%     %     \vspace{3mm}
+%     %     \item \textbf{Today:} descriptive evidence informs novel linking strategy 
+%     %     \begin{itemize}
+%     %         \item Data on (1) universe of H-1B applicants + (2) universe of LinkedIn profiles 
+%     %         \item \textbf{Result:} x\% of H-1B visa applicants already in U.S. on other temporary visa 
+%     %         \item \textbf{Result:} y\% of winners are \textit{already working for the firm} when they apply for the visa
+%     %         \item \textbf{Linkage Strategy:} probabilistic matching on workers who start \textit{prior to} H-1B app.
+%     %     \end{itemize}
+%     %     \vspace{3mm}
+%     %     \item \textbf{End Goal:} Individual-level panel data on $\sim$n H-1B lottery applicants  
+%     % \end{itemize}
+% \end{frame}
+
+
+\begin{frame}
+    \frametitle{Research Questions}
+    When workers lose the H-1B visa...
+    \vspace{2mm}
+    \begin{itemize}
+        \item \textbf{Characterizing Losers:} where do they go?
+        \begin{itemize}
+            \item Return migration or other high-immigration destination?
+            \item Switch occupations? Firms? Heterogeneity in response by worker?
+        \end{itemize}
+        \vspace{3mm}
+        \item \textbf{Productivity/Entrepreneurship:} how does it affect their productivity?
+        \begin{itemize}
+            \item Limited employer mobility under H-1B\textemdash more entrepreneurship outside U.S.?
+            \item In the works: linking to GitHub data for direct measure of productivity 
+        \end{itemize}
+        \vspace{3mm}
+        \item \textbf{Worker Outcomes:} how does it affect their wages?
+        \begin{itemize}
+            \item Lottery loss is exogenous shock to employment
+            \item Decomposition into effect of leaving firm + effect of leaving U.S.
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+\begin{frame}
+    \frametitle{Literature Review: High-Skill Migration}
+    \begin{itemize}
+        \item High-skilled immigration and U.S. Labor Market  
+        \begin{itemize}
+            \item Firm-level effects of H-1B wins: crowd-out, patents, growth \textcolor{gray}{\footnotesize [Mahajan et al. 2025; Dimmock et al. 2022; Doran et al. 2022]}
+            \item High-skilled immigration policy and monopsony power \textcolor{gray}{\footnotesize [Gupta 2025; Kim and Pei 2024]}
+            \item \textbf{Contribution:} individual-level effects 
+        \end{itemize}
+        \vspace{4mm}
+        \item Global Effects of High-Skilled Migration
+        \begin{itemize}
+            \item Impact of H-1B program on offshoring \textcolor{gray}{\footnotesize [Glennon 2022]}, Indian IT industry \textcolor{gray}{\footnotesize [Khanna and Morales 2023]}, skilled immigration to Canada \textcolor{gray}{\footnotesize [Brinatti and Guo 2024]}
+            \item Brain drain and return migration \textcolor{gray}{\footnotesize [Amanzadeh et al. 2024; Adda et al. 2022]}
+            \item \textbf{Contribution:} Quantifying aggregate effects of H-1B visa cap globally
+        \end{itemize}
+    \end{itemize}
+\end{frame}
+
+% % \begin{frame}
+% %     \frametitle{Overview}
+% %     \begin{itemize}
+% %         \item H-1B skilled worker visa subject to much recent debate 
+% %         \vspace{3mm}
+% %         \item Missing from discussion: effects of visa on \textbf{H-1B workers themselves}
+% %         \vspace{3mm}
+% %         \item Two empirical hurdles:
+% %         \begin{enumerate}
+% %             \item Lack of control group (no info on H-1B lottery `losers')
+% %             \item Difficult to link visa data to outcomes (de-identified) 
+% %         \end{enumerate}
+% %         \vspace{3mm}
+% %         \item \textbf{My data:} detailed individual-level panel of H-1B lottery winners and losers
+% %         \begin{itemize}
+% %             \item Universe of H-1B lottery applications (1.8m obs)
+% %             \item Universe of LinkedIn profiles (1.7b obs)
+% %         \end{itemize}
+% %         \vspace{3mm}
+% %         \item \textbf{Research Question:} What are the effects of winning an H-1B visa on the worker?
+% %     \end{itemize}    
+% % \end{frame}
+% % % get around this by linking two datasets: (1) new data on universe of lottery applicants (adv better ID); (2) LinkedIn profile data (adv more outcomes + worker info i.e. promotions, outside of US, ed history, maybe productivity)
+% % % \item adv of the combination: linking individuals
+
+% % \begin{frame}
+% %     \frametitle{Today's Talk: Data and Descriptives}
+% %     \begin{enumerate}
+% %         \item Evidence from H-1B Application Data 
+% %         \begin{itemize}
+% %             \item Large share of applicants \textit{already in U.S. on different visa}
+% %         \end{itemize}
+% %         \vspace{3mm}
+% %         \item Linkage Strategy
+% %         \vspace{3mm}
+% %         \item Firm-level Initial Results
+% %         \begin{itemize}
+% %             \item Strong first stage 
+% %             \item Noisy null results on firm employment and hiring 
+% %         \end{itemize}
+% %     \end{enumerate}
+% % \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{additional to-dos}
+% %     \begin{itemize}
+% %         \item some descriptives from very small sample of successfully linked individuals 
+% %         \item firm-level outcome: share in treated cell (effect of winning an application on number of workers at the firm in same nationality x sex x yob cell)
+% %     \end{itemize}
+% % \end{frame}
+
+% % % \begin{frame}
+% % %     \frametitle{Overview V2}
+% % %     \begin{itemize}
+% % %         \item 
+% % %         \item My context: H-1B visas\textemdash topic of political debate; bipartisan support for reform
+% % %         \item \textbf{Broad research questions:} how do H-1B visas affect firms (today) and immigrant workers (future)?
+% % %         \item Two empirical hurdles:
+% % %         \begin{enumerate}
+% % %             \item Lack of adequate comparison group (visa `losers')
+% % %             \item Data following `losers' outside of U.S.
+% % %         \end{enumerate}
+% % %     \end{itemize}    
+% % % \end{frame}
+
+% % % \begin{frame}
+% % %     \frametitle{My Project}
+% % %     \begin{enumerate}
+% % %         \item Microdata linkage (in progress): 
+% % %         \begin{itemize}
+% % %             \item H-1B lottery applications (1.8m obs)
+% % %             \item LinkedIn profile data (1.7b obs)
+% % %         \end{itemize}
+% % %         \item 
+% % %     \end{enumerate}
+% % % \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{Literature Review: High-Skill Immigration}
+% %     \begin{itemize}
+% %         \item H-1B Visas 
+% %         \begin{itemize}
+% %             \item 
+% %         \end{itemize}
+% %         \item High-Skilled Immigration and Labor Markets
+% %         \item Immigration/Return Migration and Origin Countries 
+% %         \begin{itemize}
+% %             \item Khanna and Morales 2023 
+% %             \item Amanzadeh Kermani and McQuade 2024
+% %             \item Adda, Dustmann, Gorlach 2022
+% %         \end{itemize}
+% %     \end{itemize}
+% % \end{frame}
+
+% %%% TABLE OF CONTENTS
+% \begin{frame}[plain]{Outline}
+%     \tableofcontents
+%     \addtocounter{framenumber}{-1}
+% \end{frame}
+
+% %%% TABLE OF CONTENTS -- CURRENT SECTION
+% \AtBeginSection[ ]
+% {
+% \begin{frame}[plain]{Outline}
+%     \tableofcontents[currentsection, hideothersubsections]
+%     \addtocounter{framenumber}{-1}
+% \end{frame}
+% }
+
+% %%% TABLE OF CONTENTS -- CURRENT SECTION
+% \AtBeginSubsection[ ]
+% {
+% \begin{frame}[plain]{Outline}
+%     \tableofcontents[currentsubsection]
+%     \addtocounter{framenumber}{-1}
+% \end{frame}
+% }
+
+% \section{Background and Context}
+% \begin{frame}\label{h1b_visa_allocation}
+%     \frametitle{What is an H-1B Visa?}
+%     \begin{itemize}
+%         % \item Stated Purpose: ``to help employers who \textbf{cannot otherwise obtain needed business skills and abilities from the U.S. workforce}...''
+%         % \vspace{3mm}
+%         \item Temporary work visa (six years) for workers in `specialty occupations'
+%         \begin{itemize}
+%             \item ``...requires the application of a body of \textbf{highly specialized knowledge} and the attainment of at least a bachelor’s degree...''
+%             \item Employment-based visa: employer must apply on worker's behalf 
+%             \item Does not lead directly to permanent residency but employer can sponsor green card
+%             \item Portable between employers but (1) no self-sponsorship and (2) cannot transfer green card application
+%         \end{itemize}
+%         \vspace{2mm}
+%         \item Capped at 85,000 visas annually since 2004
+%             \begin{itemize}
+%                 \item 20k for `advanced degree exempt' (ADE) with M.A.+ from U.S. school
+%                 \item Demand has exceeded cap every year since 2004 \hyperlink{h1b_apps_by_year}{\beamergotobutton{Applications by Year}} 
+%                 % \item 20k for `advanced degree exempt' (ADE) with M.A.+ from U.S. school
+%                 % \item Non-profits and schools exempt from cap
+%             \end{itemize}
+%         \vspace{2mm}
+%         \item Since 2013 (and in 2007 and 2008) USCIS allocates visas using a \textbf{lottery} \hyperlink{timeline}{\beamergotobutton{Timeline}} 
+%             \begin{itemize}
+%                 \item Other years: cut off applications on day that cap is reached
+%             \end{itemize}
+%     \end{itemize}
+% \end{frame}
+% % ``A specialty occupation is one that requires the application of a body of \textbf{highly specialized knowledge} and the attainment of at least a bachelor’s degree or its equivalent. The intent of the H-1B provisions is to help employers who \textbf{cannot otherwise obtain needed business skills and abilities from the U.S. workforce...}''
+
+% \begin{frame}
+%     \frametitle{How can employers hire workers without an H-1B visa?}
+%     \textbf{Primary Method:} F-1 Optional Practical Training (OPT)
+%     \begin{itemize}
+%         \item F-1: student visa (tied to enrollment)
+%         \item OPT: twelve months of authorized employment after graduation 
+%         \item OPT STEM Extension: STEM graduates can extend OPT to total of 36 months 
+%         \item \textbf{Common Strategy:} Begin work immediately after graduation under OPT, apply for H-1B every year until OPT runs out (three chances)
+%     \end{itemize}
+%     \vspace{4mm}
+%     Other Methods 
+%     \begin{itemize}
+%         \item L visa (intercompany transfer): requires 2+ years at company location abroad
+%         \item TN visa: Canadian and Mexican `professionals'
+%         \item Direct to Green Card via OPT: Risky due to variable processing times
+%     \end{itemize}
+% \end{frame}
+
+
+
+% \section{Data and Linking Strategy}
+% \begin{frame}
+%     \frametitle{Overview of Data}
+%     \begin{itemize}
+%         \item \textbf{H-1B Data:} universe of H-1B lottery applications from 2020-2023 (FOIA request)
+%         \begin{itemize}
+%             \item All applicants: country of birth, year of birth, sex, detailed employer information
+%             \vspace{2mm}
+%             \item H-1B winners only: current visa, detailed job information (title, salary, location), highest education level and field of study, \textbf{ADE status}
+%             \vspace{2mm}
+%             \item Other H-1B Data [2007-]: microdata on lottery winners from H-1B petitions
+%         \end{itemize} 
+%         \vspace{4mm}
+%         \item \textbf{LinkedIn Data:} snapshot of universe of LinkedIn profiles from Revelio Labs
+%         \begin{itemize}
+%             \item Individuals (n = 894m): full name, education \& work history, date profile updated
+%             \vspace{2mm}
+%             \item Positions (n = 1.7b): company, start \& end date, title, location, imputed salary
+%         \end{itemize}
+%         \vspace{4mm}
+%         \item \textbf{GitHub Data} (in the future)
+%         \begin{itemize}
+%             \item Individual-level code output on \textit{public} repositories
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}\label{h1b_apps_summ}
+%     \frametitle{Who are H-1B Lottery Applicants?}
+%     \begin{itemize}
+%         \item Total of 1.8m applications over four years \hyperlink{sankey}{\beamergotobutton{Retention over Lottery Process}}
+%         \vspace{1mm}
+%         \item Origin country diversity 
+%             \begin{itemize}
+%                 \item Mostly from India (77\%) and China (8\%) but rest from 200+ countries \hyperlink{h1b_apps_cob}{\beamergotobutton{Other Countries}}
+%             \end{itemize}
+%         \vspace{1mm}
+%         \item 31\% of applicants women; median applicant 31 years old
+%     \end{itemize}
+%     \vspace{2mm}
+%     More information on \textbf{Lottery Winners}:
+%     \vspace{1mm}
+%     \begin{itemize}
+%         \item Recall: M.A.+ degree holders will be overrepresented among winners \hyperlink{win_stats}{\beamergotobutton{Winners vs. Losers}}
+%         \vspace{1mm}
+%         \item Of 79\% of winners who report current visa status, 65\% on F-1 + 10\% on different worker visa (only 19\% on no visa)
+%         \vspace{1mm}
+%         \item 70\% in computer-related occupations
+%         \vspace{1mm}
+%         \item \textbf{Takeaway:} Large share already in U.S. on F-1 + in STEM (3y OPT-eligible) 
+%     \end{itemize}    
+% \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{Summary Stats (todo: make prettier, spread out over slides, add figures)}
+% %     Characteristics of All Applicants (n = 1.8m)
+% %     \begin{itemize}
+% %         \item 77\% from India, 8\% from China
+% %         \item 31\% women
+% %         \item Average age of applicant 32 (median 31)
+% %     \end{itemize}
+% %     Characteristics of I-129 Submitters (n = 377k)
+% %     \begin{itemize}
+% %         \item 79\% of applications report current visa status
+% %         \begin{itemize}
+% %             \item 65\% are on F1 visa 
+% %             \item 19\% no visa 
+% %             \item $\sim 10$\% are on another worker visa (L, TN)
+% %             \item Remainder on spousal visas, temporary visas, etc.
+% %         \end{itemize}
+% %         \item 76\% applying regularly, 24\% with ADE 
+% %         \item 70\% computer/EE related occupations
+% %         \item \textbf{Takeaways:} many of applicants already in U.S. before H-1B application (many likely working at firm already on OPT)
+% %     \end{itemize}
+% % \end{frame}
+
+% \begin{frame}\label{linking}
+%     \frametitle{Linking Strategy: Overview}
+%     \textbf{Idea:} link subset of applicants already working at firm before H-1B application 
+%     \vspace{3mm}
+%     \begin{enumerate}
+%         \item Link Firms from H-1B to LinkedIn
+%         \begin{itemize}
+%             \item $\sim$60\% of firms currently linked on name, location, industry 
+%             \item Expect to link 80\% with more advanced linking
+%         \end{itemize}
+%         \vspace{3mm}
+%         \item Use firm linkages to determine potential matches in LinkedIn data
+%         \begin{itemize}
+%             \item Pool of potential matches for applicant $i$ from firm $j$: everyone working at $j$ \textit{prior to} H-1B lottery application (as reported on LinkedIn)
+%         \end{itemize}
+%         \vspace{3mm}
+%         \item Use probabilistic matching techniques to identify likely matches 
+%         \begin{itemize}
+%             \item Matching will be based on sex, year of birth, and country of birth
+%         \end{itemize}
+%     \end{enumerate}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{Linking Strategy: Imputing Information from LinkedIn}
+%     How do we determine sex, year of birth, country of birth from LinkedIn? 
+%     \vspace{2mm}
+%     \begin{itemize}
+%         \item \textbf{Sex:} impute gender from name
+%         \begin{itemize}
+%             \item Preloaded imputation appears to do poorly for East and South Asian names (can try different models based on country of birth)
+%         \end{itemize}
+%         \vspace{2mm}
+%         \item \textbf{Country of Birth:} two-pronged approach 
+%         \begin{itemize}
+%             \item Name: use `name2nat' package (ML model built by linguist, trained on Wikipedia)
+%             \item Education History: use location of earliest institution (15-20\% report high school)
+%         \end{itemize}
+%         \vspace{2mm}
+%         \item \textbf{Year of Birth:} impute from year ending high school or starting Bachelor's
+%     \end{itemize}
+% \end{frame}
+
+% % \begin{frame}{Linking Strategy}
+% %     \centering
+% %     \scalebox{0.5}{
+% %     \begin{tikzpicture}[
+% %       node distance=1.5cm and 2.5cm,
+% %       box/.style={rectangle, draw, rounded corners, minimum width=3.5cm, minimum height=1.2cm, align=center},
+% %       field/.style={rectangle, draw, minimum width=3cm, minimum height=1cm, fill=gray!10},
+% %       arrow/.style={-Latex, thick},
+% %       text width=4cm
+% %     ]
+    
+% %     % Dataset 1
+% %     \node[box] (cob1) {Educational History};
+% %     \node[box, below=of cob1] (yob1) {Name};
+% %     \node[box, below=of yob1] (sex1) {Sex\\\tiny (from name)};
+% %     \node[box, below=of sex1] (firm1) {Firm};
+    
+% %     % Linking Fields
+% %     \node[field, right=of cob1] (cob) {Country of Birth};
+% %     \node[field, below=of cob] (yob) {Year of Birth};
+% %     \node[field, below=of yob] (sex) {Sex};
+% %     \node[field, below=of sex] (firm) {Firm};
+    
+% %     % Dataset 2
+% %     \node[box, right=of cob] (cob2) {Country of Birth};
+% %     \node[box, below=of cob2] (yob2) {Year of Birth};
+% %     \node[box, below=of yob2] (sex2) {Sex};
+% %     \node[box, below=of sex2] (firm2) {Firm};
+    
+% %     % Arrows from Dataset 1 to linking fields
+% %     \draw[arrow] (cob1.east) -- (cob.west);
+% %     \draw[arrow] (yob1.east) -- (yob.west);
+% %     \draw[arrow] (sex1.east) -- (sex.west);
+% %     \draw[arrow] (firm1.east) -- (firm.west);
+    
+% %     % Arrows from linking fields to Dataset 2
+% %     \draw[arrow] (cob.east) -- (cob2.west);
+% %     \draw[arrow] (yob.east) -- (yob2.west);
+% %     \draw[arrow] (sex.east) -- (sex2.west);
+% %     \draw[arrow] (firm.east) -- (firm2.west);
+% %     % Group boxes
+% % \node[draw, thick, dashed, fit=(cob1) (firm1), inner sep=0.5cm, label=above:{\textbf{LinkedIn Data}}] {};
+% % \node[draw, thick, dashed, fit=(cob2) (firm2), inner sep=0.5cm, label=above:{\textbf{H-1B Applications}}] {};
+
+% %     \end{tikzpicture}}
+% %     \end{frame}
+    
+
+
+% \begin{frame}\label{firm_sample}
+%     \frametitle{Sample Construction: H-1B Applicants}
+%     Due to difficulty linking, main sample of H-1B applicants will drop:
+%     \vspace{2mm}
+%     \begin{enumerate}
+%         \item \textbf{Applicants from Large H-1B Employers:} Drop applicants from firms who submit 50+ lottery applications (66\%)
+%         \begin{itemize}
+%             \item Distribution of lottery applications: long right tail \hyperlink{app_hist_binned}{\beamergotobutton{Histogram}} 
+%             \item Top 20 employers submit 20\% of applications 
+%             \item Hard to match individuals
+%         \end{itemize}
+%         \vspace{2mm}
+%         \item \textbf{Applicants from Supsected Outsourcing/Staffing Companies:} Drop applicants from firms with over 50\% of applications marked as duplicates (41\%)
+%         \begin{itemize}
+%             \item Outsourcing companies: treat workers as interchangeable \& `overapply' for H-1Bs
+%             \item Staffing companies: use shell corps to submit multiple applications per worker
+%             \item Inaccurate picture of skilled immigrant workers at U.S. firms; harder to match
+%         \end{itemize}
+%     \end{enumerate}
+%     \vspace{2mm}
+%     \textbf{Main Sample:} 430k lottery applicants (over 138k employer x years)
+% \end{frame}
+
+% \section{Empirical Evidence on Pre-H-1B Visa Holders}
+% \begin{frame}
+%     \frametitle{How many workers will we be able to link?}
+%     Initial sample: 430k lottery applicants
+%     \vspace{3mm}
+%     \begin{enumerate}
+%         \item Subset to those already working for H-1B company before lottery (pre-H-1B visa workers)
+%         \begin{itemize}
+%             \item \textbf{Question:} What share of our sample of lottery applicants are already working for their H-1B company prior to the H-1B lottery?
+%         \end{itemize}
+%         \vspace{3mm}
+%         \item Match rate via probabilistic matching
+%         \begin{itemize}
+%             \item \textbf{Question:} What share of pre-H-1B visa workers can we match to LinkedIn?
+%         \end{itemize} 
+%     \end{enumerate}    
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{Upper bound on pre-H-1B visa holders: 84\%}
+%     Initial sample: 430k lottery applicants
+%     \vspace{3mm}
+%     \begin{enumerate}
+%         \item Subset to those already in U.S. on other visa (pre-H-1B visa holders)
+%         \begin{itemize}
+%             \item Among main sample, \textcolor{maincolor}{\textbf{84\%}} of winners with non-missing visa info (66\% of all winners) are on work-eligible visa
+%             \item \textbf{Upper bound} on true number (since U.S. students overrep among winners)
+%         \end{itemize}
+%         \vspace{3mm}
+%         \item Among pre-H-1B visa holders, subset to those working for H-1B company before lottery (pre-H-1B visa workers)
+%         \begin{itemize}
+%             \item \textbf{Question:} What share of H-1B applicants on different visa work for company before lottery result?
+%         \end{itemize}
+%         \vspace{3mm}
+%         \item Match rate via probabilistic matching
+%         \begin{itemize}
+%             \item \textbf{Question:} What share of pre-H-1B visa workers can we match to LinkedIn?
+%         \end{itemize} 
+%     \end{enumerate} 
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{First: an easier linking task}
+%     \begin{itemize}
+%         \item For a subset of ADE \textbf{winners} I have the name of their last educational institution (49k individuals)
+%         \vspace{3mm}
+%         \item Note: we know all these individuals \textit{do} work at the firm since they won the H-1B visa (we skip over point (2) for now)
+%         \vspace{3mm}
+%         \item I use a \textit{deterministic linking process} to match these winners on firm, imputed place of birth, imputed year of birth, imputed gender, location, and \textbf{educational institution} (17k matched; 35\%)
+%         \vspace{3mm}
+%         \item \textbf{Estimate} of match rate via probabilistic matching
+%         \begin{itemize}
+%             \item Making matching easier by using educational institution
+%             \item But will also be able to match better with probabilistic matching
+%         \end{itemize}
+%         \vspace{3mm}
+%     \end{itemize}
+% \end{frame}
+
+
+% \begin{frame}
+%     \frametitle{Estimate of Probabilistic Match Rate: 35\%}
+%     Initial sample: 430k lottery applicants
+%     \vspace{3mm}
+%     \begin{enumerate}
+%         \item Subset to those already in U.S. on other visa (pre-H-1B visa holders)
+%         \begin{itemize}
+%             \item Among main sample, \textcolor{maincolor}{\textbf{84\%}} of winners with non-missing visa info (66\% of all winners) are on work-eligible visa
+%             \item \textbf{Upper bound} on true number (since U.S. students overrep among winners)
+%         \end{itemize}
+%         \vspace{3mm}
+%         \item Subset to those working for H-1B company before lottery (pre-H-1B visa workers)
+%         \begin{itemize}
+%             \item \textbf{Question:} What share of H-1B applicants on different visa work for company before lottery result?
+%         \end{itemize}
+%         \vspace{3mm}
+%         \item Match rate via probabilistic matching
+%         \begin{itemize}
+%             \item Using crude matching with more fields, \textcolor{maincolor}{\textbf{35\%}} of sample matched 
+%         \end{itemize} 
+%     \end{enumerate} 
+% \end{frame}
+
+
+% \begin{frame}
+%     \frametitle{Do Firms Employ F-1 Visa Holders before H-1B?}
+%     \begin{itemize}
+%     \item Further subset matched sample: unique match on job title or field of study (2.3k `certain' matches) + on F-1 visa (92\%)
+%     \end{itemize}
+%     \centering 
+%     \includegraphics[width=0.7\textwidth]{\outputpath/smallsamp_startdiff_hist.png}
+% \end{frame}
+
+
+% \begin{frame}
+%     \frametitle{94\% of F-1 winners started at firm before H-1B lottery}
+%     Initial sample: 430k lottery applicants
+%     \vspace{3mm}
+%     \begin{enumerate}
+%         \item Subset to those already in U.S. on other visa (pre-H-1B visa holders)
+%         \begin{itemize}
+%             \item Among main sample, \textcolor{maincolor}{\textbf{84\%}} of winners with non-missing visa info (66\% of all winners) are on work-eligible visa
+%             \item \textbf{Upper bound} on true number (since U.S. students overrep among winners)
+%         \end{itemize}
+%         \vspace{3mm}
+%         \item Subset to those working for H-1B company before lottery (pre-H-1B visa workers)
+%         \begin{itemize}
+%             \item Using a sample of pre-H-1B visa holders `certainly' matched to LinkedIn, I find \textcolor{maincolor}{\textbf{94\%}} worked at firm prior to H-1B lottery results 
+%         \end{itemize}
+%         \vspace{3mm}
+%         \item Match rate via probabilistic matching
+%         \begin{itemize}
+%             \item Using crude matching with more fields, \textcolor{maincolor}{\textbf{35\%}} of sample matched 
+%         \end{itemize} 
+%     \end{enumerate} 
+%     \vspace{2mm}
+%     Upper bound on \textbf{full linked sample}: 118k lottery applicants 
+% \end{frame}
+
+% \section{Conclusion and Next Steps}
+% \begin{frame}
+%     \frametitle{Summary}
+%     \begin{itemize}
+%         \item Novel data on universe of H-1B applicants + universe of LinkedIn profiles 
+%         \vspace{3mm}
+%         \item Insight from data: most H-1B lottery applicants are already working at firm at the time of H-1B lottery application 
+%         \vspace{3mm}
+%         \item Informs new linking strategy: focus on these `pre-H-1B workers' + advanced linking techniques to construct panel of 100k+ lottery winners and losers 
+%     \end{itemize}
+%     \vspace{2mm}
+%     \textbf{Next Steps:}
+%     \begin{itemize}
+%         \item Lots and lots of linkage! 
+%         \vspace{1mm}
+%         \item Descriptive results on where H-1B lottery losers go
+%         \vspace{1mm}
+%         \item GitHub data linkage + more!
+%     \end{itemize}
+% \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{First Pass at Some Results}
+% %     Subset to firms that only submit one application in a given lottery year to simplify visualization:
+% %     \begin{itemize}
+% %         \item Unbalanced sample of firms from preferred sample that are matched
+% %         \item Subset to firms that submitted one application in 2022 (n = 13,758)
+% %         \item Plot mean number of new hires and total employment in LinkedIn data
+% %     \end{itemize}
+% % \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{New Hires by Lottery Win by Quarter}
+% %     \centering
+% %     \includegraphics[width=0.6\textwidth]{\outputpath/new_hires_by_win_ly2023.png}
+% % \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{Total Employment by Lottery Win by Quarter}
+% %     \centering
+% %     \includegraphics[width=0.6\textwidth]{\outputpath/n_emp_bywin_ly2023.png}
+% % \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{Merging Balance: Excess Wins by Merge}
+% %     \centering
+% %     \includegraphics[width=0.6\textwidth]{\outputpath/excess_wins_hist_bymatch.png}
+
+% %     Matched Mean is -0.07, Unmatched Mean is $-0.02^{***}$
+% % \end{frame}
+
+% % % \begin{frame}
+% % %     \frametitle{Company Sample Selection}
+% % %     \begin{itemize}
+% % %         \item Very long right tail
+% % %         \begin{itemize}
+% % %             \item Top 20 employers submit 20\% of applications
+% % %         \end{itemize}
+% % %         \item Well-documented issue with outsourcing/IT staffing companies flooding H-1B lottery 
+% % %         \item Want a sample of small companies most likely to see effect of H-1B win on workers and not dependent on H-1Bs
+% % %         \item \textbf{Preferred Sample:} Non-staffing companies with fewer than 50 H-1B lottery applications [138k emp x lottery years (80\% of total employers; 24\% of total applications)]
+% % %         \begin{itemize}
+% % %             \item Staffing companies IDed as those with at least 50\% of applications marked as duplicate entries (can probably do better)
+% % %             \item $<4$\% of employers submit 50 or more applications 
+% % %             \item Preferred sample [PS] has much higher win rate (36\% vs. 30\% for out of sample [OOS]), likely from higher share of ADE applicants
+% % %             \item Applicants from OOS firms overwhelmingly from India (85\% vs. 51\% in PS) 
+% % %         \end{itemize}
+% % %     \end{itemize}
+% % % \end{frame}
+
+% % \begin{frame}\label{win_stats}
+% %     \frametitle{H-1B Lottery Winners and Losers (Preferred Sample)}
+% %     \begin{table}
+% %     \centering 
+% %         \begin{tabular}{lcc}
+% %             \hline
+% %             & Lottery Winners & Lottery Losers \\ 
+% %             \hline
+% %             \% Born in India & 52.0\% & 49.8\%\\ 
+% %             \% Born in China & 18.4\% & 14.0\% \\
+% %             \% Female & 37.4\% & 34.9\% \\
+% %             Avg Age at Application & 30.6 & 31.8 \\
+% %             \hline
+% %             N & 156,560 & 273,052 \\
+% %             \hline 
+% %         \end{tabular}        
+% %     \end{table}
+% %     \begin{itemize}
+% %         \item All differences significant at 99\% level 
+% %         \item Likely represent differences in winning probability between normal applicants and ADE applicants\textemdash this is most concerning empirical issue currently
+% %     \end{itemize}
+% %     \centering 
+% %     \hyperlink{app_age_hist_bywin}{\beamergotobutton{Age Distribution}}
+% % \end{frame}
+
+% % \begin{frame}\label{excess_wins_hist}
+% %     \frametitle{Dist. of Excess Wins (Firm $j$ x Year $t$ Counts FY2021-2024)}
+% %     \centering
+% %     \includegraphics[width=0.55\textwidth]{\outputpath/excess_wins_hist.png}
+
+    
+% %     $\text{Excess Wins}_{jt} = \text{Lottery Apps}_{jt}\times \text{Total Win Rate}_t - \text{Actual Wins}_{jt}$ 
+    
+% %     \hyperlink{win_rate_hist}{\beamergotobutton{Distribution of Win Rates}}
+% % \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{Complier Characteristics}
+% %     Much more information on those who submit I-129s (win lottery and subsequently apply for visa):
+% %     \begin{itemize}
+% %         \item 42.4\% new admit, 57.4\% change status 
+% %         \begin{itemize}
+% %             \item Lots of missings in current visa field, but of those who report vast majority on F1 (65\%), otherwise L (multinational corp), H4 (spouse of H1B) TN (Canada and Mexico)
+% %         \end{itemize}
+% %         \item 76\% applying regularly, 24\% applying with ADE 
+% %         \begin{itemize}
+% %             \item Approx. 100\% of ADE applicants have more than a bachelor's degree 
+% %             \item Even of regular applicants, 45\% have a master's or doctorate 
+% %         \end{itemize}
+% %         \item 70\% computer/EE related occupations
+% %         \item 47\% at firms with NAICS code 5415 (Computer Systems Design and Related Services)
+% %     \end{itemize}
+% % \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{Dist. of Compensation Paid}
+% %     \centering
+% %     \includegraphics[width=0.65\textwidth]{\outputpath/hist_wage.png}
+% % \end{frame}
+
+
+% % \subsection{Merging with LinkedIn Data}
+
+
+% \appendix 
+
+% % H1B APPS BY YEAR
+% \begin{frame}\label{h1b_apps_by_year}
+%     \frametitle{H-1B Lottery Applications By Year \hyperlink{h1b_visa_allocation}{\beamerreturnbutton{Back}}}
+%     \centering 
+%     \begin{figure}
+%         \includegraphics[width=0.8\textwidth]{\outputpath/slides_17apr25/h1b_apps_by_year.png}
+%     \end{figure}
+% \end{frame}
+
+% % H1B TIMELINE
+% \begin{frame}\label{timeline}
+%     \frametitle{H-1B Lottery Timeline \hyperlink{h1b_visa_allocation}{\beamerreturnbutton{Back}}}
+%     \begin{tikzpicture}[very thick, black, xscale=1.5]
+%     \centering
+%         % Define coordinates
+%         \coordinate (start) at (-0.2,0);
+%         \coordinate (mar) at (0,0);
+%         \coordinate (apr) at (1,0);
+%         \coordinate (oct) at (7,0);
+%         \coordinate (end) at (9.2,0);
+
+%         %% APPLICATION PERIOD
+%         % shaded box
+%         \draw[rounded corners, fill=litecolor!60, color = litecolor!60] ($(mar)+(0.05,-0.2)$) rectangle ++(0.6,0.4);
+
+%         % fill with lines
+%         \fill[rounded corners, pattern = north east lines, pattern color = litecolor, very thick] ($(mar)+(0.05,-0.2)$) rectangle ++(0.6,0.4);
+
+%         % label
+%         \draw (0.2,0.4) node {\footnotesize \textcolor{litecolor}{\textbf{App. Period}}};
+        
+%         % %% FILING PERIOD
+%         % shaded box
+%         \draw[rounded corners, fill=maincolor!60, color = maincolor!60] ($(apr)+(0,-0.2)$) rectangle ++(3,0.4);
+
+%         % fill with lines
+%         \fill[rounded corners, pattern = north east lines, pattern color = maincolor, very thick] ($(apr)+(0,-0.2)$) rectangle ++(3,0.4);
+
+%         % label
+%         \draw (2.5,0.4) node {\footnotesize \textcolor{maincolor}{\textbf{Filing Period}}};
+
+%         %% VALID VISA
+%         % shaded box
+%         \draw[rounded corners, fill=darkcolor!60, color = darkcolor!60] ($(oct)+(0,-0.2)$) rectangle ++(2.2,0.4);
+
+%         % fill with lines
+%         \fill[rounded corners, pattern = north east lines, pattern color = darkcolor, very thick] ($(oct)+(0,-0.2)$) rectangle ++(2.2,0.4);
+
+%         % label
+%         \draw (8.1,0.4) node {\footnotesize \textcolor{darkcolor}{\textbf{Valid H-1B Visa}}};
+
+%         %% ticks
+%         \foreach \x in {0,1,...,9}
+%         \draw(\x cm,3pt) -- (\x cm,-3pt);
+
+
+%         %% Labels
+%         \foreach \i \j in {0/Mar,1/Apr,2/May,3/Jun,4/Jul,5/Aug,6/Sep,7/Oct,8/Nov,9/Dec}{
+%         \draw (\i,0) node[below=3pt] {\footnotesize \j} ;
+%         }
+
+%         % Timeline base
+%         \draw[<->] (start) -- (end);
+    
+    
+%         %% LOTTERY RESULTS
+%         \draw[<-,very thick,color=maincolor] (apr) -- ($(apr)+(0,1)$) node [above=0pt,align=center,black] {\textcolor{maincolor}{\textbf{Lottery Results}}};
+
+%         %% start date
+%         \draw[<-,very thick,color=darkcolor] (oct) -- ($(oct)+(0,1)$) node [above=0pt,align=center,black] {\textcolor{darkcolor}{\textbf{Earliest Start Date}}};
+
+%     \end{tikzpicture}
+
+%     \begin{enumerate}
+%         \item \textcolor{litecolor}{\textbf{Application Period:}} Firm + worker apply for H-1B lottery in \textbf{March} 
+%         \vspace{2mm}
+%         \item \textcolor{maincolor}{\textbf{Lottery Results:}} Lottery winners notified in April and have 90 days to file a petition for an H-1B visa (`claim lottery ticket')
+%         \vspace{2mm}
+%         \item \textcolor{darkcolor}{\textbf{Valid H-1B Visa:}} Petition processed by USCIS, if approved (97\% approved) then H-1B visa valid \textbf{October} at the earliest
+%     \end{enumerate}
+%     \vspace{3mm}
+%     \textbf{Takeaway:} Job offer must occur $>6$ months before H-1B visa valid
+
+% % (TODO: Add button for `Changes in H-1B Lottery Process')
+% \end{frame}
+
+% \begin{frame}\label{h1b_apps_cob}
+%     \frametitle{Non-India/China H-1B Applicants by Top Countries of Birth \hyperlink{h1b_apps_summ}{\beamerreturnbutton{Back}}}
+%     \begin{table}[ht]
+%         \centering
+%         \resizebox{0.32\textwidth}{!}{%
+%         \begin{tabular}{l r}
+%         \textbf{Country of Birth} & \textbf{Share (\%)} \\
+%         \hline
+%         Canada & 6.07 \\
+%         Mexico & 5.63 \\
+%         Philippines & 5.55 \\
+%         South Korea & 5.53 \\
+%         Pakistan & 5.31 \\
+%         Taiwan & 4.73 \\
+%         Nepal & 4.73 \\
+%         Brazil & 3.99 \\
+%         United Kingdom & 2.98 \\
+%         Nigeria & 2.87 \\
+%         Vietnam & 2.18 \\
+%         Russia & 2.16 \\
+%         \hline
+%         200+ countries & 267, 596 applicants
+%         \end{tabular}%
+%         }
+%         \end{table}
+% \end{frame}
+    
+% \begin{frame}\label{sankey}
+%     \frametitle{Sample Sizes: H-1B Data 2020-2023 \hyperlink{firm_sample}{\beamerreturnbutton{Back}}}
+%     \centering
+%     \includegraphics[width=0.7\textwidth]{\outputpath/sankey_allbb.png}
+% \end{frame}
+
+% \begin{frame}\label{app_hist_binned}
+%     \frametitle{Lottery App Dist. (Firm x Year Counts FY2021-2024) \hyperlink{firm_sample}{\beamerreturnbutton{Back}}}
+%     \centering
+%     \includegraphics[width=0.6\textwidth]{\outputpath/app_hist_binned.png}
+
+%     \hyperlink{app_hist_raw}{\beamergotobutton{Raw Histogram}}
+% \end{frame}
+
+
+% \begin{frame}\label{win_stats}
+%     \frametitle{H-1B Lottery Winners and Losers (Main Sample) \hyperlink{h1b_apps_summ}{\beamerreturnbutton{Back}}}
+%     \begin{table}
+%     \centering 
+%         \begin{tabular}{lcc}
+%             \hline
+%             & Lottery Winners & Lottery Losers \\ 
+%             \hline
+%             \% Born in India & 52.0\% & 49.8\%\\ 
+%             \% Born in China & 18.4\% & 14.0\% \\
+%             \% Female & 37.4\% & 34.9\% \\
+%             Avg Age at Application & 30.6 & 31.8 \\
+%             \hline
+%             N & 156,560 & 273,052 \\
+%             \hline 
+%         \end{tabular}        
+%     \end{table}
+%     \begin{itemize}
+%         \item All differences significant at 99\% level 
+%         \item Likely represent differences in winning probability between normal applicants and ADE applicants\textemdash this is most concerning empirical issue currently
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}\label{apps_by_merge}
+%     \frametitle{Merging Balance: Applications by Merge \hyperlink{linking}{\beamerreturnbutton{Back}}}
+%     \centering 
+%     \includegraphics[width=0.6\textwidth]{\outputpath/app_hist_bymatch.png}
+
+%     Matched Mean is 3.3, Unmatched Mean is $2.7^{***}$
+% \end{frame}
+
+
+% \begin{frame}
+%     \frametitle{Ideal Empirical Strategy}
+%     For lottery applicant $i$ at firm $j$ in lottery year $s$, model outcome $y$ in year $t$ as:
+%     $$y_{ijst} = \beta_0 + \beta_1^{reg} Win_{ijs} \cdot (1-ADE_i) + \beta_1^{ade} Win_{ijs}\cdot ADE_i + \varepsilon_{ijst}$$
+%     where $Win_{ijs}$ is an indicator for winning the lottery in year $s$ and $ADE_i$ is an indicator for ADE status
+%     \begin{itemize}
+%         \item Impute $ADE_i$ from LinkedIn data 
+%         \item Identification assumption satisfied by lottery structure: $E[\varepsilon_{ijst}|Win, ADE] = 0$
+%         \begin{itemize}
+%             \item As long as selection into linkage not dependent on win status or ADE status, internal validity satisfied 
+%             \item External validity more of an issue, will depend on what linkage looks like 
+%         \end{itemize}
+%         \item First stage: effect of lottery win on H-1B visa takeup (need to submit petition)
+%         \item Other outcomes: probability of staying at firm after $n$ years, probability of leaving U.S., imputed wage, etc. 
+%     \end{itemize}
+% \end{frame}
+
+
+% \begin{frame}\label{h1bfiling}
+%     \frametitle{H-1B Filing Process: Details}
+%         \begin{itemize}
+%             \item To hire H-1B worker, firm first required to file Labor Condition Application (LCA) with DOL attesting that the job will not replace/harm incumbent workers
+%             \begin{itemize}
+%                 \item Not tied to a specific employee, must be filed no more than six months before start date
+%                 \item Includes information about job type (occupation code), start and end dates, work location, and salary
+%             \end{itemize}
+%             \item Prior to FY2021, firms required to fill out full paperwork for H-1B (including LCA and filing fees of $\sim$\$500 per applicant). Only forms of lottery winners processed, rest thrown out. 
+%             \item Starting FY2021, firms only required to fill out short form and \$10 filing fee to enter lottery, then only lottery winners required to fill out full paperwork. 
+%             \begin{itemize}
+%                 \item Bloomberg investigation\textemdash streamlined process caused fraud to skyrocket (multiple submissions of same employee from different companies)
+%             \end{itemize}
+%         \end{itemize}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{Sources of Variation: Literature and Context}
+%     \begin{itemize}
+%         \item Quota of 65,000 established in 1990, increased in 1999 then again in 2001, reset to 65,000 + 20,000 ADE in 2004
+%         \begin{itemize}
+%             \item Older literature using these aggregate increases as source of variation \textcolor{gray}{\footnotesize [Kerr and Lincoln 2010, Peri, Shih and Sparber 2015, Bound, Khanna and Morales 2017]}
+%         \end{itemize}
+%         \item Initially, visas allocated on a first-come, first-served basis until cap reached 
+%         \item In FY2006-7, USCIS ran unannounced pilot lotteries for applicants on day that cap was reached
+%         \begin{itemize}
+%             \item Small sample of ~3k firms \textbf{but} includes data on lottery losers \textcolor{gray}{\footnotesize [Doran, Gelber and Isen 2022 (DGI)]}
+%         \end{itemize}
+%         \item In FY2008 (and most future years) the cap was reached on the first day of the filing period, so \textit{all} visas were distributed via lottery
+%         \begin{itemize}
+%                 \item All firms \textbf{but} no data on lottery losers \textcolor{gray}{\footnotesize [Dimmock, Huang and Weisbenner 2022 (DHW); Mahajan et al. 2024 (MMSCB)]}
+%                 \item Instead, DHW and MMSCB use LCAs as imperfect proxy for H-1B applications
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{Picking a Research Question (For Now)}
+%     Potential Research Questions:
+%     \begin{enumerate}
+%         \item What is the effect of winning/losing an H-1B visa on the \textit{individual worker}?* (Potentially with Rachel)
+%         \begin{itemize}
+%             \item Idea: compare linked winners to likely-OPT holding non-winners at the same firm\textemdash \textbf{can follow losers outside of U.S.}
+%             \item Where do they move? If they stay in the U.S., how long? What occupation do they hold? 
+%         \end{itemize}
+%         \item How productive is an H-1B hire relative to the counterfactual hire?
+%         \begin{itemize}
+%             \item Could do this in LinkedIn using promotions, but noisy and relies on there being a counterfactual hire (also unclear why Mahajan et al. don't do this using wage data)
+%             \item More interesting option: use GitHub data (can join forces with macro students in my cohort) but potentially very noisy/biased signal of productivity 
+%         \end{itemize}
+%         \item How do H-1B visas affect firm outsourcing? (Potentially with Mahsa)
+%     \end{enumerate}
+% \end{frame}
+
+% \section{Individual Linking}
+% \begin{frame}
+%     \frametitle{Individual Linking}
+%     \begin{itemize}
+%         \item For advanced degree exemption (ADE) lottery winners 2017-2022, I have the name of their post-graduate educational institution 
+%         \item Along with job title, sex, field of study (2020-) year of birth (2020-), and date the visa was approved, I can use this info to match to LinkedIn [are there legal concerns about this?]
+%         \begin{itemize}
+%             \item So far, link rate is very low among this sample ($<$10\% of $\sim$60k individuals) 
+%             \item I think probabilistic linking will go a long way here because fields are very messy and there is no `unique identifier' column (like company name) in both datasets
+%         \end{itemize}
+%         \item Can probably also do a decent job matching in other years on country of birth and year of birth (for non China/India countries)
+%     \end{itemize}
+% \end{frame}
+
+
+% \begin{frame}
+%     \frametitle{Proposed Empirical Strategy}
+%     \begin{enumerate}
+%         \item Link as many individual winners as possible to LinkedIn (selection into linkage likely biased), subset to those already working at the firm on a different visa (likely OPT)
+%         \item Look for comparable individuals at \textit{the same firms as winners} and try to link back to H-1B application data to identify comparison group of losers
+%         \begin{itemize}
+%             \item Could also look at graduating class from same program
+%         \end{itemize}
+%         \item Compare labor market and migration outcomes of OPT-likely H-1B winners and (likely) losers over time
+%         \begin{itemize}
+%             \item Would expect to see losers more likely to leave U.S. over the next three years (until OPT runs out)
+%             \item Does it also affect outcomes at the firm (firm waits to promote until they know they can retain individual for more than 3 years?)
+%             \item Does it also affect occupational/career choices? What kinds of jobs/firms do they work at if/when they return?
+%         \end{itemize}
+%     \end{enumerate}
+% \end{frame}
+
+% \section{Firm Outcomes}
+% \begin{frame}
+%     \frametitle{Firm-Level Updates}
+%     \begin{itemize}
+%         \item Last Time: First stage looked okay but results on number of hires/employees looked weird
+%         \begin{itemize}
+%             \item Significant pre-trends and noisy/null results 
+%             \item (I think) driven by infrequent updating and noise from many applicants already working at the firm 
+%             \item Potential solution to infrequent updating: adjusting based on past snapshots of database (working on this w/ Charissa)
+%         \end{itemize}
+%         \item Different subsets and specifications:
+%         \begin{itemize}
+%             \item Subsetting to similarly-sized companies
+%             \item Subsetting to new hires/employees in relevant occupations 
+%             \item Weighting using Revelio weights 
+%             \item Using new positions instead of new hires 
+%             \item Regressions (following Mahajan et al. spec) leveraging full variation in win rates 
+%             \item Essentially everything looks the same no matter what I try
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}\label{win_rate_hist}
+%     \frametitle{New Positions By Year x Num Wins Relative to Lottery}
+%     \centering
+%     \includegraphics[width=0.6\textwidth]{\outputpath/new_positions_by_year.png}
+    
+%     Sample: firms that submit 2 lottery applications
+% \end{frame}
+
+
+% \section{[SKIP] Background and Data}
+% % \begin{frame}
+% %     \frametitle{Introduction}
+% %     \begin{itemize}
+% %         \item H-1B visas: high-profile immigration channel, based on the idea that we need to import talent for particular high-skill jobs
+% %         \item H-1B lottery serves as ideal experiment to compare otherwise similar firms who can and can't use H-1B visas
+% %         \item Literature: large focus on crowd-out and firm-level outcomes, with mixed results \textcolor{gray}{\footnotesize[Dimmock, Huang and Weisbenner 2022; Doran, Gelber and Isen 2022; Mahajan et al. 2024]}  \hyperlink{h1blit}{\beamergotobutton{Lit Review}}
+% %         \item \textbf{No empirical evidence} on worker-level outcomes (e.g. promotions, turnover) at firms who win H-1B visas relative to firms who do not
+% %         \item \textbf{Research question:} do workers (both new hires and incumbents) at H-1B winning firms have better outcomes than workers at H-1B losing firms?
+% %     \end{itemize}
+% % \end{frame}
+
+% \begin{frame}
+%     \frametitle{H-1B Visas: Policy Overview}
+%     \begin{itemize}
+%         \item Nonimmigrant visa for workers in `specialty occupations' 
+%         \begin{itemize}
+%             \item ``A specialty occupation is one that requires the application of a body of \textbf{highly specialized knowledge} and the attainment of at least a bachelor’s degree or its equivalent. The intent of the H-1B provisions is to help employers who \textbf{cannot otherwise obtain needed business skills and abilities from the U.S. workforce...}''
+%         \end{itemize}
+%         \item Employment-based visa: employer must apply on worker's behalf
+%         \begin{itemize}
+%             \item 'H-1B portability' between employers introduced in 2000, but lots of friction remains
+%             \item 'Dual-intent' visa: employer can sponsor green card for worker 
+%         \end{itemize}
+%         \item Generally a three-year visa with a three-year extension
+%         \item Capped at 65,000 normal visas annually and 20,000 advanced-degree exempt (ADE) visas for U.S. advanced degree holders (some employers exempt from cap)
+%     \end{itemize}
+% \end{frame}%Literature, Context and Timeline}
+
+% \begin{frame}\label{h1bfiling}
+%     \frametitle{H-1B Filing Process}
+%         \begin{itemize}
+%             \item To hire H-1B worker, firm first required to file Labor Condition Application (LCA) with DOL attesting that the job will not replace/harm incumbent workers
+%             \begin{itemize}
+%                 \item Not tied to a specific employee, must be filed no more than six months before start date
+%                 \item Includes information about job type (occupation code), start and end dates, work location, and salary
+%             \end{itemize}
+%             \item Prior to FY2021, firms required to fill out full paperwork for H-1B (including LCA and filing fees of $\sim$\$500 per applicant). Only forms of lottery winners processed, rest thrown out. 
+%             \item Starting FY2021, firms only required to fill out short form and \$10 filing fee to enter lottery, then only lottery winners required to fill out full paperwork. 
+%             \begin{itemize}
+%                 \item Bloomberg investigation\textemdash streamlined process caused fraud to skyrocket (multiple submissions of same employee from different companies)
+%             \end{itemize}
+%         \end{itemize}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{Sources of Variation: Literature and Context}
+%     \begin{itemize}
+%         \item Quota of 65,000 established in 1990, increased in 1999 then again in 2001, reset to 65,000 + 20,000 ADE in 2004
+%         \begin{itemize}
+%             \item Older literature using these aggregate increases as source of variation \textcolor{gray}{\footnotesize [Kerr and Lincoln 2010, Peri, Shih and Sparber 2015, Bound, Khanna and Morales 2017]}
+%         \end{itemize}
+%         \item Initially, visas allocated on a first-come, first-served basis until cap reached 
+%         \item In FY2006-7, USCIS ran unannounced pilot lotteries for applicants on day that cap was reached
+%         \begin{itemize}
+%             \item Small sample of ~3k firms \textbf{but} includes data on lottery losers \textcolor{gray}{\footnotesize [Doran, Gelber and Isen 2022 (DGI)]}
+%         \end{itemize}
+%         \item In FY2008 (and most future years) the cap was reached on the first day of the filing period, so \textit{all} visas were distributed via lottery
+%         \begin{itemize}
+%                 \item All firms \textbf{but} no data on lottery losers \textcolor{gray}{\footnotesize [Dimmock, Huang and Weisbenner 2022 (DHW); Mahajan et al. 2024 (MMSCB)]}
+%                 \item Instead, DHW and MMSCB use LCAs as imperfect proxy for H-1B applications
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{Data}
+%     \begin{itemize}
+%         \item \textbf{H-1B Data}
+%         \begin{itemize}
+%             \item Bloomberg FOIA request [FY2021-2024]: microdata on \textit{all H-1B applications}, i.e. both lottery winners and losers
+%             \item Previous FOIA request [FY2017-2024]: microdata only on H-1B lottery winners 
+%             \item US DOL [FY2009-2024]: microdata on LCAs (used in literature as proxy for employer H-1B demand)
+%             \item USCIS Employer Hub [FY2009-2024]: employer-level data on H-1B lottery winners (missing person-level characteristics)
+%         \end{itemize} 
+%         \item \textbf{Revelio LinkedIn Data}
+%         \begin{itemize}
+%             \item Position-level data from universe of LinkedIn profiles
+%         \end{itemize}
+%         \item \textbf{Merging by Employer} (Currently ~60\% of H-1B Employers FY2021-4 linked)
+%         \begin{itemize}
+%             \item Messy! Limited info with lots of missings, need to merge on name and location only
+%             \item Would love to link at the individual level, but limited info on both ends (future todo)
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
+
+% \section{H-1B Data: Descriptives and Challenges}
+% \begin{frame}
+%     \frametitle{Bloomberg Data: Summary}
+%     \begin{itemize}
+%         \item Covers four years of lotteries: FY2021 (March 2020 Lottery)-FY2024 (March 2023 Lottery) 
+%         \item Includes lottery application data and lottery status for all H-1B applicants \textit{subject to the lottery}
+%         \begin{itemize}
+%             \item Includes both regular and Advanced Degree Exempt (ADE) applicants (subject to different lotteries) \textbf{but does not identify the group into which the applicant falls}
+%             \item Does not include any information on cap-exempt employers (non-profits, higher ed, etc.), applications for change in employer or visa extension
+%             \item \textcolor{maincolor}{Contrast to previous FOIA data} which has no information on lottery losers 
+%         \end{itemize}
+%         \item Additionally, includes information from I-129 (H-1B Visa Application Form) for lottery applicants who won \textbf{and} submitted form (66\% of winners)
+%     \end{itemize}
+% \end{frame}
+
+
+% \section{Merging with Revelio Data}
+
+
+% \section{Initial Results}
+% \begin{frame}
+%     \frametitle{Ideal Empirical Strategy and Outcomes of Interest}
+%     Following DGI, for firm $j$ in year $t$ who applied for an H-1B visa in fiscal year $T$, estimate: 
+%     \begin{equation}
+%         Y_{jtT} = \beta_0 + \beta_1U_{jT} + \varepsilon_{jtT}
+%     \end{equation}
+%     where $U_{jT}$ represents `excess' lottery wins above chance (i.e. number of lottery wins net of number of applications $\times$ aggregate win rate).
+
+%     \vspace{2mm}
+%     I am interested in the following outcomes:
+%     \begin{itemize}
+%         \item \textbf{First stage:} number of H-1B visas granted (requires additional application after winning)
+%         \item \textbf{Hiring:} number of workers hired; number of total workers
+%         \item \textbf{Workers:} average promotion rate of new hires; turnover of incumbent workers
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{First Pass at First Stage}
+%     Subset to firms that only submit one application in a given lottery year to simplify visualization:
+%     \begin{itemize}
+%         \item Balanced sample of firms from preferred sample that are matched and can be consistently and uniquely identified in the H-1B data in all four years 
+%         \item Subset to firms that submitted one application in 2022 (n = 1135)
+%         \item Plot mean number of H-1B visas approved
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{H-1B Visa Approvals by Lottery Win by Fiscal Year}
+%     \centering
+%     \includegraphics[width=0.6\textwidth]{\outputpath/fs_balanced_raw_ly2023.png}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{First Pass at Some Results}
+%     Subset to firms that only submit one application in a given lottery year to simplify visualization:
+%     \begin{itemize}
+%         \item Unbalanced sample of firms from preferred sample that are matched
+%         \item Subset to firms that submitted one application in 2022 (n = 13,758)
+%         \item Plot mean number of new hires and total employment in LinkedIn data
+%     \end{itemize}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{New Hires by Lottery Win by Quarter}
+%     \centering
+%     \includegraphics[width=0.6\textwidth]{\outputpath/new_hires_by_win_ly2023.png}
+% \end{frame}
+
+% \begin{frame}
+%     \frametitle{Total Employment by Lottery Win by Quarter}
+%     \centering
+%     \includegraphics[width=0.6\textwidth]{\outputpath/n_emp_bywin_ly2023.png}
+% \end{frame}
+
+% \section{Next Steps}
+
+% \begin{frame}
+%     \frametitle{Next Steps}
+%     \begin{enumerate}
+%         \item Look into merging on individual level 
+%         \item Run regressions on first stage and crowd-out
+%         \item Construct measure of promotion/turnover 
+%     \end{enumerate}
+% \end{frame}
+
+% % \begin{frame}
+% %     \frametitle{Issues}
+% %     \begin{itemize}
+% %         \item Some concern about fraud\textemdash for now results exclude those applicants who have multiple applications (from diff employers) in the system in a given year but I should try harder
+% %         \item Can't identify ADE vs. regular \textit{applicants} (can only see if lottery winner)
+% %         \item Time horizon simply too short to look at interesting outcomes, also muddled by COVID 
+% %         \item (Not necessarily bad) really measuring total effect of H-1B visa win on promotion/turnover, including any effects on ease of switching employers
+% %     \end{itemize}
+% % \end{frame}
+
+% % \section{Alternate Ideas and Brainstorming}
+
+% % \begin{frame}
+% %     \frametitle{Some Other Ideas}
+% %     \begin{itemize}
+% %         \item Return migration: are H-1B hires more likely to remain in US for longer (via green card or H-1B renewal)? E.g. alternative pathway for Canadians (TN visa) has no pathway to green card.
+% %         \item If I can get info on previous H-1B applications: what are effects of winning on first try vs. winning on a later try? (descriptively: what do workers who don't win H-1B immediately do in the intervening years?)
+% %         \item Ethnic Sorting: effect of own-ethnicity hiring manager/past H-1B win on future hires
+% %     \end{itemize}
+% % \end{frame}
+
+% \appendix 
+% \begin{frame}\label{app_hist_raw}
+%     \frametitle{Raw Lottery App Dist. (Firm x Year Counts FY2021-2024) \hyperlink{app_hist_binned}{\beamerreturnbutton{back}}}
+%     \centering
+%     \includegraphics[width=0.7\textwidth]{\outputpath/app_hist_raw.png}
+% \end{frame}
+
+% \begin{frame}\label{app_age_hist_bywin}
+%     \frametitle{Dist. of Age at Application (Preferred Sample FY2021-2024) \hyperlink{win_stats}{\beamerreturnbutton{back}}}
+%     \centering
+%     \includegraphics[width=0.6\textwidth]{\outputpath/app_age_hist_bywin.png}
+% \end{frame}
+
+% \begin{frame}\label{win_rate_hist}
+%     \frametitle{Dist. of Win Rates (Firm x Year Counts FY2021-2024) \hyperlink{excess_wins_hist}{\beamerreturnbutton{back}}}
+%     \centering
+%     \includegraphics[width=0.6\textwidth]{\outputpath/win_rate_hist.png}
+% \end{frame}
+
+
+\end{document}
