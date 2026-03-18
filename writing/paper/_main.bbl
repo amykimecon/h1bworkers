@@ -1,9 +1,77 @@
-\begin{thebibliography}{14}
+\begin{thebibliography}{41}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
   \providecommand{\doi}[1]{doi: #1}\else
   \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Abramitzky et~al.(2014)Abramitzky, Boustan, and
+  Eriksson]{abramitzkyboustanerikkson2014}
+Ran Abramitzky, Leah~Platt Boustan, and Katherine Eriksson.
+\newblock A nation of immigrants: Assimilation and economic outcomes in the age
+  of mass migration.
+\newblock \emph{Journal of Political Economy}, 122\penalty0 (3):\penalty0
+  467--506, 2014.
+
+\bibitem[Abramitzky et~al.(2021)Abramitzky, Boustan, Eriksson, Feigenbaum, and
+  P{\'e}rez]{abramitzkyetal2021}
+Ran Abramitzky, Leah Boustan, Katherine Eriksson, James Feigenbaum, and
+  Santiago P{\'e}rez.
+\newblock Automated linking of historical data.
+\newblock \emph{Journal of Economic Literature}, 59\penalty0 (3):\penalty0
+  865--918, 2021.
+
+\bibitem[Amuedo-Dorantes and Furtado(2019)]{amuedo_dorantes_furtado_2019}
+Catalina Amuedo-Dorantes and Delia Furtado.
+\newblock Settling for academia? h-1b visas and the career choices of
+  international students in the united states.
+\newblock \emph{Journal of Human Resources}, 54\penalty0 (2):\penalty0
+  401--429, 2019.
+
+\bibitem[Amuedo-Dorantes et~al.(2019)Amuedo-Dorantes, Furtado, and
+  Xu]{amuedo_dorantes_furtado_xu_2019}
+Catalina Amuedo-Dorantes, Delia Furtado, and Huanan Xu.
+\newblock Opt policy changes and foreign-born stem talent in the united states.
+\newblock \emph{Labour Economics}, 61:\penalty0 101752, 2019.
+
+\bibitem[Amuedo-Dorantes et~al.(2023)Amuedo-Dorantes, Shih, and
+  Xu]{amuedo_dorantes_shih_xu_2023}
+Catalina Amuedo-Dorantes, Kevin Shih, and Huanan Xu.
+\newblock The implications of optional practical training reforms on
+  international student enrollments and quality.
+\newblock \emph{Economic Inquiry}, 61\penalty0 (2):\penalty0 253--281, 2023.
+
+\bibitem[Bailey et~al.(2020)Bailey, Cole, Henderson, and
+  Massey]{baileyetal2020}
+Martha~J. Bailey, Connor Cole, Morgan Henderson, and Catherine Massey.
+\newblock How well do automated linking methods perform? {Lessons} from {US}
+  historical data.
+\newblock \emph{Journal of Economic Literature}, 58\penalty0 (4):\penalty0
+  997--1044, 2020.
+
+\bibitem[Beine et~al.(2023)Beine, Bertoli, and
+  Fern{\'a}ndez-Huertas~Moraga]{beine_bertoli_fernandes_2023}
+Michel Beine, Simone Bertoli, and Jes{\'u}s Fern{\'a}ndez-Huertas~Moraga.
+\newblock International college students’ impact on the us skilled labor
+  supply.
+\newblock \emph{Journal of Public Economics}, 218:\penalty0 104803, 2023.
+
+\bibitem[{Bloomberg Graphics}(2025)]{bloomberggraphics_h1b_data_2025}
+{Bloomberg Graphics}.
+\newblock {US H-1B Visa Lottery and Petition Data FY 2021--FY 2024}.
+\newblock \url{https://github.com/BloombergGraphics/2024-h1b-immigration-data},
+  2025.
+\newblock GitHub repository; data obtained by Bloomberg News from the U.S.
+  Department of Homeland Security under the Freedom of Information Act; updated
+  June 27, 2025; accessed March 16, 2026.
+
+\bibitem[Bound et~al.(2015)Bound, Demirci, Khanna, and
+  Turner]{bound_demirci_khanna_turner_2015}
+John Bound, Murat Demirci, Gaurav Khanna, and Sarah Turner.
+\newblock Finishing degrees and finding jobs: U.s. higher education and the
+  flow of foreign it workers.
+\newblock In \emph{Innovation Policy and the Economy}, volume~15, pages 27--72.
+  University of Chicago Press, 2015.
 
 \bibitem[Bound et~al.(2017)Bound, Khanna, and Morales]{boundetal2017}
 John Bound, Gaurav Khanna, and Nicolas Morales.
@@ -15,70 +83,225 @@ Agostina Brinatti and Xing Guo.
 \newblock Third-country effects of u.s. immigration policy.
 \newblock Staff Working Paper 2023-60, Bank of Canada, 2023.
 
+\bibitem[Demirci(2019)]{demirci_2019}
+Murat Demirci.
+\newblock Transition of international stem students to the u.s. labor market:
+  The role of visa policy.
+\newblock \emph{Economic Inquiry}, 57\penalty0 (3):\penalty0 1367--1391, 2019.
+
+\bibitem[Demirci(2020)]{demirci_2020}
+Murat Demirci.
+\newblock International students and labour market outcomes of us-born workers.
+\newblock \emph{Canadian Journal of Economics}, 53\penalty0 (4):\penalty0
+  1495--1522, 2020.
+
+\bibitem[Dimmock et~al.(2022)Dimmock, Huang, and
+  Weisbenner]{dimmock_huang_weisbenner_2022}
+Stephen~G. Dimmock, Jiekun Huang, and Scott~J. Weisbenner.
+\newblock Give me your tired, your poor, your high-skilled labor: H-1b lottery
+  outcomes and entrepreneurial success.
+\newblock \emph{Management Science}, 68\penalty0 (9):\penalty0 6950--6970,
+  2022.
+
 \bibitem[Doran et~al.(2022)Doran, Gelber, and Isen]{doranetal2022}
 Kirk Doran, Alexander Gelber, and Adam Isen.
-\newblock The effects of high-skilled immigration policy on firms: Evidence from visa lotteries.
+\newblock The effects of high-skilled immigration policy on firms: Evidence
+  from visa lotteries.
 \newblock IZA Discussion Paper 15146, IZA Institute of Labor Economics, 2022.
+
+\bibitem[Enamorado et~al.(2019)Enamorado, Fifield, and Imai]{enamoradoetal2019}
+Ted Enamorado, Benjamin Fifield, and Kosuke Imai.
+\newblock Using a probabilistic model to assist merging of large-scale
+  administrative records.
+\newblock \emph{American Political Science Review}, 113\penalty0 (2):\penalty0
+  353--371, 2019.
+
+\bibitem[Feigenbaum(2016)]{feigenbaum2016}
+James~J. Feigenbaum.
+\newblock A machine learning approach to census record linking.
+\newblock Working paper, 2016.
+
+\bibitem[Fellegi and Sunter(1969)]{fellegisunter1969}
+Ivan~P. Fellegi and Alan~B. Sunter.
+\newblock A theory for record linkage.
+\newblock \emph{Journal of the American Statistical Association}, 64\penalty0
+  (328):\penalty0 1183--1210, 1969.
+
+\bibitem[Ferrie(1996)]{ferrie1996}
+Joseph~P. Ferrie.
+\newblock A new sample of males linked from the public use microdata sample of
+  the 1880 {US} census of population to the 1880 {US} census manuscripts.
+\newblock \emph{Historical Methods: A Journal of Quantitative and
+  Interdisciplinary History}, 29\penalty0 (4):\penalty0 141--156, 1996.
 
 \bibitem[Glennon(2024)]{glennon2024}
 Britta Glennon.
-\newblock How do restrictions on high-skilled immigration affect offshoring? evidence from the h-1b program.
+\newblock How do restrictions on high-skilled immigration affect offshoring?
+  evidence from the h-1b program.
 \newblock \emph{Management Science}, 70\penalty0 (2):\penalty0 907--930, 2024.
+
+\bibitem[Kato and Sparber(2013)]{kato_sparber_2013}
+Takao Kato and Chad Sparber.
+\newblock Quotas and quality: The effect of h-1b visa restrictions on the pool
+  of prospective undergraduate students from abroad.
+\newblock \emph{Review of Economics and Statistics}, 95\penalty0 (1):\penalty0
+  109--126, 2013.
+
+\bibitem[Kerr et~al.(2015)Kerr, Kerr, and Lincoln]{kerr_kerr_lincoln_2015}
+Sari~Pekkala Kerr, William~R. Kerr, and William~F. Lincoln.
+\newblock Skilled immigration and the employment structures of us firms.
+\newblock \emph{Journal of Labor Economics}, 33\penalty0 (S1):\penalty0
+  S147--S186, 2015.
 
 \bibitem[Kerr and Lincoln(2010)]{kerrlincoln2010}
 William~R. Kerr and William~F. Lincoln.
-\newblock The supply side of innovation: H-1b visa reforms and u.s. ethnic invention.
-\newblock \emph{Journal of Labor Economics}, 28\penalty0 (3):\penalty0 473--508, 2010.
+\newblock The supply side of innovation: H-1b visa reforms and u.s. ethnic
+  invention.
+\newblock \emph{Journal of Labor Economics}, 28\penalty0 (3):\penalty0
+  473--508, 2010.
 
 \bibitem[Khanna and Morales(2017)]{khannamorales2017}
 Gaurav Khanna and Nicolas Morales.
-\newblock The it boom and other unintended consequences of chasing the american dream.
+\newblock The it boom and other unintended consequences of chasing the american
+  dream.
 \newblock Working Paper 460, Center for Global Development, 2017.
 
 \bibitem[Kim and Pei(2022)]{kimpei2022}
 Seohee Kim and Alison Pei.
-\newblock Monopsony in the high-skilled migrant labor market: Evidence from h-1b petition data.
+\newblock Monopsony in the high-skilled migrant labor market: Evidence from
+  h-1b petition data.
 \newblock Technical report, SSRN, 2022.
 
-\bibitem[Mahajan et~al.(2024)Mahajan, Morales, Shih, Chen, and Brinatti]{mahajanetal2024}
-Parag Mahajan, Nicolas Morales, Kevin~Y. Shih, Mingyu Chen, and Agostina Brinatti.
-\newblock The impact of immigration on firms and workers: Insights from the h-1b lottery.
-\newblock Working Paper CES-24-19, U.S. Census Bureau Center for Economic Studies, 2024.
+\bibitem[Mahajan et~al.(2024)Mahajan, Morales, Shih, Chen, and
+  Brinatti]{mahajanetal2024}
+Parag Mahajan, Nicolas Morales, Kevin~Y. Shih, Mingyu Chen, and Agostina
+  Brinatti.
+\newblock The impact of immigration on firms and workers: Insights from the
+  h-1b lottery.
+\newblock Working Paper CES-24-19, U.S. Census Bureau Center for Economic
+  Studies, 2024.
 
-\bibitem[Mayda et~al.(2020)Mayda, Ortega, Peri, Shih, and Sparber]{maydaetal2020}
-Anna~Maria Mayda, Francesc Ortega, Giovanni Peri, Kevin~Y. Shih, and Chad Sparber.
-\newblock Coping with h-1b shortages: Firm performance and mitigation strategies.
-\newblock NBER Working Paper 27730, National Bureau of Economic Research, 2020.
+\bibitem[Mayda et~al.(2023)Mayda, Ortega, Peri, Shih, and
+  Sparber]{mayda_etal_2023}
+Anna~Maria Mayda, Francesc Ortega, Giovanni Peri, Kevin Shih, and Chad Sparber.
+\newblock Coping with h-1b shortages: Firm performance and mitigation
+  strategies.
+\newblock \emph{ILR Review}, 76\penalty0 (5):\penalty0 919--943, 2023.
 
-\bibitem[{U.S. Citizenship and Immigration Services}(2024{\natexlab{a}})]{uscis_integrity_2024}
+\bibitem[Mider et~al.()Mider, Fan, Lu, and Patino]{Mider2024H1B}
+Zachary Mider, Elena Fan, Denise Lu, and Marie Patino.
+\newblock How thousands of middlemen are gaming the h-1b program.
+\newblock URL
+  \url{https://www.bloomberg.com/graphics/2024-staffing-firms-game-h1b-visa-lottery-system/}.
+\newblock Accessed: March 17, 2026.
+
+\bibitem[Peri et~al.(2015{\natexlab{a}})Peri, Shih, and
+  Sparber]{peri_shih_sparber_2015_lottery}
+Giovanni Peri, Kevin Shih, and Chad Sparber.
+\newblock Foreign and native skilled workers: What can we learn from h-1b
+  lotteries?
+\newblock NBER Working Paper 21175, National Bureau of Economic Research,
+  2015{\natexlab{a}}.
+
+\bibitem[Peri et~al.(2015{\natexlab{b}})Peri, Shih, and
+  Sparber]{peri_shih_sparber_2015_stem}
+Giovanni Peri, Kevin Shih, and Chad Sparber.
+\newblock Stem workers, h-1b visas, and productivity in us cities.
+\newblock \emph{Journal of Labor Economics}, 33\penalty0 (S1):\penalty0
+  S225--S255, 2015{\natexlab{b}}.
+
+\bibitem[Shih(2016)]{shih_2016}
+Kevin Shih.
+\newblock Labor market openness, h-1b visa policy, and the scale of
+  international student enrollment in the united states.
+\newblock \emph{Economic Inquiry}, 54\penalty0 (1):\penalty0 121--138, 2016.
+
+\bibitem[{U.S. Citizenship and Immigration
+  Services}(2019)]{uscis_h1b_registration_2020}
+{U.S. Citizenship and Immigration Services}.
+\newblock Uscis announces implementation of h-1b electronic registration
+  process for fiscal year 2021 cap.
+\newblock USCIS Alert, 2019.
+\newblock URL
+  \url{https://www.uscis.gov/archive/uscis-announces-implementation-of-h-1b-electronic-registration-process-for-fiscal-year-2021-cap}.
+\newblock Accessed March 6, 2026.
+
+\bibitem[{U.S. Citizenship and Immigration
+  Services}(2020)]{uscis_h1b_fy2021_file}
+{U.S. Citizenship and Immigration Services}.
+\newblock Fy 2021 h-1b cap petitions may be filed as of april 1.
+\newblock USCIS Alert, 2020.
+\newblock URL
+  \url{https://www.uscis.gov/archive/fy-2021-h-1b-cap-petitions-may-be-filed-as-of-april-1}.
+\newblock Accessed March 6, 2026.
+
+\bibitem[{U.S. Citizenship and Immigration
+  Services}(2021)]{uscis_h1b_overview_2021}
+{U.S. Citizenship and Immigration Services}.
+\newblock The h-1b visa program.
+\newblock USCIS outreach presentation, 2021.
+\newblock URL
+  \url{https://www.uscis.gov/sites/default/files/document/outreach-engagements/USCIS_H-1B_Overview.pdf}.
+\newblock Accessed March 6, 2026.
+
+\bibitem[{U.S. Citizenship and Immigration
+  Services}(2024{\natexlab{a}})]{uscis_integrity_2024}
 {U.S. Citizenship and Immigration Services}.
 \newblock Uscis announces strengthened integrity measures for h-1b program.
 \newblock USCIS Alert, 2024{\natexlab{a}}.
-\newblock URL \url{https://www.uscis.gov/archive/uscis-announces-strengthened-integrity-measures-for-h-1b-program}.
+\newblock URL
+  \url{https://www.uscis.gov/archive/uscis-announces-strengthened-integrity-measures-for-h-1b-program}.
 \newblock Accessed March 6, 2026.
 
-\bibitem[{U.S. Citizenship and Immigration Services}(2024{\natexlab{b}})]{uscis_opt_2024}
+\bibitem[{U.S. Citizenship and Immigration
+  Services}(2024{\natexlab{b}})]{uscis_opt_2024}
 {U.S. Citizenship and Immigration Services}.
 \newblock Optional practical training (opt) for f-1 students.
 \newblock USCIS guidance page, 2024{\natexlab{b}}.
-\newblock URL \url{https://www.uscis.gov/working-in-the-united-states/students-and-exchange-visitors/optional-practical-training-opt-for-f-1-students}.
+\newblock URL
+  \url{https://www.uscis.gov/working-in-the-united-states/students-and-exchange-visitors/optional-practical-training-opt-for-f-1-students}.
 \newblock Accessed March 6, 2026.
 
-\bibitem[{U.S. Citizenship and Immigration Services}(2025{\natexlab{a}})]{uscis_beneficiary_centric_2025}
+\bibitem[{U.S. Citizenship and Immigration
+  Services}(2025{\natexlab{a}})]{uscis_beneficiary_centric_2025}
 {U.S. Citizenship and Immigration Services}.
 \newblock Fy 2026 h-1b cap initial registration period opens on march 7.
 \newblock USCIS Alert, 2025{\natexlab{a}}.
-\newblock URL \url{https://www.uscis.gov/newsroom/alerts/fy-2026-h-1b-cap-initial-registration-period-opens-on-march-7}.
-\newblock Describes the beneficiary-centric selection process for later cap seasons; accessed March 6, 2026.
+\newblock URL
+  \url{https://www.uscis.gov/newsroom/alerts/fy-2026-h-1b-cap-initial-registration-period-opens-on-march-7}.
+\newblock Describes the beneficiary-centric selection process for later cap
+  seasons; accessed March 6, 2026.
 
-\bibitem[{U.S. Citizenship and Immigration Services}(2025{\natexlab{b}})]{uscis_cap_gap_2025}
+\bibitem[{U.S. Citizenship and Immigration
+  Services}(2025{\natexlab{b}})]{uscis_h1b_characteristics_2024}
 {U.S. Citizenship and Immigration Services}.
-\newblock Extension of post-completion optional practical training (opt) and f-1 status for eligible students.
-\newblock USCIS guidance page, 2025{\natexlab{b}}.
-\newblock URL \url{https://www.uscis.gov/working-in-the-united-states/temporary-workers/h-1b-specialty-occupations/extension-of-post-completion-optional-practical-training-opt-and-f-1-status-for-eligible-students}.
+\newblock Characteristics of {H-1B} specialty occupation workers: Fiscal year
+  2024 annual report to congress.
+\newblock Annual report to congress, {U.S. Department of Homeland Security},
+  April 2025{\natexlab{b}}.
+\newblock URL
+  \url{https://www.uscis.gov/sites/default/files/document/reports/ola_signed_h1b_characteristics_congressional_report_FY24.pdf}.
+
+\bibitem[{U.S. Citizenship and Immigration
+  Services}(2026)]{uscis_h1b_specialty_2026}
+{U.S. Citizenship and Immigration Services}.
+\newblock H-1b specialty occupations.
+\newblock USCIS guidance page, 2026.
+\newblock URL
+  \url{https://www.uscis.gov/working-in-the-united-states/h-1b-specialty-occupations}.
 \newblock Accessed March 6, 2026.
 
-\bibitem[{U.S. Immigration and Customs Enforcement}(2024)]{ice_practical_training_2024}
+\bibitem[{U.S. Department of Labor, Employment and Training
+  Administration}(2024)]{dol_h1b_lca}
+{U.S. Department of Labor, Employment and Training Administration}.
+\newblock H-1b program.
+\newblock Foreign Labor Certification, 2024.
+\newblock URL
+  \url{https://www.dol.gov/agencies/eta/foreign-labor/programs/h-1b}.
+\newblock Accessed March 17, 2026.
+
+\bibitem[{U.S. Immigration and Customs
+  Enforcement}(2024)]{ice_practical_training_2024}
 {U.S. Immigration and Customs Enforcement}.
 \newblock Practical training.
 \newblock Student and Exchange Visitor Program, 2024.

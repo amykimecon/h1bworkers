@@ -1,4 +1,5 @@
 \ProvidesPackage{preamble}
+\PassOptionsToPackage{dvipsnames}{xcolor}
 
 %% paths
 \newcommand{\outputpath}{~/Documents/GitHub/headtax/output/paper}
@@ -30,7 +31,6 @@
 \usepackage{placeins}		%For floatbarrier
 %\usepackage[lmargin=2cm, rmargin=2cm,tmargin=2.4cm,bmargin=2cm]{geometry}
 \onehalfspacing
-\usepackage{supertabular}
 
 %Packages from Elisa
 \usepackage{multirow}
@@ -66,17 +66,18 @@
 \usepackage[english]{babel} %%% 'french', 'german', 'spanish', 'danish', etc.
 \usepackage{amssymb}
 \usepackage{amsmath}
-\usepackage{mathdots}
-\usepackage{makecell}
-\renewcommand\theadalign{cb}
-\renewcommand\theadfont{\bfseries}
-\renewcommand\theadgape{\Gape[4pt]}
-\renewcommand\cellgape{\Gape[4pt]}
+\IfFileExists{makecell.sty}{
+  \usepackage{makecell}
+  \renewcommand\theadalign{cb}
+  \renewcommand\theadfont{\bfseries}
+  \renewcommand\theadgape{\Gape[4pt]}
+  \renewcommand\cellgape{\Gape[4pt]}
+}{}
 
 % Carolyn additions
 \usepackage{array}
 \usepackage{color}
-\usepackage[dvipsnames]{xcolor}
+\usepackage{xcolor}
 \usepackage{hyperref}
 \hypersetup{
 	colorlinks   = true, %Colours links instead of ugly boxes
@@ -84,18 +85,37 @@
 	linkcolor    = blue, %Colour of internal links
 	citecolor   = blue %Colour of citations
 }
-\usepackage{adjustbox}
-\usepackage{threeparttable}
-\usepackage{soul}
-\usepackage{import}
+\IfFileExists{adjustbox.sty}{\usepackage{adjustbox}}{}
+\IfFileExists{threeparttable.sty}{
+  \usepackage{threeparttable}
+}{
+  % Fallback environments when threeparttable is unavailable.
+  \newenvironment{threeparttable}{}{}
+  \newenvironment{tablenotes}[1][]{
+    \begin{list}{}{
+      \setlength{\leftmargin}{0pt}
+      \setlength{\labelwidth}{0pt}
+      \setlength{\labelsep}{0pt}
+      \setlength{\itemindent}{0pt}
+      \setlength{\listparindent}{0pt}
+      \setlength{\parsep}{0pt}
+    }
+    \footnotesize
+  }{
+    \end{list}
+  }
+}
+\IfFileExists{soul.sty}{\usepackage{soul}}{}
 \usepackage[final]{pdfpages}
 \let\oldhat\hat
 \renewcommand{\vec}[1]{\boldsymbol{\mathbf{#1}}} % formatting vectors
 %\renewcommand{\hat}[1]{\oldhat{\boldsymbol{\mathbf{#1}}}}
 % \usepackage{kpfonts}
-\usepackage{pgfplots}
-\pgfplotsset{compat=1.11} 
-\usepgfplotslibrary{fillbetween}
+\IfFileExists{pgfplots.sty}{
+  \usepackage{pgfplots}
+  \pgfplotsset{compat=1.11}
+  \usepgfplotslibrary{fillbetween}
+}{}
 \newcommand\gauss[2]{1/(#2*sqrt(2*pi))*exp(-((x-#1)^2)/(2*#2^2))} % Gauss function, parameters mu and sigma
 \usepackage{listings} % for including code 
 \lstset{ 
@@ -131,12 +151,16 @@
 \usepackage[round,authoryear]{natbib}
 
 % Add subtitle to main title
-\usepackage{titling}
-\newcommand{\subtitle}[1]{%
-  \posttitle{%
-    \par\end{center}
-    \begin{center}\large#1\end{center}
-    \vskip0.5em}%
+\IfFileExists{titling.sty}{
+  \usepackage{titling}
+  \newcommand{\subtitle}[1]{%
+    \posttitle{%
+      \par\end{center}
+      \begin{center}\large#1\end{center}
+      \vskip0.5em}%
+  }
+}{
+  \newcommand{\subtitle}[1]{}
 }
 
 % Line spacing
@@ -144,19 +168,19 @@
 \setlength\parindent{2em}
 
 \renewcommand{\baselinestretch}{1.5}
-\usepackage{bbm} % for nice indicator function
+\IfFileExists{bbm.sty}{\usepackage{bbm}}{} % for nice indicator function
 
 % for loops
-\usepackage{lipsum}
+\IfFileExists{lipsum.sty}{\usepackage{lipsum}}{}
 
 % for simple trees
-\usepackage{qtree}
+\IfFileExists{qtree.sty}{\usepackage{qtree}}{}
 
 % for multiple footnotes- not sure this works though
 \usepackage[multiple]{footmisc}
 
 % for appendices
-\usepackage[toc,page]{appendix}
+\IfFileExists{appendix.sty}{\usepackage[toc,page]{appendix}}{}
 
 % add fancy header
 % \usepackage{fancyhdr}
@@ -170,7 +194,9 @@
 
 % amy additions
 \usepackage{hhline}
-\usepackage{ragged2e}
+\IfFileExists{ragged2e.sty}{
+  \IfFileExists{everysel.sty}{\usepackage{ragged2e}}{}
+}{}
 % centered manual width lines
 \newcolumntype{L}[1]{>{\raggedright\let\newline\\\arraybackslash\hspace{0pt}}m{#1}}
 \newcolumntype{C}[1]{>{\centering\let\newline\\\arraybackslash\hspace{0pt}}m{#1}}

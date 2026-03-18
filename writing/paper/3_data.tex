@@ -1,38 +1,122 @@
-\section{Data}
+% !TEX root = _main.tex
+\section{Data and Linkage}
 
 \label{sec:data}
 \subsection{Administrative Data}
-My data on H-1B applications was obtained from U.S. Customs and Immigration Services (USCIS) via a Freedom of Information Act (FOIA) request from Bloomberg... [source]. It is a complete record of all cap-subject lottery applications in FY 2020-2023, including the applicant's country of origin, year of birth, gender, sponsoring employer, and lottery outcome. For lottery winners who subsequently filed a petition for an H-1B visa, I have much more detailed information including their college major, job title, previous visa status, etc. The data do not contain indicators for ADE status for lottery losers.
+My data on H-1B applications was obtained from U.S. Customs and Immigration Services (USCIS) via a Freedom of Information Act (FOIA) request from Bloomberg News \citep{bloomberggraphics_h1b_data_2025}. It is a complete record of all cap-subject lottery applications in FY 2020-2023, including the applicant's country of origin, year of birth, gender, sponsoring employer, and lottery outcome. For lottery winners who subsequently filed a petition for an H-1B visa, I have much more detailed information including their college major, job title, previous visa status, etc. The data contain an indicator for whether H-1B applicants who filed a petition (i.e. lottery winners) were selected via the ADE lottery or the regular lottery, but since ADE lottery losers can still reenter the regular lottery, this is not equivalent to an indicator for ADE status and is also not available for lottery losers. I therefore impute ADE status on the Revelio side using education histories, as described below.
 
-Each row of the H-1B data represents a single lottery application, which is the unit of treatment assignment in the analysis. Importantly, as discussed in Section \ref{sec:context}, the data include many duplicate applications from different employers on behalf of the same applicant.
+\paragraph{Duplicate Applicants}
 The data include an indicator for whether an applicant is a `duplicate' (i.e. whether the applicant was already named on another application in the same lottery year), but do not indicate the original application. Therefore while I can filter on this indicator to obtain a sample of applications that are unique at the applicant x year level, I am not able to fully exclude all applicants that submit multiple applications in the same year (since one of the applications will not be marked as a duplicate or indicated in any way). To address this as best as possible, I use the duplicate indicator to identify and exclude employer-year cells with \textit{any} duplicate applications.
 
 
-% \paragraph{Fraud. }
-% Note that during the period covered by this data, USCIS regulations permitted individuals to submit multiple applications in the same year, under different employers. This led to a high rate of duplicate applications, particularly in 2023: x\% of applications... 
-% In 2024, USCIS changed their regulations... (footnote on bloomberg article and `middlemen etc.?')
-
 \subsection{Revelio Data}
-My data on outcomes... comes from Revelio Labs. Scraped LinkedIn profiles...
-Position data on individuals' complete work histories (as reported on LinkedIn), including employer, start and end dates, location, job title.
-
-Education data on individuals' complete education histories (as reported on LinkedIn), including institution name, program start and end dates, degree, and field. 
+My data on individual outcomes comes from LinkedIn profiles scraped and compiled by Revelio Labs. The data include individual profile details such as full name and current location, as well as detailed position and education histories. The position data include employer, start and end dates, location, job title, and imputed compensation for many positions. The education data include institution name, program start and end dates, degree, and field.
 
 
-The outcome data come from Revelio Labs' large snapshot of public LinkedIn-based profiles. In the current project files, Revelio contains worker-level profiles with names, profile-update dates, education histories, and detailed position histories, along with company identifiers (\texttt{rcid}), titles, start and end dates, locations, and imputed compensation for many positions. The raw scale is large enough that the data behave like a near-universe of digitally visible professional workers, which is particularly useful in a study of the skilled labor market.
+% The outcome data come from Revelio Labs' large snapshot of public LinkedIn-based profiles. In the current project files, Revelio contains worker-level profiles with names, profile-update dates, education histories, and detailed position histories, along with company identifiers (\texttt{rcid}), titles, start and end dates, locations, and imputed compensation for many positions. The raw scale is large enough that the data behave like a near-universe of digitally visible professional workers, which is particularly useful in a study of the skilled labor market.
 
-The main strength of Revelio for this project is that it observes both the pre-lottery and post-lottery histories of workers who are likely to be in the H-1B applicant pool. The pre-period is crucial: it allows me to identify which users were already employed at the petitioning firm before the lottery and to restrict attention to those applicants for whom a LinkedIn-based match is feasible. The post-period is equally important because it allows me to track whether a worker remains at the sponsoring firm, switches firms, appears to leave the United States, or returns to education.
+% The main strength of Revelio for this project is that it observes both the pre-lottery and post-lottery histories of workers who are likely to be in the H-1B applicant pool. The pre-period is crucial: it allows me to identify which users were already employed at the petitioning firm before the lottery and to restrict attention to those applicants for whom a LinkedIn-based match is feasible. The post-period is equally important because it allows me to track whether a worker remains at the sponsoring firm, switches firms, appears to leave the United States, or returns to education.
 
-At the same time, Revelio is not a frictionless measure of labor-market outcomes. Profile coverage is selective, profile updates are not continuous, location fields are noisy, and some workers disappear from the platform for reasons unrelated to migration or employment. Those issues motivate two choices in the paper. First, the administrative records determine treatment status and the basic analysis sample; Revelio is used primarily for linkage and outcomes rather than for treatment assignment. Second, I treat probabilistic linkage uncertainty as an object to be propagated forward into the regression analysis rather than as a nuisance to be hidden.
+% At the same time, Revelio is not a frictionless measure of labor-market outcomes. Profile coverage is selective, profile updates are not continuous, location fields are noisy, and some workers disappear from the platform for reasons unrelated to migration or employment. Those issues motivate two choices in the paper. First, the administrative records determine treatment status and the basic analysis sample; Revelio is used primarily for linkage and outcomes rather than for treatment assignment. Second, I treat probabilistic linkage uncertainty as an object to be propagated forward into the regression analysis rather than as a nuisance to be hidden.
 
-\subsection{Analysis sample}
+\subsection{Linkage Strategy and Sample Construction}
+I briefly outline the process I use to link the deidentified H-1B administrative records (henceforth `H-1B' data) to the LinkedIn-based worker histories (henceforth `Revelio' data). A full account of the linkage pipeline is provided in Appendix \ref{sec:appendix_linkage}. The linkage proceeds in three stages. First, I build an employer crosswalk between the FOIA files and Revelio firms. Second, I impute the fields needed for person-level matching on the Revelio side. Finally, within each employer-year cell, I score candidate workers and carry forward the resulting match weights into the outcome analysis. Table \ref{tab:summary_h1b} report summary statistics for the full sample of H-1B applications as well as at various stages of the linkage process.
 
-The linked analysis is necessarily a subset of the raw H-1B applicant pool. The main sample focuses on applicants who plausibly were already employed at the sponsoring firm before the lottery. This restriction is both substantively natural and empirically valuable. It targets the margin for which winner-loser comparisons are most credible in LinkedIn data and excludes cases where the worker was likely abroad and therefore essentially unobservable absent a successful H-1B transition.
+\paragraph{Employer Crosswalk} The first problem is to align employers in the H-1B data with employer identifiers in Revelio. Both datasets feature duplicate employers, alternative or incorrect spellings, messy location data, and limited other information. I use a variety of deterministic matching methods (including name similarity and overlap scoring, location similarities and overlap, firm size, and industry information when available) to generate a set of candidate matches for each employer in the H-1B data. I then use an open-source large language model (LLM) to evaluate and score the candidate matches. The resulting crosswalk is many-to-many at the firm-year level. I am able to match 93\% of firm-years in the H-1B data to a Revelio firm. To make linkage more tractable, I further exclude firm-years with more than ten total H-1B applications or \textit{any} duplicate applications (as defined above). The resulting sample contains 114,206 firm-years, covering 296,677 applications. 
 
-In practice, the linked sample is shaped by three filters. First, the employer must be linkable from the FOIA files into Revelio. Second, there must exist a plausible pool of candidate workers at the linked employer around the lottery date. Third, the applicant-candidate match must pass the probabilistic-linkage filters described in Section \ref{sec:linkage}. Depending on the specification, I further restrict the sample by candidate multiplicity, match quality, or employer-level duplicate-registration patterns. The current linked sample is on the order of 100{,}000 applicants, but the final paper should report exact counts for the baseline, strict, and alternative samples in a transparent sample-construction table \placeholder{insert final Ns by sample variant}.
+% 158296 foia_firm_uid x lottery_year with some llm/direct match
+
+
+\paragraph{Revelio Imputation} Because the H-1B data are deidentified, the person-level match cannot use names directly. Instead, I match Revelio users to H-1B applications based on a set of demographic fields available for all applicants in the H-1B data: country of birth, year of birth, and gender. I impute these fields on the Revelio side using a combination of education histories, name-based predictions, and career histories. I also use education histories to impute variables advanced-degree exemption (ADE) status, an important control in the later analysis. I initally pull all Revelio users who report working in the U.S. at a sponsoring firm at any point starting in 2015, a pool of over 19 million users. After imputation, I exclude users from the linkage pool who report attending a U.S. postsecondary institution (eligible for OPT) but do not report attending high school in the United States (likely not immigrants).
+
+\paragraph{Individual Linkage}
+I begin the individual linkage by defining a candidate pool for each H-1B applicant. The candidate pool consists of Revelio users who I impute as plausibly being of the country of origin listed on the H-1B application, report having started work at the sponsoring firm up to three years prior to the lottery, and are still working at the firm at the time of the lottery.\footnote{Three years is the maximum allowable time graduates can work in the U.S. on OPT.} I further restrict to candidates with relatively close sex and year of birth agreement. Within this candidate pool, I compute an applicant-candidate score that combines the exact degree of agreement on U.S. work history, country of origin, year of birth, and sex. I then convert these scores into within-applicant weights that sum to one across candidates, and compute all outcomes as a weighted sum of individual user outcomes. My preferred matched sample contains 167,598 applications linked to at least one candidate with a positive match score, probabilistically matched to 744,945 Revelio users (average of 4.4 candidates per application). In my preferred specification, which includes firm-year fixed effects, I necessarily exclude firm-years with only one application, leaving a sample of 70,471 applications.
+
+\subsection{Alternate Samples and Match Validation}
+I use several variants of the main sample to probe the sensitivity of results to match quality and sample composition. Figure \ref{fig:h1b_summary_normplot} shows \textcolor{red}{....} 
+The baseline sample is the most inclusive, retaining all applications with at least one positive-score candidate. 
+
+\paragraph{`Pre-filt' Sample} The `pre-filtered' sample filters H-1B applications \textit{before} matching to exclude applicants from Southern Asia, Mandarin-speaking East Asia, and anglophone countries. High application rates from India and China make it difficult to distinguish between many similar candidates at the same firm, and make it difficult to identify non-Indian applicants from Southern Asia and non-Chinese applicants from Mandarin-speaking countries by name alone, while Anglophone countries are difficult to impute based on name alone. 
+
+\paragraph{One-to-One Sample} The `one-to-one' sample begins with the baseline sample and imposes a one-to-one matching restriction (within each lottery year) by implementing an algorithm that maximizes the joint match score across all applications. 
+
+\paragraph{Strict Sample(s)} Strict samples impose post-hoc criteria on the match weights to retain only applications with high composite scores. Figure \ref{fig:h1b_summary_normplot} displays the Q50 strict sample, which retains applications whose top candidate meets the criteria and has a composite score above the 50th percentile among all top candidates.
+
+\paragraph{Match Quality Validation} For lottery winners who subsequently file an H-1B petition, I am able to observe more details in the H-1B data. I subset my sample to lottery winners and compare the FOIA-observable characteristics of their petitions to the corresponding fields in their linked Revelio profiles. I can compare the highest education level attained at the time of application, the field of study listed, the job title (for a subset of petitioners), and the U.S. institution attended for applicants in the ADE lottery. Note that match rates are not expected to be perfect even for true matches, and even using fuzzy matching, since both FOIA and Revelio fields are noisy and may not correspond directly to each other (e.g. Computer Science may be written as CS, Comp Sci, or EE/CS). Table \ref{tab:match_quality} reports weighted match rates across sample variants, showing that match quality is significantly higher for the one-to-one and strict samples than for the baseline or pre-filtered samples.
+
+
+% ---------------------------------------------------------------
+% SUMMARY STATS — TABLE VERSION
+% Comment out either table and swap in the figure below instead.
+% ---------------------------------------------------------------
+\input{../../code/output/summary_stats/h1b_summary_table.tex}
+
+% \input{../../code/output/summary_stats/rev_summary_table.tex}
+
+% ---------------------------------------------------------------
+% SUMMARY STATS — FIGURE VERSION (normalized horizontal bar chart)
+% Each bar shows the z-score of a statistic for that sample
+% relative to the cross-sample mean and std — so all outcomes
+% (shares, averages, counts) are on a common scale.
+% Swap in place of the tables above if preferred.
+% ---------------------------------------------------------------
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.82\textwidth]{../../code/output/summary_stats/h1b_summary_normplot.pdf}
+\caption{Summary Statistics: H-1B Applications. Each bar shows the z-score
+  of that statistic for the given sample relative to the cross-sample mean and
+  standard deviation (mean\,=\,0, std\,=\,1 across samples).}
+\label{fig:h1b_summary_normplot}
+\end{figure}
+
+% \begin{figure}[htbp]
+% \centering
+% \includegraphics[width=0.82\textwidth]{../../code/output/summary_stats/rev_summary_normplot.pdf}
+% \caption{Summary Statistics: Revelio Users. Each bar shows the z-score
+%   of that statistic for the given sample relative to the cross-sample mean and
+%   standard deviation (mean\,=\,0, std\,=\,1 across samples).}
+% \label{fig:rev_summary_normplot}
+% \end{figure}
+
+% The baseline sample retains all applications that can be linked to at least one Revelio candidate with a positive match score, excluding only employer-year cells with duplicate applications.
+
+% A key upstream restriction is that the Revelio pre-processing retains only employer-year cells with at most ten total H-1B applications and no duplicate registrations; cells with larger application volumes are excluded because the candidate pool in Revelio becomes too diffuse for reliable individual-level matching. The preferred analysis sample (\textit{us\_educ}) further restricts candidates to those with confirmed U.S.\ postsecondary education (\texttt{us\_educ\,=\,1}), targeting the OPT-eligible population most directly. Three additional variants probe the sensitivity of results to match quality and sample composition. Table~\ref{tab:summary_h1b} and Table~\ref{tab:summary_rev} report summary statistics for the H-1B applicant pool and Revelio user pool across variants.
+
+% \begin{itemize}[noitemsep, topsep=2pt]
+%   \item \textit{Mult\,$\leq$\,4}: retains only applicants whose top-four candidates by composite score capture all of their match weight, excluding employer-year cells where the candidate pool is so large that the weights are diffuse. This directly limits attenuation from high-multiplicity cells.
+
+%   \item \textit{Pre-filtered}: restricts the FOIA applicant pool to countries outside of Southern Asia and outside a set of high-multiplicity anglophone and East Asian countries (Canada, United Kingdom, Australia, Ireland, New Zealand, China, Taiwan, Singapore). Applicants from these countries tend to generate very large candidate pools---reflecting both high H-1B application rates and high Revelio coverage---leading to diffuse weights and attenuated estimates.
+
+%   \item \textit{Strict}: applies a set of post-hoc high-confidence criteria to the rank-1 match: $weight\_norm \geq 0.90$ (the top candidate holds at least 90\% of total score mass), composite score $\geq 0.55$, firm quality multiplier $\geq 0.80$, country score $\geq 0.50$, and a non-imputed birth year. This sample maximizes precision at the cost of coverage.
+% \end{itemize}
+
+% \subsection{Linkage Validation}
+% \label{sec:linkage_quality}
+
+% As an ex-post check on the individual linkage, I compare FOIA-observable characteristics of lottery winners (for whom detailed petition data are available) to the corresponding fields in their linked Revelio profiles. Match rates are computed as weighted means of binary agreement indicators, using $weight\_norm$ as weights. Table~\ref{tab:match_quality} reports weighted match rates across sample variants. Match quality rises consistently with the match-weight quantile, confirming that $weight\_norm$ captures genuine linking confidence rather than noise. Match rates are substantially higher in the strict sample, where a dominant top candidate is required, than in the baseline --- and the strict-sample rates are broadly comparable to rates reported in similar probabilistic-linkage validation exercises in the literature.
+
+\begin{table}[htbp]
+\centering
+\caption{Ex-Post Match Quality Across Sample Variants}
+\label{tab:match_quality}
+\footnotesize
+\input{/home/yk0581/output/reg/tables/paper_match_quality.tex}
+\begin{tablenotes}
+\item \textit{Notes}: Weighted match rate = weighted mean of a binary agreement indicator using $weight\_norm$ as weights. FOIA cov.\ reports the share of applications in the sample with a non-missing FOIA validation field for that row. \textit{Education level}: agreement on degree type (doctorate / master's / bachelor's / other). \textit{Institution}: Levenshtein + Jaro-Winkler fuzzy match ($\geq$0.85) on institution name, restricted to ADE applicants. \textit{Field exact}: exact match on cleaned field-of-study strings. \textit{Job title}: fuzzy match ($\geq$0.75) between FOIA title and top-20 Revelio titles for that applicant. \textit{Ed.\ + any other}: education-level match and at least one of institution, field exact, or job title agrees. Pre-filtered excludes Southern Asia, East Asia, UK, Canada, Australia. One-to-one uses optimal bipartite matching. Strict Q50 restricts to applicants whose top-candidate score exceeds the 50th percentile threshold.
+\end{tablenotes}
+\end{table}
+
+
 
 \subsection{Outcomes}
+\label{sec:outcomes}
 
-The main outcomes are drawn from Revelio position and education histories. The paper's central retention outcome is an indicator for whether the linked worker is still employed by the sponsoring firm one, two, or three years after the lottery. The corresponding migration outcome is an indicator for whether the worker is observed in the United States over the same horizon. Additional outcomes include switching firms, promotion-like within-firm job changes, new education enrollment, and compensation measures based on Revelio's imputed salary fields.
+All outcomes are drawn from Revelio position and education histories and are measured as snapshots one, two, and three years after the lottery year (denoted with suffixes $t = 1, 2, 3$).\footnote{Three-year outcomes are available only for lottery years 2020--2021 given data coverage.} I organize outcomes into four groups, each forming an exhaustive and mutually exclusive partition within its domain.
 
-Two points are useful to emphasize in the final draft. First, the outcome definitions are designed to be conservative with respect to noisy profile timing. For example, same-firm retention is defined at the employer level rather than requiring a specific title match. Second, the ``in the U.S.'' outcome is an observed-location measure rather than a direct legal-status measure. It should therefore be presented as evidence on observed geographic attachment, not as a literal measure of immigration status. Appendix \ref{sec:appendix_linkage} describes the underlying construction in more detail.
+\paragraph{Work status.} The primary employment outcomes partition each applicant's status at horizon $t$ into three mutually exclusive states: \textit{still at firm} (an active position at the sponsoring firm is observed), \textit{different firm} (an active position at any other employer is observed, with no active position at the sponsoring firm), and \textit{other} (no active position is observed at any employer). By construction, $\textit{still\_at\_firm}_t + \textit{diff\_firm}_t + \textit{other}_t = 1$. The \textit{different firm} outcome is further decomposed into positions that started after the lottery (\textit{new\_diff\_firm}) and positions that started before the lottery (\textit{old\_diff\_firm}).
+
+\paragraph{Within-firm mobility.} Conditional on \textit{still at firm} at horizon $t$, I decompose same-firm stayers into those who have started a new post-lottery position at the firm (\textit{same\_firm\_new\_position}, proxying for within-firm advancement) and those who remain in the same pre-lottery position. The latter is further split by whether the position's end date is null (imputed as ongoing) or explicitly recorded as non-null. Regressions on within-firm outcomes use only the subsample with \textit{still\_at\_firm} = 1 at the corresponding horizon.
+
+\paragraph{Location.} Location outcomes are constructed from the location fields in position and education histories. At each horizon $t$, a worker is classified as \textit{in the U.S.} if any active position or education spell lists a U.S.\ location, \textit{in home country} if the highest-priority active record lists the applicant's country of birth, and \textit{non-U.S.\ non-home} if an active record in a third country is observed. Workers with no active records or no location information fall into a fourth residual category (\textit{location null}); these four states form an exhaustive partition.
+
+\paragraph{Education.} Education outcomes distinguish between \textit{new education} (an active education spell whose start date falls after the lottery year) and \textit{continuing education} (an active spell that began before the lottery). Workers with no active education spell are the residual category. Together with the residual, these two indicators form an exhaustive partition of education status at each horizon.

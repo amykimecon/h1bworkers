@@ -1,46 +1,50 @@
-This is BibTeX, Version 0.99d (TeX Live 2025)
+This is BibTeX, Version 0.99d (TeX Live 2020)
 Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
 The top-level auxiliary file: _main.aux
 The style file: plainnat.bst
 Database file #1: references.bib
-You've used 14 entries,
+Warning--entry type for "Mider2024H1B" isn't style-file defined
+--line 465 of file references.bib
+Warning--empty year in Mider2024H1B
+You've used 41 entries,
             2773 wiz_defined-function locations,
-            670 strings with 7654 characters,
-and the built_in function-call counts, 5296 in all, are:
-= -- 488
-> -- 300
-< -- 16
-+ -- 106
-- -- 90
-* -- 385
-:= -- 872
-add.period$ -- 52
-call.type$ -- 14
-change.case$ -- 73
-chr.to.int$ -- 12
-cite$ -- 28
-duplicate$ -- 230
-empty$ -- 406
-format.name$ -- 112
-if$ -- 1081
-int.to.chr$ -- 3
+            824 strings with 12800 characters,
+and the built_in function-call counts, 17258 in all, are:
+= -- 1597
+> -- 908
+< -- 32
++ -- 317
+- -- 273
+* -- 1363
+:= -- 2709
+add.period$ -- 145
+call.type$ -- 41
+change.case$ -- 216
+chr.to.int$ -- 38
+cite$ -- 83
+duplicate$ -- 752
+empty$ -- 1432
+format.name$ -- 328
+if$ -- 3576
+int.to.chr$ -- 4
 int.to.str$ -- 1
-missing$ -- 2
-newline$ -- 88
-num.names$ -- 56
-pop$ -- 135
+missing$ -- 21
+newline$ -- 234
+num.names$ -- 164
+pop$ -- 406
 preamble$ -- 1
-purify$ -- 58
+purify$ -- 173
 quote$ -- 0
-skip$ -- 182
+skip$ -- 565
 stack$ -- 0
-substring$ -- 78
-swap$ -- 17
-text.length$ -- 6
+substring$ -- 631
+swap$ -- 53
+text.length$ -- 8
 text.prefix$ -- 0
 top$ -- 0
-type$ -- 154
-warning$ -- 0
-while$ -- 46
+type$ -- 451
+warning$ -- 1
+while$ -- 164
 width$ -- 0
-write$ -- 204
+write$ -- 571
+(There were 2 warnings)

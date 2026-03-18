@@ -1,60 +1,116 @@
+% !TEX root = _main.tex
 \section{Results}
 \label{sec:results}
 
-% Suggested table order for a first full draft:
-% Table 1: Sample balance by lottery outcome within ADE status
-% Table 2: Main retention and U.S.-presence effects
-% Table 3: Career and education outcomes
-% Table 4: Heterogeneity by OPT runway / time since graduation
-% Table 5: Robustness across linkage-quality samples
-
-This section is intentionally structured as a template for the full results discussion. The empirical design and the likely interpretation of the estimates are laid out below, but the detailed tables and figures can be inserted once the preferred sample and exact specifications are finalized.
-
 \subsection{Empirical specification}
 
-The main specification compares lottery-selected and non-selected applicants in the linked sample, conditioning on advanced-degree-exempt status because ADE applicants face a different lottery assignment process. Let $Win_i$ indicate lottery selection for applicant $i$, and let $ADE_i$ indicate eligibility for the advanced-degree exemption. For an applicant-level outcome $y_i$, the baseline estimating equation is
+The main specification compares lottery-selected and non-selected applicants in the linked sample, conditioning on advanced-degree-exempt status because ADE applicants face a different lottery assignment process. For applicant $i$ in lottery year $t$ at firm $c$, I estimate:
 \begin{equation}
 \label{eq:mainreg}
- y_i = \beta_0 + \beta_1 Win_i + \beta_2 ADE_i + \beta_3 (Win_i \times ADE_i) + \alpha_{f(i),s(i)} + \varepsilon_i,
+ y_{ict}^s = \beta_0 + \beta_1 Win_{ict} + \beta_2 ADE_{it} + \gamma_{ct} + \varepsilon_{ict}^s,
 \end{equation}
-where $\alpha_{f(i),s(i)}$ denotes firm-by-lottery-year fixed effects in the preferred specification. In the current code, outcomes are first aggregated to the applicant level using the probabilistic match weights described in Section \ref{sec:linkage}, and standard errors are clustered at the firm level.
+where $y_{ict}^s$ indicates the outcome of interest measured $s$ years after the lottery year $t$, $Win_{ict}$ indicates lottery selection for applicant $i$ in year $t$ with firm $c$, $ADE_{it}$ indicates eligibility for the advanced-degree exemption, and $\gamma_{ct}$ denotes firm-by-lottery-year fixed effects. Outcomes are aggregated to the applicant level using the probabilistic match weights described in Section~\ref{sec:linkage}, and standard errors are clustered at the firm level. The parameter $\beta_1$ captures the effect of winning the H-1B visa lottery on outcome $y_{ict}$. The key identifying assumption is that, conditional on ADE status and firm-lottery-year cells, lottery selection is as good as random and does not differentially affect the probability of appearing in the matched sample. The fixed effects control for any time-varying firm-level factors that could confound the relationship between lottery selection and outcomes.
 
-The parameter $\beta_1$ captures the effect of winning for regular-cap applicants, while $\beta_1+\beta_3$ captures the effect for ADE applicants. In practice, I recommend presenting the regular-cap estimate, the ADE estimate, and a pooled marginal effect if the two are similar enough to justify a summary statistic. A short subsection or appendix table should also document balance on pre-lottery observables within ADE groups, since that is the most transparent way to reassure readers that the lottery randomization is behaving as expected in the linked sample.
+My main outcomes of interest relate to individual location, employer switching, `promotions', and education enrollment. For location, I measure whether the worker is observed in the United States or in their country of origin two years post-lottery. For employer switching, I measure whether the worker has an active position at the same firm or a different firm than the sponsoring firm two years post-lottery. For promotions, I measure whether the worker has started a new position at the same firm after the lottery, among applicants who subsequently remained at the same firm after the lottery. For education, I measure whether the worker has an active education spell started after the lottery. These outcomes capture key dimensions of labor market attachment and mobility that may be affected by lottery selection.
+% Table~\ref{tab:balance} documents pre-lottery covariate balance by winner status within ADE groups. For ADE applicants, gender shows no significant imbalance ($p = 0.108$), while age and years since graduation are slightly lower among winners, likely reflecting mechanical sample composition from lottery stratification. For regular-cap applicants, winners are more likely to be at high-reputation employers, consistent with higher application rates at such firms rather than differential lottery outcomes. Overall, the balance is broadly consistent with quasi-random assignment conditional on ADE status and firm-lottery-year cells.
 
-\subsection{Main retention effects}
+% \begin{table}[htbp]
+% \centering
+% \caption{Pre-Lottery Covariate Balance by Winner Status}
+% \label{tab:balance}
+% \footnotesize
+% \begin{tabular}{lrrrrrr}
+% \toprule
+% & \multicolumn{3}{c}{ADE = 0} & \multicolumn{3}{c}{ADE = 1} \\
+% \cmidrule(lr){2-4}\cmidrule(lr){5-7}
+% Variable & Loser & Winner & p-val & Loser & Winner & p-val \\
+% \midrule
+% Age at lottery                    & 30.946 & 30.291 & 0.000*** & 30.954 & 30.265 & 0.000*** \\
+% Advanced degree eligible          & 0.419  & 0.497  & 0.000*** & \multicolumn{3}{c}{(full sample)} \\
+% Years since graduation            & 1.950  & 1.740  & 0.000*** & 2.021  & 1.824  & 0.000*** \\
+% Female                            & 0.385  & 0.402  & 0.000*** & 0.416  & 0.423  & 0.108    \\
+% \# applications (multiplicity)    & 3.336  & 3.360  & 0.250    & 3.377  & 3.198  & 0.000*** \\
+% \# unique countries (match)       & 2.029  & 2.013  & 0.154    & 1.902  & 1.813  & 0.000*** \\
+% High-reputation employer          & 0.307  & 0.344  & 0.000*** & 0.338  & 0.375  & 0.000*** \\
+% \midrule
+% $N$ (ADE=0: losers / winners)     & 38,502 & 22,480 & & & & \\
+% $N$ (ADE=1: losers / winners)     & & & & 27,810 & 22,230 & \\
+% \bottomrule
+% \end{tabular}
+% \begin{tablenotes}
+% \item \textit{Notes}: Sample is the U.S.-educated linked sample (N = 111,022). Loser and Winner columns report means of pre-lottery covariates; p-val is from a two-sample $t$-test. ADE = Advanced Degree Exempt. \sym{*} $p<0.10$, \sym{**} $p<0.05$, \sym{***} $p<0.01$.
+% \end{tablenotes}
+% \end{table}
 
-The first set of outcomes should focus on same-firm retention one, two, and three years after the lottery. These are the cleanest outcomes conceptually because they map directly onto the employer-tie embedded in the H-1B program. The natural table structure is a column for each horizon and a row for the regular-cap and ADE effects. A companion event-study-style figure could also be useful if the relative-year outcome construction is expanded beyond the first three post-lottery years.
+\subsection{Main results}
 
-The current draft's headline result is that lottery winners are modestly more likely to remain at the sponsoring employer. A concise interpretation paragraph could read as follows once the exact table is inserted: winning the H-1B lottery increases short- to medium-run attachment to the sponsoring firm, but the effect is small relative to baseline retention. That pattern is consistent with the idea that H-1B status increases employer-specific attachment, yet many non-selected workers also remain at the firm for at least some time because they continue under OPT or another temporary arrangement. \placeholder{Insert preferred retention table and exact magnitudes.}
+Table~\ref{tab:main_results} presents the main regression estimates for six outcomes measured two years after the lottery, using the U.S.-educated linked sample (N = 70,471).\footnote{Of 111,022 applications in the U.S.-educated linked sample, 40,551 are singletons---the only application in their firm-year cell---and are dropped because firm-year fixed effects are not identified for them.} All regressions include firm-by-lottery-year fixed effects; standard errors are clustered by firm.
 
-\subsection{Remaining in the United States}
+The point estimates for lottery winners are positive and statistically significant across several key outcomes. Winning the lottery raises the probability of being observed in the United States two years post-lottery by 0.53 percentage points (0.6\%\sym{***}) and reduces the probability of appearing in one's home country by 0.14 percentage points (6.4\%\sym{**}). On the employment margin, winners are 0.44 percentage points more likely to remain at the sponsoring firm (0.8\%\sym{**}) and equally less likely to hold a new position at a different employer (1.0\%\sym{**}), consistent with the visa reducing employer mobility. Winners are also marginally more likely to have enrolled in new education post-lottery (1.2\%\sym{*}). By contrast, the conditional probability of a new within-firm position---among applicants who remain at the same firm---shows no significant winner effect (0.1\%, N = 8,350).
 
-The next set of results should turn to whether the worker remains observed in the United States. This outcome is particularly important because many policy arguments implicitly treat H-1B rationing as a yes-or-no margin for U.S. employment. The current estimates suggest that winners are more likely to remain in the United States two years after the lottery, but again the magnitudes are modest.
+\begin{table}[htbp]
+\centering
+\caption{Main Effects of H-1B Lottery Selection: Two Years Post-Lottery}
+\label{tab:main_results}
+\footnotesize
+\input{/home/yk0581/output/reg/tables/paper_main_results.tex}
+\begin{tablenotes}
+\item \textit{Notes}: OLS estimates. Sample: U.S.-educated linked sample (N = 70,471). All outcomes measured two years post-lottery. \textit{In U.S.} = observed in the United States (from position or education location field). \textit{In home ctry} = observed in country of origin. \textit{Same firm} = indicator for active position at sponsoring firm. \textit{New pos.\ (cond.)} = new post-lottery position at same firm, estimated on the subsample with \textit{Same firm} = 1 (N = 8,350). \textit{New diff.\ firm} = active position at a different firm started after lottery. \textit{New educ.} = active education spell started after lottery. All regressions include firm-by-lottery-year fixed effects. Standard errors (in parentheses) clustered by firm. \sym{*} $p<0.10$, \sym{**} $p<0.05$, \sym{***} $p<0.01$.
+\end{tablenotes}
+\end{table}
 
-A useful way to write this section is to emphasize both the sign and the size of the estimates. The sign is informative: winning stabilizes U.S. attachment. The size is equally informative: the fact that the effect is not larger suggests that a substantial share of lottery losers continue to work in the United States through other channels. That interpretation should be tied back to OPT, repeat lottery participation, and the possibility of alternative legal statuses. \placeholder{Insert U.S.-presence estimates and supporting figure or table.}
+% \subsection{Remaining in the United States}
 
-\subsection{Career adjustment: firm switching, promotion, and education}
+% Columns (1) and (2) of Table~\ref{tab:main_results} capture the geographic margin of the lottery. Winners are 0.53 percentage points more likely to be observed in the United States two years post-lottery ($p < 0.01$) and 0.14 percentage points less likely to be observed in their home country ($p < 0.05$). Together, these effects indicate that winning the visa lottery meaningfully stabilizes U.S. geographic attachment: losers are both less likely to remain in the United States and more likely to return home.
 
-The third block of results can examine mechanisms and adjustment margins. The most natural outcomes are switching employers, within-firm promotion-like job changes, enrollment in additional education, and compensation measures. These outcomes help distinguish between several interpretations of the main findings.
+% That the effects are not larger is consistent with a substantial share of lottery losers finding alternative pathways to remain in the United States, most plausibly through continued OPT, STEM-OPT extensions, cap-exempt employer arrangements, or repeat lottery participation in subsequent years. The pre-filtered and strict-threshold samples in Table~\ref{tab:robustness} yield larger and more precisely estimated effects, consistent with attenuation from measurement error in the baseline.
 
-For example, if losers are less likely to stay at the original firm but are not much less likely to remain in the United States, then adjustment may occur largely through employer switching. If losers are more likely to return to school, that would support the view that additional education is used as a way to preserve legal status or buy time for a later H-1B attempt. If winners exhibit lower rates of new education but similar wage paths, that would suggest the main role of the H-1B is legal stability rather than an immediate productivity or pay shock. \placeholder{Insert mechanism table once preferred outcomes are finalized.}
+% \subsection{Career adjustment: firm switching, promotion, and education}
 
-\subsection{Heterogeneity by remaining OPT runway}
-
-A particularly important heterogeneity dimension is the amount of time the worker appears to have remaining before OPT exhaustion. The code already constructs a measure of time since graduation, which is a natural proxy for remaining OPT runway. The prediction is straightforward: effects of winning should be larger for workers who are closer to the end of their allowable OPT period.
-
-I recommend presenting this in two ways. First, split the sample into broad groups, such as workers with short versus long remaining runway. Second, report an interaction specification in which lottery selection is interacted with an indicator for being near the end of OPT eligibility. This section is likely to be one of the most persuasive pieces of evidence that the modest average effects are not purely driven by noise. If the treatment effect grows when alternative authorization is scarce, that is exactly what the institutional context would predict. \placeholder{Insert heterogeneity table/figure.}
+% Columns (3), (5), and (6) of Table~\ref{tab:main_results} speak to the career adjustment margins. Winning the lottery increases two-year retention at the sponsoring firm by 0.44 percentage points ($p < 0.05$) and reduces new employment at a different firm by an equal and opposite amount ($p < 0.05$). This symmetric pattern implies that the visa constrains employer mobility: winners are locked into the sponsoring firm, while losers who remain in the United States are more likely to switch employers. New education enrollment is modestly higher among winners ($+$0.42 pp, $p < 0.10$), though the magnitude is small. Among those who remain at the sponsoring firm, however, there is no significant effect on the probability of starting a new within-firm position (column 4), suggesting the visa does not accelerate within-firm career progression.
 
 \subsection{Robustness to linkage quality and sample selection}
 
-Given the novelty of the linkage, the robustness section should be prominent rather than perfunctory. At minimum, the final paper should compare estimates across: (i) the baseline weighted sample, (ii) high-precision or strict matches, (iii) samples that cap candidate multiplicity, and (iv) employer-year cells with especially complete applicant coverage. A compact summary table with the same headline outcome repeated across linkage variants is often more convincing than a long sequence of appendix tables.
+Table~\ref{tab:robustness} reports the winner coefficient for all six outcomes across five sample variants: the U.S.-educated baseline, the one-to-one sample (optimal bipartite matching that assigns each applicant to at most one Revelio candidate), the pre-filtered sample (excluding applicants from countries with high candidate multiplicity), and three strict-threshold samples that progressively restrict to higher-quality matches (Q25, Q50, and Q75 score thresholds). The key pattern is that winner effects grow monotonically with sample quality, consistent with attenuation from match error in noisier baseline cells.
 
-This is also the right place to address the concern that the linked sample may not be representative of all H-1B applicants. The key distinction is between internal and external validity. Internal validity requires that, conditional on ADE status, winning does not differentially affect inclusion in the matched sample. External validity concerns which subset of applicants the paper speaks to most directly---namely, workers who were already employed and sufficiently visible in LinkedIn data before the lottery. The discussion should be explicit that the paper's most credible interpretation is for that pre-H-1B worker margin rather than for all potential H-1B beneficiaries worldwide.
+In the pre-filtered sample (N = 10,425), winning increases two-year firm retention by 2.8 percentage points ($p < 0.01$) and reduces new employer switching by an equal amount ($p < 0.01$); the U.S.-presence effect is 1.0 percentage point ($p < 0.05$). In the strictest sample (Q75, N = 15,218), the U.S.-presence effect reaches 2.0 percentage points ($p < 0.01$), retention rises by 2.1 percentage points ($p < 0.05$), and the conditional within-firm new position effect becomes negative and significant ($-$3.0 pp, $p < 0.05$). These results support the interpretation that the baseline estimates, while already significant, are attenuated by measurement error and understate the true lottery effects for well-matched applicants.
 
-\subsection{Interpreting small magnitudes}
+The internal validity of the research design requires that lottery selection not differentially affect the probability of appearing in the matched sample. The external validity caveat is explicit: the paper speaks to U.S.-educated H-1B applicants already employed at sponsoring firms and visible in LinkedIn-based data before the lottery, rather than to all H-1B applicants worldwide.
 
-The conclusion of the results section should directly confront the central substantive fact of the paper: the effects are positive and statistically meaningful, but small. I would frame the interpretation around two non-exclusive explanations.
+\begin{table}[htbp]
+\centering
+\caption{Robustness: Winner Effects Across Sample Variants}
+\label{tab:robustness}
+\footnotesize
+\input{/home/yk0581/output/reg/tables/paper_robustness.tex}
+\begin{tablenotes}
+\item \textit{Notes}: Each cell reports the OLS estimate of $\hat\beta_1$ (winner effect) from equation~\eqref{eq:mainreg} with standard errors clustered by firm in parentheses. All regressions include firm-by-lottery-year fixed effects. Outcomes measured two years post-lottery; see Table~\ref{tab:main_results} for definitions. One-to-one uses optimal bipartite matching (Jonker--Volgenant) to assign each applicant to at most one Revelio candidate. Pre-filtered excludes applicants from countries with high candidate multiplicity (Southern Asia, East Asia, UK, Canada, Australia). Strict (Q25/Q50/Q75) restricts to applicants whose match quality score exceeds the 25th, 50th, or 75th percentile threshold, respectively. \sym{*} $p<0.10$, \sym{**} $p<0.05$, \sym{***} $p<0.01$.
+\end{tablenotes}
+\end{table}
 
-First, probabilistic linkage error attenuates reduced-form treatment effects. Even if the treatment effect on the true matched worker is moderate, mixing in incorrect candidates will mechanically compress the estimate toward zero. Second, and more interestingly, the small estimates appear to be economically real. Among U.S.-trained applicants already employed under OPT, the H-1B lottery is often a retention lottery rather than an entry lottery. Losing the lottery increases separation risk and the risk of leaving the United States, but many workers still find a way to remain. That interpretation is consistent with the heterogeneity by OPT runway and with robustness checks on higher-quality matches.
 
-A short final subsection or paragraph can then bridge to the conclusion: for this subgroup of applicants, the H-1B matters, but its main effects are on stability and persistence rather than on an immediate binary transition from employed in the United States to absent from the U.S. labor market.
+
+\subsection{Heterogeneity and Mechanisms}
+
+A particularly important heterogeneity dimension is the amount of time the worker appears to have remaining before OPT exhaustion. The code constructs a measure of time since graduation, which is a natural proxy for remaining OPT runway. The prediction is straightforward: effects of winning should be larger for workers who are closer to the end of their allowable OPT period. If the treatment effect grows when alternative authorization is scarce, that is exactly what the institutional context predicts.
+
+Table~\ref{tab:het_same_firm} presents heterogeneous effects on two-year same-firm retention (\textit{Same firm}) across two dimensions: years since graduation at the time of the lottery (columns 1--4) and employer reputation class (columns 5--6). The graduation-year subgroups partition applicants by $\Delta g$, defined as lottery year minus one minus last graduation year; $\Delta g = 0$ and $\Delta g = 1$ correspond to workers still within their initial two-year OPT window, while $\Delta g \geq 2$ covers those on STEM-OPT extensions or other bridging arrangements. The reputation subgroups split by whether the sponsoring firm has no recorded reputation score (\textit{norep}) or a high reputation score (\textit{highrep}).
+
+\begin{table}[htbp]
+\centering
+\caption{Heterogeneous Effects on Two-Year U.S.\ Retention by Years Since Graduation and Employer Reputation}
+\label{tab:het_same_firm}
+\footnotesize
+\input{/home/yk0581/output/reg/tables/paper_het_in_us2.tex}
+\begin{tablenotes}
+\item \textit{Notes}: OLS estimates of $\hat\beta_1$ (winner effect) from equation~\eqref{eq:mainreg}. Outcome: \textit{In U.S.} (active U.S.\ position two years post-lottery). Each panel corresponds to a sample variant; see Table~\ref{tab:robustness} for definitions. One-to-one uses optimal bipartite matching to assign each applicant to at most one Revelio candidate. Strict (Q75) restricts to applicants whose match quality score exceeds the 75th percentile threshold. Within each panel, columns (1)--(4) restrict to applicants with $\Delta g$ equal to the indicated value (rounded), where $\Delta g = $ lottery year $-$ 1 $-$ last graduation year; columns (5)--(6) restrict to applicants at no-reputation and high-reputation employers, respectively. All regressions include firm-by-lottery-year fixed effects. Standard errors (in parentheses) clustered by firm. \sym{*} $p<0.10$, \sym{**} $p<0.05$, \sym{***} $p<0.01$.
+\end{tablenotes}
+\end{table}
+
+\subsection{Interpreting the magnitudes}
+
+The central finding is that winning the H-1B lottery significantly increases U.S. presence and retention at the sponsoring firm while reducing new employer mobility. Two features of the results merit emphasis.
+
+First, the baseline effects are likely attenuated by probabilistic linkage error. Even if the true individual-level effect is larger, mixing correct and incorrect candidate links in the weighted average compresses estimates toward zero. The monotone increase in estimated effects as match quality improves---from 0.53 pp (In U.S.) in the baseline to 2.0 pp in the Q75 strict sample---is consistent with this interpretation. The pre-filtered winner effect on two-year same-firm retention (2.8 pp) is more than six times the baseline point estimate (0.44 pp), suggesting the baseline substantially understates the true effect.
+
+Second, even the baseline effects are economically meaningful for a subpopulation of U.S.-educated workers whose visa status is genuinely at stake. Among U.S.-trained workers already employed under OPT, losing the lottery raises separation risk and the probability of leaving the United States, but many losers find ways to remain through STEM-OPT extensions, cap-exempt employment, or repeat lottery applications. The H-1B is thus best characterized as a \textit{stability lottery} rather than an entry lottery for this subgroup: winning reduces the risk of disruption and locks workers into the sponsoring firm, but does not transform a worker who would otherwise leave into one who stays. The largest effects appear for applicants with limited alternative pathways---those visible in higher-quality linked samples---for whom the lottery outcome is more binding.

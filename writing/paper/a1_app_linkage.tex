@@ -1,132 +1,117 @@
 \clearpage
-\section{Detailed Linkage Appendix}
+\section{Linking H-1B Applications to Revelio Profiles}
 \label{sec:appendix_linkage}
 
-This appendix provides a more detailed description of the linkage pipeline used to connect deidentified H-1B administrative records to Revelio worker histories. The discussion is written to be close to the current code base, so some thresholds and sample labels should be updated if the final production code changes.
+This appendix gives a self-contained description of the linkage used to connect deidentified H-1B lottery applications to LinkedIn-based worker histories from Revelio. The central difficulty is that the administrative H-1B records contain no names or personal identifiers for the full applicant pool. A global search over all Revelio users would therefore be too noisy to be useful. The linkage becomes feasible because many recent cap-subject applicants are already working for the sponsoring employer when they enter the lottery, often under Optional Practical Training (OPT). I use that pre-lottery employment relationship as the anchor for the match.
 
-\subsection{A. Employer crosswalk construction}
+The linkage proceeds in three steps. First, I align employers across the two datasets. Second, I construct on the Revelio side the limited set of demographic and education variables that can be compared to the administrative records. Third, within each sponsoring employer-year cell, I rank plausible worker profiles and carry the resulting match uncertainty forward into the analysis through applicant-level match weights rather than forcing a deterministic one-to-one match.
 
-The employer-linkage problem is solved before any person-level matching takes place. The current pipeline builds a firm-year crosswalk from the FOIA employer identifier (\texttt{foia\_firm\_uid}) to Revelio company identifiers (\texttt{rcid}) using three sources of evidence:
+\subsection{A. Employer crosswalk and in-scope employer-years}
 
-\begin{enumerate}[label=\arabic*.]
-    \item \textbf{Exact or legacy validated matches.} Previously validated FOIA-to-Revelio matches are retained directly and merged into the current employer-year panel.
-    \item \textbf{Fuzzy candidate generation.} Cleaned employer names are compared across the FOIA and Revelio data using string similarity, tax identifiers when available, and lottery year.
-    \item \textbf{LLM-assisted review of ambiguous firm matches.} Ambiguous cases are reviewed using an LLM workflow that labels whether the candidate Revelio firm is a valid match. This step is restricted to firm identity resolution; it does not operate on worker identities.
-\end{enumerate}
+The first stage creates a crosswalk between employers in the H-1B files and employers in Revelio. This stage uses cleaned employer names, employer tax identifiers where available, location and industry information, and a stock of previously validated firm links. Straightforward cases are kept directly. Ambiguous cases are narrowed using fuzzy comparison rules and then reviewed with a large language model that determines whether a candidate Revelio company corresponds to the same economic employer. The model is used only for firm identity resolution, such as rebrandings, spelling variants, and subsidiary relationships; it is not used to identify individual workers.
 
-The resulting crosswalk allows multiple valid \texttt{rcid} values for a given employer-year. In the current implementation, the code keeps one best row per employer-year-\texttt{rcid} combination while also ranking \texttt{rcid}s by match quality. This flexibility is important because vendor company identifiers may split or consolidate the same economic employer across years.
+The employer crosswalk is intentionally many-to-many at the employer-year level. A single economic employer can appear under more than one vendor-specific company identifier in Revelio, and collapsing those identifiers too early would create false non-matches downstream. The pipeline therefore carries forward all valid employer-year links and later uses workers' own position histories to give more weight to the most credible employer mapping.
 
-\subsection{B. Defining the linked-worker universe in Revelio}
+Before any person-level matching takes place, the code also defines a conservative employer-year sample. The current working sample keeps only employer-year cells with no duplicate registrations and at most ten H-1B applications. This restriction removes the highest-multiplicity cells, where individual matching is least reliable and where outsourcing-style employers generate especially diffuse candidate pools.
 
-The linkage deliberately focuses on workers who are likely to be in-scope for the H-1B lottery. The current Revelio cleaning script begins by restricting attention to users attached to employers in the in-sample H-1B employer-year panel and to U.S.-based positions beginning after a conservative calendar cutoff. It then cleans position histories, imputes end dates for some open positions, and removes duplicate profiles when they appear to represent the same person.
+\subsection{B. Preparing Revelio profiles for matching}
 
-The duplicate-profile step is conservative. Profiles are considered duplicates only when they share a normalized name and employer identifier and also satisfy at least one overlap condition: overlapping position dates, overlapping education dates, or common school names. Within confirmed duplicate groups, the profile with the richer position history is kept. This design tries to avoid collapsing genuinely different workers who happen to have the same name and work for the same employer at different times.
+The Revelio side is pre-processed to focus on workers who could plausibly belong to the recent H-1B applicant pool. The cleaned profile file keeps users with U.S.-based positions at employers in the linked employer sample and uses position histories beginning in 2015 or later. Open-ended jobs are cleaned conservatively, and positions are collapsed to the employer level around the lottery date.
 
-\subsection{C. Imputing person-level linkage fields in Revelio}
+The pipeline also removes likely duplicate profiles. A pair of profiles is treated as a duplicate only when the profiles share a normalized name and the same employer, and when at least one additional overlap condition is satisfied: overlapping job dates, overlapping education dates, or a common school. Within such duplicate sets, the profile with the richer work history is retained. This is designed to avoid collapsing genuinely different workers who happen to share a common name at a large employer.
 
-The deidentified administrative files do not contain names, so the person-level match relies on sparse fields that are available or inferable on both sides. The current Revelio cleaning pipeline constructs the following variables:
+Finally, the Revelio cleaning stage excludes profiles with clear evidence of U.S. secondary schooling, which are less likely to belong to the foreign-born population of interest. It also records whether the profile shows U.S. postsecondary education and whether the worker appears to qualify for the advanced-degree exemption. The paper's preferred linked sample later requires confirmed U.S. postsecondary education, but that restriction is imposed after the broader cleaned profile file is built.
 
-\paragraph{Estimated year of birth.}
-Estimated year of birth is derived from education timing. If a high school record is observed, the code backs out birth year from the high school end date. Otherwise it uses the earliest postsecondary start or end date, adjusting the assumed age at completion by degree type.
+\subsection{C. Variables inferred on the Revelio side}
+
+Because the H-1B data are deidentified, the person-level match relies on a small set of fields that are either observed or inferable in both sources.
+
+\paragraph{Country of origin.}
+Country evidence is built from several sources. School histories identify the country of attended institutions. Name-based models provide both country-level and broader regional predictions. Position histories provide an additional check when a user's observed work history lines up with the same origin country. The pipeline combines these inputs into a country-level signal and a broader regional signal, while separately flagging cases in which the country prediction is unusually uncertain.
+
+\paragraph{Year of birth.}
+Estimated year of birth is inferred from education timing. When a high school record is available, the birth-year estimate comes from the implied age at high school completion. Otherwise it is backed out from postsecondary start and end dates, with adjustments for degree type.
 
 \paragraph{Sex.}
-The code computes a female-probability score from name-based models and compares that probability with the binary sex field in the administrative data. The resulting sex-match score is highest when the two sources agree strongly and is lower in ambiguous cases.
+The administrative records contain sex, while Revelio does not. The code therefore constructs a name-based sex probability using more than one name model and treats this as a noisy comparison field rather than a deterministic identifier.
 
-\paragraph{Country and subregion.}
-Country evidence comes from several sources: school-country matches, full-name and first/last-name country predictions, a subregion classifier, and position-history information. These inputs are combined into a country score and a subregion score. The code also flags cases with especially uncertain name-based country predictions, which later affects candidate ranking.
+\paragraph{Education and occupation.}
+Education histories are also used to identify U.S. postsecondary attendance, advanced-degree status, the year of the most recent U.S. graduation, and broad field of study. Position titles are cleaned and mapped to H-1B-relevant occupation rankings. These fields are useful both for sharpening the match and for defining heterogeneity in the later analysis.
 
-\paragraph{Advanced-degree status and graduation timing.}
-Using U.S. education records, the code constructs an indicator for whether the user appears to hold a U.S. master's, MBA, or doctoral degree, along with an imputed advanced-degree year and latest U.S. graduation year. These variables are later used for both matching and heterogeneity analysis.
+\subsection{D. Building applicant-specific candidate pools}
 
-\paragraph{Occupational plausibility.}
-Position titles are cleaned and crosswalked to an H-1B-relevant occupation ranking. The pipeline can use this information as an optional occupation score in the candidate ranking stage.
+For each H-1B application, the candidate pool is defined inside the linked employer-year cell. In the current implementation, the first pass is deliberately broader than exact country matching: applicants are initially paired with Revelio users at the same employer who fall in the same broad region of origin. Exact country agreement then receives much more weight at the ranking stage. This design allows the pipeline to retain plausible cases when country classification is noisy without treating broad regional agreement as equivalent to a true country match.
 
-\subsection{D. Candidate generation within employer-year}
+Timing restrictions are central. A candidate must appear to have started at the sponsoring employer within the few years before the lottery and still be employed there at the March filing date associated with that lottery. In the code, the reference date is March 1 of the calendar year preceding the fiscal-year label in the H-1B data. Candidates are also screened using age and education timing so that the implied life cycle is consistent with a recent student-to-work transition rather than with a much older worker. Profiles that clearly look unrelated to the skilled H-1B applicant pool are removed as well.
 
-For each H-1B applicant, the candidate pool is defined inside the linked employer-year cell. Candidate workers must satisfy timing conditions that make it plausible they were already employed at the sponsoring firm around the lottery date. In the current code, workers are retained only if their start and end dates place them near the March lottery reference date, if the implied age from the estimated birth year is compatible with the administrative birth year, and if the profile looks broadly consistent with STEM-oriented or H-1B-like employment.
+These restrictions reflect the economics of the modern H-1B system. For many recent applicants, the relevant comparison is not between a worker outside the United States and a worker already employed at the sponsor, but between lottery winners and lottery losers who are both already working for that employer before the visa decision is realized. That institutional fact is what makes the person-level linkage tractable.
 
-This employer-based restriction is central to the design. It greatly reduces false matches relative to a global search, and it is substantively justified because many modern H-1B applicants are already employed by the sponsoring firm under OPT before the lottery takes place.
+\subsection{E. Ranking candidates and carrying forward uncertainty}
 
-\subsection{E. Scoring, weighting, and ambiguity flags}
+After the candidate pool is defined, each applicant-candidate pair receives a composite score. Country-of-origin agreement is the dominant component of the score. Consistency in sex and year of birth provides secondary information. Occupation provides an additional refinement but does not drive the match on its own. Candidate scores are also adjusted for employer-link quality: a candidate receives more credit when the candidate's own position history directly supports the sponsoring employer match and less credit when the employer crosswalk itself is weak.
 
-After the candidate pool is defined, the code assigns each applicant-candidate pair a total score. The score uses a weighted combination of agreement on country, year of birth, and sex, optionally augmented by occupation similarity and then multiplied by a firm-quality term. Candidate weights are normalized within applicant and later used to aggregate outcomes to the applicant level.
+The score is then normalized within applicant to form match weights that sum to one across retained candidates. Those weights are the object carried into the regression analysis. This is important conceptually. A deterministic one-to-one match would hide uncertainty and make a single mistaken assignment disproportionately influential. By contrast, the weighted approach preserves ambiguity transparently and turns linkage noise mainly into attenuation rather than into arbitrary reclassification.
 
-The code also records several diagnostics that are useful for robustness exercises:
-\begin{itemize}
-    \item the number of retained candidates per applicant,
-    \item the top candidate's normalized weight,
-    \item the gap between the top and second-best candidate,
-    \item the underlying country, firm, and total scores, and
-    \item whether the application is flagged as ambiguous because the top two candidates are too close.
-\end{itemize}
-
-These diagnostics motivate the strict sample and the multiplicity-based robustness checks.
+The code records several diagnostics that are used later in the paper: the number of retained candidates per applicant, the top candidate's weight, the gap between the top two candidates, and indicators for ambiguous cases in which the top candidate is only weakly separated from the runner-up.
 
 \begin{table}[H]
 \centering
-\caption{Illustrative linkage parameters in the current code base}
+\caption{How the current scoring rules are used}
 \label{tab:link_params}
-\begin{threeparttable}
-\begin{tabularx}{\textwidth}{@{}l c X@{}}
+\begin{tabularx}{\textwidth}{@{}l X@{}}
 \toprule
-Parameter & Current value & Role in linkage \\
+Component & Role in the linkage \\
 \midrule
-Country weight $\omega_{country}$ & 0.70 & Baseline weight on country-of-origin agreement in total score. \\
-Year-of-birth weight $\omega_{yob}$ & 0.20 & Weight on compatibility between administrative and imputed birth year. \\
-Sex weight $\omega_{sex}$ & 0.10 & Weight on agreement between administrative sex and name-based sex probability. \\
-Occupation weight $\omega_{occ}$ & 0.10 in some variants & Optional weight on occupation ranking based on Revelio position titles. \\
-Ambiguity weight-gap cutoff & 0.03 & Flags applications for which the top candidate is not well separated from the runner-up. \\
-Subregion fallback minimum score & 0.20 & Minimum subregion evidence required when country-level evidence is weak. \\
-No-country minimum total score & 0.12 & Absolute score floor for cases relying on subregion rather than country evidence. \\
-Strict minimum normalized weight & 0.90 & Requires the top candidate to account for at least 90\% of retained score mass. \\
-Strict minimum total score & 0.55 & Absolute match-quality floor in the strict high-precision sample. \\
-Strict minimum firm quality & 0.80 & Requires strong employer-link evidence in the strict sample. \\
-Strict minimum country score & 0.50 & Requires strong country-level evidence in the strict sample. \\
+Country of origin & Main identifying signal. Exact country agreement matters most, while broader regional agreement is used only as a fallback when country evidence is weak or noisy. \\
+Sex and year of birth & Secondary signals that down-rank otherwise plausible candidates when the profile does not fit the administrative record. \\
+Employer-link quality & Candidate scores are discounted when the employer crosswalk is weak and receive full credit when the candidate's own job history clearly supports the sponsoring employer match. \\
+Occupation and field & Low-weight refinements that help favor profiles consistent with skilled H-1B-type work. \\
+Ambiguity flag & Applications are flagged when the leading candidate is not clearly separated from the runner-up. \\
+Strict sample & Keeps only dominant top-ranked matches with strong absolute score, strong employer-link evidence, strong country evidence, and a usable birth-year estimate. \\
 \bottomrule
 \end{tabularx}
-\begin{tablenotes}[flushleft]
-\footnotesize
-\item Notes: Values are taken from the current configuration files bundled with the working code snapshot. They are useful for documenting the present implementation but should be updated if the production linkage code is retuned.
-\end{tablenotes}
-\end{threeparttable}
 \end{table}
 
-\subsection{F. Analysis variants generated by the code}
+\subsection{F. Linked analysis samples}
 
-The current analysis pipeline produces several parquet variants that correspond to different linkage-quality filters. The baseline sample keeps all retained candidates after the main plausibility filters. Additional variants cap the number of retained candidates per applicant (for example, at 2, 4, or 6), while the strict sample keeps only the top-ranked candidate when it satisfies high-confidence thresholds on weight, total score, employer-link quality, and country evidence. These variants are useful because they separate two questions: whether the sign of the effect is robust to stricter matching, and how much the magnitude grows as false matches are reduced.
+The pipeline produces several linked samples for analysis.
 
-\subsection{G. Outcome construction from Revelio histories}
+\begin{itemize}
+    \item \textbf{Broad linked sample.} Keeps all retained candidates after the main plausibility filters.
+    \item \textbf{Preferred U.S.-educated sample.} Further requires the matched Revelio profile to show U.S. postsecondary education. This is the paper's preferred sample because it most closely targets workers likely to have entered the sponsoring firm through OPT.
+    \item \textbf{Multiplicity-capped samples.} Restrict attention to applications with only a small number of retained candidates, which reduces attenuation from diffuse match weights.
+    \item \textbf{Pre-filtered sample.} Excludes origin-country groups that generate especially large candidate pools in Revelio, mainly because both H-1B application counts and online-profile coverage are extremely high.
+    \item \textbf{Strict sample.} Keeps only the top-ranked candidate when that candidate dominates the applicant's weight, clears a high absolute score threshold, has strong employer-link evidence, and has strong country evidence.
+\end{itemize}
 
-Once candidate workers are linked, the code constructs relative-year outcomes from Revelio position and education histories. The position-history outcomes are built by comparing each post-lottery year with the reference employer and reference position observed around the lottery date. The education outcomes are built analogously from school histories.
+These variants are useful for a simple reason: if linkage error mainly attenuates treatment effects, estimates should generally become larger in higher-precision samples even as the sample size falls.
+
+\subsection{G. Outcomes constructed from linked profiles}
+
+Once workers are linked, I construct outcomes from Revelio position and education histories and aggregate them to the applicant level using the match weights. The retention outcome is defined at the employer level rather than the job-title level, which makes it less sensitive to noisy title coding and internal reorganizations. Likewise, the geographic outcomes are based on observed location fields, so they should be interpreted as evidence on observed geographic attachment rather than as direct measures of legal status.
 
 \begin{table}[H]
 \centering
-\caption{Outcome concepts constructed in the current merge pipeline}
+\caption{Outcome concepts used after the linkage}
 \label{tab:outcome_defs}
 \begin{tabularx}{\textwidth}{@{}l X@{}}
 \toprule
-Outcome & Definition in words \\
+Outcome & Construction in words \\
 \midrule
-\texttt{still\_at\_firm$t$} & Indicator that the worker has any active position at the sponsoring employer in year $t$ relative to the lottery. \\
-\texttt{change\_company$t$} & Indicator that the worker starts a new position at a different employer after the lottery. \\
-\texttt{promoted$t$} & Indicator that the worker starts a new position at the same employer after the lottery, consistent with a promotion or internal move. \\
-\texttt{in\_us$t$} & Indicator that at least one position in year $t$ is located in the United States. \\
-\texttt{in\_home\_country$t$} & Indicator that at least one position in year $t$ is located in the worker's administrative origin country. \\
-\texttt{new\_educ$t$} & Indicator that the worker starts a new education spell after the lottery. \\
-\texttt{agg\_compensation$t$} & Year-$t$ compensation measure aggregated across active positions using Revelio's imputed pay and the fraction of the year covered by each job. \\
+Still at sponsoring firm & Whether the linked worker is observed in an active job at the sponsoring employer one, two, or three years after the lottery. \\
+Move to a different employer & Whether the worker starts a post-lottery job at a different employer. \\
+Internal move or promotion & Whether the worker starts a new post-lottery position at the same employer. \\
+Observed in the United States & Whether any job or education record places the worker in the United States in the relevant post-lottery year. \\
+Observed in origin country & Whether any job or education record places the worker in the worker's country of origin in the relevant post-lottery year. \\
+New education & Whether the worker begins a new education spell after the lottery. \\
+Compensation & An annual compensation measure built from Revelio's imputed pay fields and the share of the year covered by each active job. \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\subsection{H. Suggested validation exercises for the final draft}
+\subsection{H. Validation}
 
-I recommend documenting at least three validation exercises in the final paper or appendix.
-
-\begin{enumerate}[label=\arabic*.]
-    \item \textbf{Holdout-style validation on subsets with extra identifiers.} For some winners, additional education or job fields provide a stronger deterministic check on whether the matched profile is plausible.
-    \item \textbf{Employer-level coverage diagnostics.} Show that results are similar in employer-year cells with especially complete matched coverage and with both winners and losers observed.
-    \item \textbf{Comparison across linkage variants.} Report the same headline outcomes in the baseline, capped-multiplicity, and strict samples to quantify attenuation from linkage noise.
-\end{enumerate}
+The main ex-post validation exercise uses lottery winners, for whom the administrative files contain much richer petition information than for lottery losers. For those cases, I compare the linked Revelio profiles to the administrative records on education level, advanced-degree institution when relevant, field of study, and job title. Match quality rises strongly with the linkage weight and is highest in the strict sample, which supports the interpretation of the weights as meaningful measures of matching confidence rather than arbitrary scaling factors.
 
 \begin{figure}[H]
 \centering
@@ -135,12 +120,12 @@ I recommend documenting at least three validation exercises in the final paper o
     box/.style={draw, rounded corners, align=left, fill=gray!8, minimum height=1.0cm, text width=0.82\textwidth, inner sep=6pt},
     arr/.style={-{Latex[length=2.5mm]}, thick}
 ]
-\node[box] (a) {\textbf{FOIA H-1B applicant records}\\Deidentified applicant-level files with employer identifiers, lottery outcome, and sparse demographics.};
-\node[box, below=of a] (b) {\textbf{Employer crosswalk to Revelio firms}\\Exact and fuzzy firm linkage, plus LLM-assisted review of ambiguous firm-year matches.};
-\node[box, below=of b] (c) {\textbf{Revelio-side variable construction}\\Impute country/subregion, estimated birth year, sex probabilities, ADE status, graduation timing, and occupation information.};
-\node[box, below=of c] (d) {\textbf{Applicant-specific candidate pools}\\Keep workers observed at the linked employer around the lottery date and apply timing and plausibility filters.};
-\node[box, below=of d] (e) {\textbf{Probabilistic scoring and weighting}\\Score each applicant-candidate pair, normalize weights within applicant, and flag ambiguous matches.};
-\node[box, below=of e] (f) {\textbf{Outcome merge and estimation}\\Construct worker outcomes from position and education histories and aggregate them to the applicant level using the match weights.};
+\node[box] (a) {\textbf{H-1B applicant records}\\Deidentified applicant-level files with lottery outcome, sponsoring employer, and basic demographics.};
+\node[box, below=of a] (b) {\textbf{Employer crosswalk}\\Deterministic and fuzzy employer matching, with large-language-model review of ambiguous firm identities.};
+\node[box, below=of b] (c) {\textbf{Revelio cleaning and inference}\\Clean job and school histories, remove likely duplicate profiles, and infer origin, sex, birth year, education, and occupation-related signals.};
+\node[box, below=of c] (d) {\textbf{Applicant-specific candidate pools}\\Search only within the linked employer-year cell and retain workers whose timing and profile histories make pre-lottery employment plausible.};
+\node[box, below=of d] (e) {\textbf{Probabilistic ranking}\\Score candidate workers, normalize scores to applicant-level weights, and flag ambiguous matches.};
+\node[box, below=of e] (f) {\textbf{Weighted outcomes}\\Construct worker outcomes from career and education histories and aggregate them to the applicant level using the match weights.};
 
 \draw[arr] (a) -- (b);
 \draw[arr] (b) -- (c);
