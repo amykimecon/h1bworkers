@@ -72,6 +72,13 @@ if not HAS_LLM_MATCH_SCORE_COL:
     print(
         "rev_indiv missing llm_match_score; defaulting firm-match quality factor to neutral (1.0)."
     )
+HAS_US_EDUC_COL = "us_educ" in REV_INDIV_COLS
+if not HAS_US_EDUC_COL:
+    print(
+        "WARNING: rev_indiv missing us_educ column. "
+        "us_educ_as_baseline and us_educ filters will be skipped. "
+        "Re-run 02_revelio_indiv_clean to generate this column."
+    )
 
 ## revelio education data
 rev_educ = con_indiv.read_parquet(
@@ -347,7 +354,7 @@ def _pick_testing_subset(
     return str(picked.iloc[0]["foia_firm_uid"]), str(picked.iloc[0]["lottery_year"])
 
 
-def _build_stage_weighted_query(stage_input_query, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, firm_year_user_dedup = True, W_COUNTRY = 0.70, W_YOB = 0.20, W_GENDER = 0.10, W_OCC = 0.0, OCC_SCORE_HALFLIFE = 500.0, MULTIPLICATIVE_SCORE = False):
+def _build_stage_weighted_query(stage_input_query, YOB_BUFFER = 5, F_PROB_BUFFER = 0.8, firm_year_user_dedup = True, W_COUNTRY = 0.70, W_YOB = 0.20, W_GENDER = 0.10, W_OCC = 0.0, OCC_SCORE_HALFLIFE = 500.0, MULTIPLICATIVE_SCORE = False, postfilt = "none"):
     # Principled firm quality multiplier: P(right firm) in [0, 1].
     # - NULL score (legacy matches): COALESCE to 100 → mult = 1.0 (unchanged)
     # - has_name_match_pos = 1: position history confirms firm → override to 1.0
@@ -360,7 +367,8 @@ def _build_stage_weighted_query(stage_input_query, YOB_BUFFER = 5, F_PROB_BUFFER
     )
     # Occupation score: hyperbolic decay on H-1B occupation rank.
     # Formula: 1 / (1 + (rank-1) / K), where K = OCC_SCORE_HALFLIFE (rank at which score = 0.5).
-    # NULL min_h1b_occ_rank (no position data) → neutral 0.5. W_OCC=0 is backward-compatible.
+    # NULL min_h1b_occ_rank (no position data) → neutral 0.5.
+    # Treated symmetrically with other signals; weights must sum to 1 (W_COUNTRY + W_YOB + W_GENDER + W_OCC = 1).
     occ_score_expr = f"""CASE WHEN min_h1b_occ_rank IS NULL THEN 0.5
              ELSE 1.0 / (1.0 + (GREATEST(1, min_h1b_occ_rank) - 1)::FLOAT / {OCC_SCORE_HALFLIFE})
         END"""
@@ -376,28 +384,46 @@ def _build_stage_weighted_query(stage_input_query, YOB_BUFFER = 5, F_PROB_BUFFER
         # log-space, so the same weights (w_country=0.70, w_yob=0.20, w_gender=0.10) preserve the
         # relative downweighting of YOB and gender vs country. A small floor (1e-9) prevents any
         # single signal from zeroing the total score (e.g. yob outside buffer but known).
-        # w_occ: since it's typically 0, use a hybrid blend for the occ component (same as additive).
-        base_score_expr = (
+        # W_OCC=0 → occ_score^0 = 1, so backward-compatible when occ is unused.
+        # Weights should sum to 1: W_COUNTRY + W_YOB + W_GENDER + W_OCC = 1.
+        total_score_expr = (
             f"POWER(GREATEST(country_score, 1e-9), {W_COUNTRY})"
             f" * POWER(GREATEST({yob_score_expr}, 1e-9), {W_YOB})"
             f" * POWER(GREATEST(f_score, 1e-9), {W_GENDER})"
+            f" * POWER(GREATEST({occ_score_expr}, 1e-9), {W_OCC})"
+            f" * {firm_quality_mult_expr}"
         )
-        total_score_expr = f"({base_score_expr} * (1 - {W_OCC}) + ({occ_score_expr}) * {W_OCC}) * {firm_quality_mult_expr}"
     else:
-        # Additive (weighted sum): original formula.
+        # Additive (weighted sum). Weights should sum to 1: W_COUNTRY + W_YOB + W_GENDER + W_OCC = 1.
+        # W_OCC=0 → occ contributes nothing, backward-compatible.
         total_score_expr = (
-            f"(({yob_score_expr} * {W_YOB} + f_score * {W_GENDER} + country_score * {W_COUNTRY})"
-            f" * (1 - {W_OCC}) + ({occ_score_expr}) * {W_OCC}) * {firm_quality_mult_expr}"
+            f"(country_score * {W_COUNTRY} + ({yob_score_expr}) * {W_YOB}"
+            f" + f_score * {W_GENDER} + ({occ_score_expr}) * {W_OCC})"
+            f" * {firm_quality_mult_expr}"
         )
-    return f"""
-    SELECT *, total_score/(SUM(total_score) OVER(PARTITION BY foia_indiv_id)) AS weight_norm FROM (
-        SELECT foia_indiv_id, foia_firm_uid, FEIN, lottery_year, rcid, llm_match_score, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, {COUNTRY_UNCERTAIN_SELECT}, country_rank_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, updatediff_activity, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_since_grad, n_apps, status_type, ade_ind, ade_year, last_grad_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, high_rep_emp_ind, no_rep_emp_ind, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt, COALESCE(has_name_match_pos, 0) AS has_name_match_pos,
+    # Firm-level aggregate window functions are only needed when postfilt in ('indiv', 'emp')
+    # to apply employer-level match quality filters. When postfilt='none' (the current default),
+    # computing six OVER(PARTITION BY foia_firm_uid, lottery_year) window functions is pure waste.
+    if postfilt in ("indiv", "emp"):
+        firm_agg_cols = f"""
             (COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY foia_firm_uid, lottery_year))/n_apps AS share_apps_matched_emp,
             COUNT(DISTINCT user_id) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_rev_users_emp,
             (COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year))/(COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY foia_firm_uid, lottery_year)) AS match_mult_emp,
             (COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year))/(COUNT(DISTINCT user_id) OVER(PARTITION BY foia_firm_uid, lottery_year)) AS rev_mult_emp,
             COUNT(DISTINCT foia_indiv_id) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_apps_matched_emp,
-            COUNT(DISTINCT status_type) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_unique_wintype_emp,
+            COUNT(DISTINCT status_type) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_unique_wintype_emp,"""
+    else:
+        firm_agg_cols = """
+            NULL::DOUBLE AS share_apps_matched_emp,
+            NULL::DOUBLE AS n_rev_users_emp,
+            NULL::DOUBLE AS match_mult_emp,
+            NULL::DOUBLE AS rev_mult_emp,
+            NULL::DOUBLE AS n_apps_matched_emp,
+            NULL::DOUBLE AS n_unique_wintype_emp,"""
+
+    return f"""
+    SELECT *, total_score/(SUM(total_score) OVER(PARTITION BY foia_indiv_id)) AS weight_norm FROM (
+        SELECT foia_indiv_id, foia_firm_uid, FEIN, lottery_year, rcid, llm_match_score, user_id, fullname, foia_country, rev_country, subregion, country_score, subregion_score, {COUNTRY_UNCERTAIN_SELECT}, country_rank_score, female_ind, f_prob_avg, f_score, yob, est_yob, max_yob, n_match_raw, startdatediff, enddatediff, updatediff, updatediff_activity, stem_ind, foia_occ_ind, n_unique_country, min_h1b_occ_rank, months_since_grad, n_apps, status_type, ade_ind, ade_year, last_grad_year, foia_highest_ed_level, rev_highest_ed_level, prev_visa, high_rep_emp_ind, no_rep_emp_ind, field_clean, fields, positions, rcids, DOT_CODE, JOB_TITLE, n_match_filt, COALESCE(has_name_match_pos, 0) AS has_name_match_pos,{firm_agg_cols}
             {llm_match_score_norm_expr} AS llm_match_score_norm,
             {firm_quality_mult_expr} AS firm_match_quality_mult,
             {occ_score_expr} AS occ_score,
@@ -620,6 +646,7 @@ def _build_merge_filt_stage_queries(
         W_OCC = W_OCC,
         OCC_SCORE_HALFLIFE = OCC_SCORE_HALFLIFE,
         MULTIPLICATIVE_SCORE = MULTIPLICATIVE_SCORE,
+        postfilt = postfilt,
     )
     stage_final = _build_stage_final_query(
         stage_weighted,
@@ -680,6 +707,7 @@ def _build_stage_queries_from_match_filt(
         W_OCC = W_OCC,
         OCC_SCORE_HALFLIFE = OCC_SCORE_HALFLIFE,
         MULTIPLICATIVE_SCORE = MULTIPLICATIVE_SCORE,
+        postfilt = postfilt,
     )
     stage_final = _build_stage_final_query(
         stage_weighted,
@@ -732,6 +760,17 @@ def _build_stage_strict_query(
         conditions.append(f"n_match_filt <= {max_n_match_filt}")
     where_clause = " AND ".join(conditions)
     return f"SELECT * FROM {baseline_tab} WHERE {where_clause}"
+
+
+def _build_stage_us_educ_query(baseline_tab):
+    """Post-hoc filter on baseline: keep only rows where the matched Revelio
+    user has confirmed US education (us_educ = 1).
+
+    The baseline already excludes users with confirmed non-US education
+    (us_educ = 0), but retains users with no education records (us_educ IS NULL).
+    This sample further restricts to users with at least one matched US institution.
+    Retains all match_rank values, parallel to baseline multiplicity structure."""
+    return f"SELECT * FROM {baseline_tab} WHERE us_educ = 1"
 
 
 def _print_readable_testing_samples(
@@ -1127,6 +1166,27 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True, pos_t
         SELECT DISTINCT user_id, country
         FROM {pos_tab}
     ),
+    -- Better proxy for "when did this user last update their profile" than updated_dt
+    -- (which reflects Revelio's scrape refresh, not the user's own profile activity).
+    max_activity_startdate AS (
+        SELECT user_id, MAX(startdate_all) AS max_startdate_all
+        FROM (
+            SELECT user_id, startdate AS startdate_all FROM {pos_tab}
+            UNION ALL
+            SELECT user_id, ed_startdate AS startdate_all FROM rev_educ_clean
+        )
+        GROUP BY user_id
+    )"""
+    # Country competition: only compute the ranking CTEs and JOIN when COMPETITION_WEIGHT > 0.
+    # When disabled (the current default), skipping the country_cs / user_top2_cs CTEs avoids
+    # a full per-user country ranking over the entire rev_indiv table.
+    if COMPETITION_WEIGHT != 0.0:
+        max_other_cs_expr = "CASE WHEN b.country = uts.max1_country THEN uts.max2_cs ELSE COALESCE(uts.max1_cs, 0.0) END"
+        competition_mult_expr = (
+            f"GREATEST(0.0, 1.0 - {COMPETITION_WEIGHT}"
+            f" * GREATEST(0.0, ({max_other_cs_expr}) - {COMPETITION_THRESHOLD}))"
+        )
+        competition_ctes = f""",
     -- Country competition: for each (user_id, country), compute a country score equivalent using
     -- the same formula as the main country_score (incl. position term). Used to identify users
     -- with strong evidence for a different country than the current FOIA match.
@@ -1154,30 +1214,16 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True, pos_t
         FROM user_country_ranked
         WHERE cs_rank <= 2
         GROUP BY user_id
-    ),
-    -- Most recent startdate across all positions AND educations per user.
-    -- Better proxy for "when did this user last update their profile" than updated_dt
-    -- (which reflects Revelio's scrape refresh, not the user's own profile activity).
-    max_activity_startdate AS (
-        SELECT user_id, MAX(startdate_all) AS max_startdate_all
-        FROM (
-            SELECT user_id, startdate AS startdate_all FROM {pos_tab}
-            UNION ALL
-            SELECT user_id, ed_startdate AS startdate_all FROM rev_educ_clean
-        )
-        GROUP BY user_id
     )"""
-    # Build max_other_cs expression (reused in country_score and as a standalone column)
-    max_other_cs_expr = f"CASE WHEN b.country = uts.max1_country THEN uts.max2_cs ELSE COALESCE(uts.max1_cs, 0.0) END"
-    # Competition penalty multiplier: 1 when disabled (weight=0) or max_other below threshold
-    if COMPETITION_WEIGHT == 0.0:
-        competition_mult_expr = "1.0"
+        competition_join = "LEFT JOIN user_top2_cs uts ON b.user_id = uts.user_id"
+        max_other_country_score_col = f"{max_other_cs_expr} AS max_other_country_score,"
     else:
-        competition_mult_expr = (
-            f"GREATEST(0.0, 1.0 - {COMPETITION_WEIGHT}"
-            f" * GREATEST(0.0, ({max_other_cs_expr}) - {COMPETITION_THRESHOLD}))"
-        )
-    str_out = f"""WITH {name_match_cte}
+        competition_mult_expr = "1.0"
+        competition_ctes = ""
+        competition_join = ""
+        max_other_country_score_col = "NULL::DOUBLE AS max_other_country_score,"
+
+    str_out = f"""WITH {name_match_cte}{competition_ctes}
     SELECT *, a.country AS foia_country, b.country AS rev_country, COUNT(*) OVER(PARTITION BY foia_indiv_id) AS n_match_raw,
             DATEDIFF('month', ((a.lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, first_startdate) AS startdatediff,
             DATEDIFF('month', ((a.lottery_year::INT - 1)::VARCHAR || '-03-01')::DATETIME, last_enddate) AS enddatediff,
@@ -1203,8 +1249,8 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True, pos_t
                 {ALPHA} * LEAST(1.0, GREATEST(nanat_subregion_score, nt_subregion_score))
                 + (1.0 - {ALPHA}) * LEAST(1.0, nanat_score / GREATEST(nanat_subregion_score, 0.01))
             ) * {competition_mult_expr} ELSE 0.0 END AS country_score,
-            -- max country score for other countries (for inspection and debugging)
-            {max_other_cs_expr} AS max_other_country_score,
+            -- max country score for other countries (NULL when competition_weight=0, populated when enabled)
+            {max_other_country_score_col}
             a.highest_ed_level AS foia_highest_ed_level, b.highest_ed_level AS rev_highest_ed_level,
             COALESCE((nmp.user_id IS NOT NULL), FALSE)::INTEGER AS has_name_match_pos,
             (pc.user_id IS NOT NULL)::INTEGER AS position_score
@@ -1213,7 +1259,7 @@ def merge_raw_func(rev_tab, foia_tab, foia_prefilt = '', subregion = True, pos_t
         LEFT JOIN name_match_pos nmp ON b.user_id = nmp.user_id AND a.foia_firm_uid = nmp.foia_firm_uid
         LEFT JOIN latest_educ_enddate led ON b.user_id = led.user_id AND a.lottery_year::INT = led.lottery_year
         LEFT JOIN pos_country pc ON b.user_id = pc.user_id AND a.country = pc.country
-        LEFT JOIN user_top2_cs uts ON b.user_id = uts.user_id
+        {competition_join}
         LEFT JOIN max_activity_startdate mas ON b.user_id = mas.user_id"""
     return str_out
 
@@ -1252,7 +1298,7 @@ def merge_filt_func(merge_raw_tab, postfilt = 'none', MATCH_MULT_CUTOFF = 4, REV
 #####################
 # LONG POSITION/EDUC MERGE
 #####################
-def get_rel_year_inds_wide(merge_tab, t0 = -1, t1 = 2, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
+def get_rel_year_inds_wide(merge_tab, t0 = -2, t1 = 3, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
 
     # join position and education data, unpivot long on variable, then pivot wide on variable x t
     str_out = f"""
@@ -1268,7 +1314,7 @@ def get_rel_year_inds_wide(merge_tab, t0 = -1, t1 = 2, pos_tab = 'merged_pos_cle
     return str_out
 
 
-def get_rel_year_inds_wide_by_t(merge_tab, t0 = -1, t1 = 2, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
+def get_rel_year_inds_wide_by_t(merge_tab, t0 = -2, t1 = 3, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
     """Faster wide construction via one pass + conditional aggregation."""
     pos_cols = [
         "no_positions",
@@ -1458,7 +1504,7 @@ def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 =
     # Step 1: add pre-filter window functions (n_start_after, has_new_pos_same_firm)
     prefilt = f"""(
         SELECT *,
-            COUNT(CASE WHEN start_before = 0 THEN 1 ELSE NULL END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_start_after,
+            COUNT(CASE WHEN start_before = 0 AND same_position = 0 THEN 1 ELSE NULL END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_start_after,
             -- has_new_pos_same_firm: 1 if any position at same FOIA firm starting post-lottery exists this year
             MAX(CASE WHEN same_company = 1 AND pos_start_t >= 0 THEN 1 ELSE 0 END) OVER(PARTITION BY foia_indiv_id, user_id, t) AS has_new_pos_same_firm
         FROM ({poslong})
@@ -1501,7 +1547,7 @@ def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 =
         MAX(CASE WHEN same_company = 1 AND same_position = 1 AND enddate IS NOT NULL THEN 1 ELSE 0 END) AS same_pos_nonnull_end,
         SUM(total_compensation * frac_t) AS agg_compensation,
         COUNT(*) AS n_pos,
-        COUNT(CASE WHEN start_before = 0 THEN 1 END) AS n_pos_startafter,
+        COUNT(CASE WHEN start_before = 0 AND same_position = 0 THEN 1 END) AS n_pos_startafter,
         SUM(frac_t) AS frac_t,
         -- Non-updating bias diagnostics:
         -- Fraction of active positions in year t with null enddate (still-active from imputation, not observed enddate)
@@ -1514,7 +1560,262 @@ def get_rel_year_inds_pos(merge_tab, pos_tab = 'merged_pos_clean', t0 = -1, t1 =
     GROUP BY foia_indiv_id, user_id, t"""
 
     return posgroup
-    
+
+
+def _compute_ref_pos_num_query(rawmerge_tab):
+    """Return SQL for a per-(foia_indiv_id, user_id) lookup of ref_position_number.
+
+    Computed from the pre-materialized rawmerge (before time expansion) to avoid a
+    global window function over the full ~12M-row expanded table.
+
+    Replicates the ref_pos_priority=1 ordering from get_rel_year_inds_pos:
+      1. Positions active at or before ref_year (startyr <= ref_year) come first.
+      2. Among those, the one with the highest min(endyr, ref_year) wins — i.e., the
+         position that was active most recently at or before lottery.
+      3. Tiebreak by smallest position_number (matches original ROW_NUMBER tiebreak).
+    For the rare t>0-only fallback (person had no pre-lottery position), the result
+    may differ slightly from the original; this case is not meaningful for H-1B workers.
+    """
+    return f"""
+    SELECT DISTINCT foia_indiv_id, user_id,
+        FIRST_VALUE(position_number) OVER(
+            PARTITION BY foia_indiv_id, user_id
+            ORDER BY
+                -- t<=0 eligible (started at or before lottery ref_year) comes first
+                CASE WHEN SUBSTRING(startdate, 1, 4)::INT <= ref_year THEN 1 ELSE 0 END DESC,
+                -- Most recent year this position was active at or before ref_year
+                -- (ref_year when it spans t=0, endyr when it ends earlier)
+                LEAST(COALESCE(SUBSTRING(enddate, 1, 4)::INT, {int(CURRENT_YEAR)}), ref_year) DESC,
+                -- Tiebreak: smallest position_number (matches original ordering)
+                position_number ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ) AS ref_position_number
+    FROM {rawmerge_tab}
+    """
+
+
+def _materialize_pos_long(tabname, merge_tab, pos_tab, t0, t1, rcid_lookup_tab, rawmerge_tab, con):
+    """Materialize the position long table in 5 sequential steps, each as a named DuckDB
+    table, instead of running one monolithic nested SQL query.  This lets DuckDB plan
+    and spill each step independently, cutting runtime from several hours to ~30-60 min.
+
+    Uses explicit SQL for the range-expansion step (rather than get_long_by_year) to
+    guarantee unique column names in the materialized tables.
+
+    Steps:
+      1. {tabname}_refpos   – per-(foia_indiv_id, user_id) ref_position_number lookup
+      2. {tabname}_poslong  – range-expand rawmerge + per-row indicators + ref join + windows
+      3. {tabname}_prefilt  – n_start_after / has_new_pos_same_firm windows
+      4. {tabname}_postfilt – start_before filter + any_same_company_postfilt window
+      5. {tabname}          – final GROUP BY aggregation (the t-vars long table)
+    """
+    # Step 1: pre-compute ref_position_number per (foia_indiv_id, user_id) from rawmerge.
+    # Avoids a global window function over the full ~12M-row expanded table.
+    materialize_table(f"{tabname}_refpos", _compute_ref_pos_num_query(rawmerge_tab), con=con)
+
+    # Step 2: range-expand rawmerge + join refpos + per-row indicators + window functions.
+    # Uses explicit column selection to guarantee unique names in the materialized table.
+    # This replicates the poslong CTE from get_rel_year_inds_pos but without the
+    # expensive global-partition ref_position_number window.
+    poslong_sql = f"""
+    SELECT
+        time.foia_indiv_id, time.user_id, time.t,
+        x.foia_country, x.ref_year, x.ref_foia_firm_uid,
+        x.position_id, x.position_number, x.pos_foia_firm_uid,
+        x.startdate, x.enddate, x.title_raw, x.company_raw, x.country, x.total_compensation,
+        -- frac_t: fraction of calendar year covered (used in compensation aggregation)
+        (LEAST((x.ref_year + time.t || '-12-31')::DATE, x.enddate::DATE) -
+         GREATEST((x.ref_year + time.t || '-01-01')::DATE, x.startdate::DATE) + 1) /
+        ((x.ref_year + time.t || '-12-31')::DATE - (x.ref_year + time.t || '-01-01')::DATE + 1)
+            AS frac_t,
+        -- per-row indicators (no window needed)
+        CASE WHEN x.country = 'United States' THEN 1 ELSE 0 END AS pos_in_us,
+        CASE WHEN x.country IS NULL THEN 1 ELSE 0 END AS pos_loc_null,
+        CASE WHEN x.country = x.foia_country THEN 1 ELSE 0 END AS pos_in_home_country,
+        CASE WHEN x.pos_foia_firm_uid = x.ref_foia_firm_uid THEN 1 ELSE 0 END AS same_company,
+        -- ref_position_number from pre-computed lookup (avoids global window over 12M rows)
+        rp.ref_position_number,
+        CASE WHEN x.position_number = rp.ref_position_number THEN 1 ELSE 0 END AS same_position,
+        CASE WHEN x.position_number < rp.ref_position_number THEN 1 ELSE 0 END AS start_before,
+        CASE WHEN x.position_number = rp.ref_position_number
+             THEN x.total_compensation ELSE 0 END AS ref_comp,
+        -- window functions with small (pair+t) or (pair+position_number) partitions
+        COUNT(DISTINCT x.position_id)
+            OVER(PARTITION BY time.foia_indiv_id, time.user_id, time.t) AS n_pos_t,
+        MIN(time.t)
+            OVER(PARTITION BY time.foia_indiv_id, time.user_id, x.position_number) AS pos_start_t
+    FROM (
+        -- time grid: one row per (foia_indiv_id, user_id, t) in [t0, t1]
+        SELECT generate_series AS t, foia_indiv_id, user_id
+        FROM generate_series({t0}, {t1})
+        CROSS JOIN (SELECT DISTINCT foia_indiv_id, user_id FROM {merge_tab})
+    ) AS time
+    LEFT JOIN (
+        -- filtered rawmerge: drop events that cannot overlap any year in [t0, t1]
+        SELECT *,
+            SUBSTRING(startdate, 1, 4)::INT AS startyr,
+            CASE WHEN enddate IS NULL THEN {int(CURRENT_YEAR)}
+                 ELSE SUBSTRING(enddate, 1, 4)::INT END AS endyr
+        FROM {rawmerge_tab}
+        WHERE startdate IS NULL
+           OR (SUBSTRING(startdate, 1, 4)::INT <= ref_year + {t1}
+               AND COALESCE(SUBSTRING(enddate, 1, 4)::INT, {int(CURRENT_YEAR)})
+                   >= ref_year + {t0})
+    ) AS x
+    ON x.ref_year + time.t BETWEEN x.startyr AND x.endyr
+    AND time.foia_indiv_id = x.foia_indiv_id
+    AND time.user_id = x.user_id
+    LEFT JOIN {tabname}_refpos AS rp
+        ON time.foia_indiv_id = rp.foia_indiv_id AND time.user_id = rp.user_id
+    ORDER BY time.foia_indiv_id, time.user_id, time.t
+    """
+    materialize_table(f"{tabname}_poslong", poslong_sql, con=con)
+
+    # Step 3: pre-filter windows (n_start_after, has_new_pos_same_firm).
+    # Both share PARTITION BY foia_indiv_id, user_id, t — computed in one SELECT pass.
+    prefilt_sql = f"""
+        SELECT *,
+            COUNT(CASE WHEN start_before = 0 AND same_position = 0 THEN 1 ELSE NULL END)
+                OVER(PARTITION BY foia_indiv_id, user_id, t) AS n_start_after,
+            MAX(CASE WHEN same_company = 1 AND pos_start_t >= 0 THEN 1 ELSE 0 END)
+                OVER(PARTITION BY foia_indiv_id, user_id, t) AS has_new_pos_same_firm
+        FROM {tabname}_poslong
+    """
+    materialize_table(f"{tabname}_prefilt", prefilt_sql, con=con)
+
+    # Step 4: apply start_before filter, then add any_same_company_postfilt window
+    postfilt_sql = f"""
+        SELECT *,
+            MAX(CASE WHEN same_company = 1 THEN 1 ELSE 0 END)
+                OVER(PARTITION BY foia_indiv_id, user_id, t) AS any_same_company_postfilt
+        FROM {tabname}_prefilt
+        WHERE t IS NOT NULL AND (start_before = 0 OR n_start_after = 0)
+    """
+    materialize_table(f"{tabname}_postfilt", postfilt_sql, con=con)
+
+    # Step 5: final GROUP BY aggregation
+    posgroup_sql = f"""
+    SELECT
+        foia_indiv_id, user_id, t,
+        CASE WHEN COUNT(DISTINCT position_number) = 0 THEN 1 ELSE 0 END AS no_positions,
+        -- POSITION-ONLY LOCATION (prefixed pos_; combined with education in wide table)
+        MAX(pos_in_us) AS pos_in_us, MAX(pos_in_home_country) AS pos_in_home_country,
+        MAX(CASE WHEN pos_in_us = 0 AND pos_in_home_country = 0 AND pos_loc_null = 0
+                 THEN 1 ELSE 0 END) AS pos_non_us_non_home,
+        MAX(pos_loc_null) AS pos_loc_null,
+        -- WORK STATUS (exhaustive, mutually exclusive: still_at_firm + diff_firm + other = 1)
+        MAX(CASE WHEN same_company = 1 THEN 1 ELSE 0 END) AS still_at_firm,
+        MAX(CASE WHEN same_company = 0 AND any_same_company_postfilt = 0
+                 THEN 1 ELSE 0 END) AS diff_firm,
+        MAX(CASE WHEN same_company = 0 AND any_same_company_postfilt = 0 AND start_before = 0
+                 THEN 1 ELSE 0 END) AS new_diff_firm,
+        MAX(CASE WHEN same_company = 0 AND any_same_company_postfilt = 0 AND start_before = 1
+                 THEN 1 ELSE 0 END) AS old_diff_firm,
+        -- CONDITIONAL OUTCOMES (within still_at_firm)
+        MAX(CASE WHEN same_company = 1 AND same_position = 0 AND start_before = 0
+                 THEN 1 ELSE 0 END) AS same_firm_new_position,
+        MAX(CASE WHEN same_company = 1 AND same_position = 1 AND enddate IS NULL
+                 THEN 1 ELSE 0 END) AS same_pos_null_end,
+        MAX(CASE WHEN same_company = 1 AND same_position = 1 AND enddate IS NOT NULL
+                 THEN 1 ELSE 0 END) AS same_pos_nonnull_end,
+        SUM(total_compensation * frac_t) AS agg_compensation,
+        COUNT(*) AS n_pos,
+        COUNT(CASE WHEN start_before = 0 AND same_position = 0 THEN 1 END) AS n_pos_startafter,
+        SUM(frac_t) AS frac_t,
+        -- Non-updating bias diagnostics
+        AVG(CASE WHEN enddate IS NULL THEN 1.0 ELSE 0.0 END) AS frac_null_enddate,
+        MAX(CASE WHEN same_company = 1 AND enddate IS NULL AND pos_start_t < 0
+                      AND has_new_pos_same_firm = 0
+                 THEN 1 ELSE 0 END) AS null_enddate_stayer
+    FROM {tabname}_postfilt
+    GROUP BY foia_indiv_id, user_id, t
+    """
+    materialize_table(tabname, posgroup_sql, con=con)
+
+
+def _materialize_educ_long(tabname, merge_tab, educ_tab, t0, t1, rawmerge_tab, con):
+    """Materialize the education long table in 3 sequential steps.
+
+    Uses explicit SQL for the range-expansion step to guarantee unique column names.
+    Skips frac_t computation (education aggregation never uses it).
+
+    Steps:
+      1. {tabname}_educlong – range-expand rawmerge + per-row indicators + windows
+      2. {tabname}          – WHERE t IS NOT NULL filter + final GROUP BY aggregation
+    """
+    # Step 1: range-expand rawmerge + per-row indicators + window functions.
+    # Explicit column selection avoids duplicate column names from get_long_by_year.
+    # enddatenull for education is degree-dependent (Master/MBA +2 yrs, else +4 yrs).
+    educlong_sql = f"""
+    SELECT
+        time.foia_indiv_id, time.user_id, time.t,
+        x.foia_country, x.ref_year, x.ref_foia_firm_uid,
+        x.degree_clean, x.match_country, x.startdate, x.enddate, x.education_number,
+        -- per-row indicators
+        CASE WHEN x.match_country = 'United States' THEN 1 ELSE 0 END AS educ_in_us,
+        CASE WHEN x.match_country IS NULL THEN 1 ELSE 0 END AS educ_loc_null,
+        CASE WHEN x.match_country = x.foia_country THEN 1 ELSE 0 END AS educ_in_home_country,
+        CASE WHEN x.degree_clean = 'Master' OR x.degree_clean = 'MBA' THEN 1 ELSE 0 END AS masters,
+        CASE WHEN x.degree_clean = 'Doctor' THEN 1 ELSE 0 END AS doctors,
+        -- window functions
+        CASE WHEN (MIN(time.t) OVER(PARTITION BY time.foia_indiv_id, time.user_id, x.education_number)) < 0
+             THEN 1 ELSE 0 END AS start_before,
+        COUNT(DISTINCT x.education_number)
+            OVER(PARTITION BY time.foia_indiv_id, time.user_id, time.t) AS n_educ_t
+    FROM (
+        -- time grid: one row per (foia_indiv_id, user_id, t) in [t0, t1]
+        SELECT generate_series AS t, foia_indiv_id, user_id
+        FROM generate_series({t0}, {t1})
+        CROSS JOIN (SELECT DISTINCT foia_indiv_id, user_id FROM {merge_tab})
+    ) AS time
+    LEFT JOIN (
+        -- filtered rawmerge: degree-specific enddatenull; drop out-of-window events
+        SELECT *,
+            SUBSTRING(startdate, 1, 4)::INT AS startyr,
+            CASE WHEN enddate IS NOT NULL
+                 THEN SUBSTRING(enddate, 1, 4)::INT
+                 WHEN degree_clean = 'Master' OR degree_clean = 'MBA'
+                 THEN SUBSTRING(startdate, 1, 4)::INT + 2
+                 ELSE SUBSTRING(startdate, 1, 4)::INT + 4
+            END AS endyr
+        FROM {rawmerge_tab}
+        WHERE startdate IS NULL
+           OR (SUBSTRING(startdate, 1, 4)::INT <= ref_year + {t1}
+               AND COALESCE(SUBSTRING(enddate, 1, 4)::INT,
+                            SUBSTRING(startdate, 1, 4)::INT + 4)
+                   >= ref_year + {t0})
+    ) AS x
+    ON x.ref_year + time.t BETWEEN x.startyr AND x.endyr
+    AND time.foia_indiv_id = x.foia_indiv_id
+    AND time.user_id = x.user_id
+    ORDER BY time.foia_indiv_id, time.user_id, time.t
+    """
+    materialize_table(f"{tabname}_educlong", educlong_sql, con=con)
+
+    # Step 2: filter null-t rows and GROUP BY aggregation
+    educgroup_sql = f"""
+    SELECT
+        foia_indiv_id, user_id, t,
+        -- EDUCATION STATUS (exhaustive, mutually exclusive)
+        CASE WHEN COUNT(DISTINCT education_number) = 0 THEN 1 ELSE 0 END AS no_educations,
+        MAX(CASE WHEN start_before = 0 THEN 1 ELSE 0 END) AS new_educ,
+        MAX(CASE WHEN start_before = 1 THEN 1 ELSE 0 END) AS continuing_educ,
+        -- EDUCATION LOCATION
+        MAX(educ_in_us) AS educ_in_us, MAX(educ_in_home_country) AS educ_in_home_country,
+        MAX(CASE WHEN educ_in_us = 0 AND educ_in_home_country = 0 AND educ_loc_null = 0
+                 THEN 1 ELSE 0 END) AS educ_non_us_non_home,
+        MAX(masters) AS masters, MAX(doctors) AS doctors,
+        MAX(CASE WHEN start_before = 0 AND educ_in_us = 1 THEN 1 ELSE 0 END) AS new_educ_in_us,
+        MAX(CASE WHEN start_before = 0 AND educ_in_home_country = 1
+                 THEN 1 ELSE 0 END) AS new_educ_in_home_country,
+        MAX(CASE WHEN start_before = 0 AND masters = 1 THEN 1 ELSE 0 END) AS new_masters,
+        MAX(CASE WHEN start_before = 0 AND doctors = 1 THEN 1 ELSE 0 END) AS new_doctors
+    FROM {tabname}_educlong
+    WHERE t IS NOT NULL
+    GROUP BY foia_indiv_id, user_id, t
+    """
+    materialize_table(tabname, educgroup_sql, con=con)
+
 
 def _build_rawmerge_query(merge_tab, long_tab, long_tab_vars):
     """Return the SQL for the base rawmerge join (merge × events), used both inline
@@ -1546,7 +1847,7 @@ def _educ_rawmerge_query(merge_tab, educ_tab):
     )
 
 
-def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddatenull = CURRENT_YEAR, rawmerge_tab = None):
+def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddatenull = CURRENT_YEAR, rawmerge_tab = None, compute_frac_t = True):
     """ Takes output of merge function and a table long on user_id x event and returns SQL string for table long on merge x event x t where t is relative to lottery year
 
     Parameters
@@ -1561,6 +1862,9 @@ def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddat
     rawmerge_tab : str, optional
         Pre-materialized rawmerge table name.  When provided, long_tab / long_tab_vars
         are ignored and merge_tab is used only for the time-grid distinct-id lookup.
+    compute_frac_t : bool, optional
+        Whether to compute the frac_t date-arithmetic column. Set False for education
+        (which never uses frac_t) to avoid expensive date math over millions of rows.
 
     Returns
     -------
@@ -1568,14 +1872,32 @@ def get_long_by_year(merge_tab, long_tab, long_tab_vars, t0 = -1, t1 = 5, enddat
     """
 
     if rawmerge_tab is not None:
+        # Pre-filter the rawmerge to events that can overlap with at least one t in [t0, t1].
+        # Events entirely outside the window (startyr > ref_year+t1 or endyr < ref_year+t0)
+        # would match no time-grid row and thus produce no output rows. Removing them up-front
+        # reduces the event table size before the expensive LEFT JOIN range scan.
+        # Uses CURRENT_YEAR as a conservative null-enddate fallback (safe: the range join
+        # inside long_by_year applies the exact enddatenull logic as a second pass).
+        filtered_rawmerge = (
+            f"(SELECT * FROM {rawmerge_tab} "
+            f"WHERE startdate IS NULL "
+            f"   OR (SUBSTRING(startdate, 1, 4)::INT <= ref_year + {t1} "
+            f"       AND COALESCE(SUBSTRING(enddate, 1, 4)::INT, {int(CURRENT_YEAR)}) "
+            f"           >= ref_year + {t0}))"
+        )
         return help.long_by_year(
-            tab = rawmerge_tab, t0 = t0, t1 = t1, t_ref = 'x.ref_year',
+            tab = filtered_rawmerge, t0 = t0, t1 = t1, t_ref = 'x.ref_year',
             enddatenull = enddatenull, joinids = 'user_id, foia_indiv_id',
             distinct_ids_tab = merge_tab,
+            compute_frac_t = compute_frac_t,
         )
 
     rawmerge = _build_rawmerge_query(merge_tab, long_tab, long_tab_vars)
-    return help.long_by_year(tab = f'({rawmerge})', t0 = t0, t1 = t1, t_ref = 'x.ref_year', enddatenull = enddatenull, joinids = 'user_id, foia_indiv_id')
+    return help.long_by_year(
+        tab = f'({rawmerge})', t0 = t0, t1 = t1, t_ref = 'x.ref_year',
+        enddatenull = enddatenull, joinids = 'user_id, foia_indiv_id',
+        compute_frac_t = compute_frac_t,
+    )
 
 
 def _sql_escape_path(path):
@@ -1725,7 +2047,7 @@ def materialize_table(table_name, query, con = con_indiv):
     print(f"Materialized {table_name}: {n:,} rows ({_fmt_elapsed(elapsed)})")
 
 
-def _tvars_pivot_query(pos_long_tab, educ_long_tab, t0 = -1, t1 = 2):
+def _tvars_pivot_query(pos_long_tab, educ_long_tab, t0 = -2, t1 = 3):
     """Build the final pivot from already-materialized pos/educ long tables.
 
     Splits the expensive part of get_rel_year_inds_wide_by_t into a cheap
@@ -1795,7 +2117,7 @@ def _tvars_pivot_query(pos_long_tab, educ_long_tab, t0 = -1, t1 = 2):
     """
 
 
-def with_t_vars_query(base_table, t0 = -1, t1 = 2, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
+def with_t_vars_query(base_table, t0 = -2, t1 = 3, pos_tab = 'merged_pos_clean', educ_tab = 'rev_educ_clean'):
     return f"""
     SELECT * EXCLUDE (b.foia_indiv_id, b.user_id)
     FROM {base_table} AS a
@@ -1813,6 +2135,177 @@ def with_t_vars_from_table_query(base_table, tvars_table):
     """
 
 
+def _build_us_educ_from_baseline(con, src_path, dst_path, extra_where=None, overwrite=False):
+    """Filter baseline parquet to us_educ=1, optionally applying an extra WHERE clause.
+
+    Used by build_from_file mode to produce us_educ and us_educ_prefilt samples
+    without re-running the full merge pipeline. If us_educ is absent from the parquet
+    (older baselines), it is joined in from rev_indiv.
+
+    Args:
+        con: DuckDB connection.
+        src_path: Path to the source baseline parquet (already has t-vars joined).
+        dst_path: Output parquet path.
+        extra_where: Optional SQL expression (no WHERE keyword) to AND with us_educ=1.
+        overwrite: Passed to write_query_to_parquet.
+    """
+    escaped = _sql_escape_path(src_path)
+
+    # Load into temp table so we can inspect columns and optionally augment with us_educ
+    materialize_table("_bff_baseline_src", f"SELECT * FROM read_parquet('{escaped}')", con=con)
+    n_src = con.execute("SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM _bff_baseline_src").fetchone()
+    print(f"  Source: {n_src[0]:,} rows, {n_src[1]:,} apps")
+
+    src_cols = {r[0] for r in con.execute("DESCRIBE _bff_baseline_src").fetchall()}
+    if "us_educ" not in src_cols:
+        print("  us_educ column not found in baseline parquet; joining from rev_indiv...")
+        con.execute("""
+            CREATE OR REPLACE TABLE _bff_baseline_src AS
+            SELECT b.*, r.us_educ
+            FROM _bff_baseline_src AS b
+            LEFT JOIN (SELECT DISTINCT user_id, us_educ FROM rev_indiv) AS r ON b.user_id = r.user_id
+        """)
+
+    if extra_where:
+        # The prefilt SQL was written against the foia_indiv source table (original column names
+        # like 'country', 'subregion'). Rather than remapping those names to their aliases in
+        # the baseline parquet, filter foia_indiv with the prefilt and inner-join the result.
+        query = f"""
+            SELECT b.* FROM _bff_baseline_src AS b
+            INNER JOIN (
+                SELECT DISTINCT foia_indiv_id FROM foia_indiv WHERE {extra_where}
+            ) AS f ON b.foia_indiv_id = f.foia_indiv_id
+            WHERE b.us_educ = 1
+        """
+    else:
+        query = "SELECT * FROM _bff_baseline_src WHERE us_educ = 1"
+
+    n_dst = con.execute(f"SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM ({query})").fetchone()
+    pct = 100.0 * n_dst[1] / n_src[1] if n_src[1] > 0 else 0.0
+    print(f"  After filter: {n_dst[0]:,} rows, {n_dst[1]:,} apps ({pct:.1f}% of source)")
+    write_query_to_parquet(query, dst_path, overwrite=overwrite, con=con)
+
+
+def _build_strict_quantile_from_baseline(
+    con, src_path, dst_path, q_level,
+    min_firm_quality=icfg.STRICT_MIN_FIRM_QUALITY,
+    min_country_score=icfg.STRICT_MIN_COUNTRY_SCORE,
+    require_est_yob=icfg.STRICT_REQUIRE_EST_YOB,
+    max_n_match_filt=icfg.STRICT_MAX_N_MATCH_FILT,
+    overwrite=False,
+):
+    """Build a us_educ + strict sample from baseline parquet using a quantile-derived total_score threshold.
+
+    Filters to us_educ=1, computes the q_level quantile of total_score among rank-1 matches
+    in that subset, then applies the strict filter with weight_norm=0 (disabled) and that
+    computed cutoff. Other strict criteria (firm_quality, country_score, est_yob) use
+    standard config values. If us_educ is absent from the parquet, it is joined from rev_indiv.
+
+    Args:
+        con: DuckDB connection.
+        src_path: Path to the source baseline parquet.
+        dst_path: Output parquet path.
+        q_level: Quantile level (0–1) for computing the total_score cutoff.
+        overwrite: Passed to write_query_to_parquet.
+    """
+    escaped = _sql_escape_path(src_path)
+
+    # Load into temp table and ensure us_educ is present
+    materialize_table("_bff_strict_src", f"SELECT * FROM read_parquet('{escaped}')", con=con)
+    src_cols = {r[0] for r in con.execute("DESCRIBE _bff_strict_src").fetchall()}
+    if "us_educ" not in src_cols:
+        print("  us_educ column not found in baseline parquet; joining from rev_indiv...")
+        con.execute("""
+            CREATE OR REPLACE TABLE _bff_strict_src AS
+            SELECT b.*, r.us_educ
+            FROM _bff_strict_src AS b
+            LEFT JOIN (SELECT DISTINCT user_id, us_educ FROM rev_indiv) AS r ON b.user_id = r.user_id
+        """)
+
+    # Compute quantile threshold from rank-1 us_educ matches
+    cutoff = con.execute(f"""
+        SELECT quantile_cont(total_score, {q_level})
+        FROM _bff_strict_src
+        WHERE match_rank = 1 AND us_educ = 1
+    """).fetchone()[0]
+    print(f"  Strict Q{q_level:.0%}: total_score cutoff = {cutoff:.4f}")
+
+    conditions = [
+        "match_rank = 1",
+        "us_educ = 1",
+        f"total_score >= {cutoff}",
+        f"firm_match_quality_mult >= {min_firm_quality}",
+        f"country_score >= {min_country_score}",
+    ]
+    if require_est_yob:
+        conditions.append("est_yob IS NOT NULL")
+    if max_n_match_filt is not None:
+        conditions.append(f"n_match_filt <= {max_n_match_filt}")
+    where_clause = " AND ".join(conditions)
+    query = f"SELECT * FROM _bff_strict_src WHERE {where_clause}"
+
+    n_dst = con.execute(f"SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM ({query})").fetchone()
+    n_src = con.execute("SELECT COUNT(DISTINCT foia_indiv_id) FROM _bff_strict_src WHERE match_rank = 1 AND us_educ = 1").fetchone()
+    pct = 100.0 * n_dst[1] / n_src[0] if n_src[0] > 0 else 0.0
+    print(f"  After filter: {n_dst[0]:,} rows, {n_dst[1]:,} apps ({pct:.1f}% of rank-1 us_educ)")
+    write_query_to_parquet(query, dst_path, overwrite=overwrite, con=con)
+
+
+def _build_us_educ_optimal_from_baseline(con, src_path, dst_path, overwrite=False):
+    """Build a us_educ + optimal-dedup sample from baseline parquet.
+
+    Filters baseline to us_educ=1, then runs maximum-weight bipartite matching
+    (_apply_optimal_dedup) on that filtered subset to enforce 1:1 (app, user) assignment
+    within each lottery_year. If us_educ is absent from the parquet, it is joined from
+    rev_indiv. The baseline parquet must contain total_score and lottery_year.
+
+    Args:
+        con: DuckDB connection.
+        src_path: Path to the source baseline parquet.
+        dst_path: Output parquet path.
+        overwrite: Passed to write_query_to_parquet.
+    """
+    escaped = _sql_escape_path(src_path)
+
+    # Load full baseline into temp table; join us_educ if missing
+    materialize_table("_bff_baseline_opt_src", f"SELECT * FROM read_parquet('{escaped}')", con=con)
+    src_cols = {r[0] for r in con.execute("DESCRIBE _bff_baseline_opt_src").fetchall()}
+    if "us_educ" not in src_cols:
+        print("  us_educ column not found in baseline parquet; joining from rev_indiv...")
+        con.execute("""
+            CREATE OR REPLACE TABLE _bff_baseline_opt_src AS
+            SELECT b.*, r.us_educ
+            FROM _bff_baseline_opt_src AS b
+            LEFT JOIN (SELECT DISTINCT user_id, us_educ FROM rev_indiv) AS r ON b.user_id = r.user_id
+        """)
+
+    # Filter to us_educ=1 for the matching step
+    materialize_table(
+        "_bff_us_educ_base",
+        "SELECT * FROM _bff_baseline_opt_src WHERE us_educ = 1",
+        con=con,
+    )
+    n_pre = con.execute("SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM _bff_us_educ_base").fetchone()
+    print(f"  us_educ base: {n_pre[0]:,} rows, {n_pre[1]:,} apps")
+
+    # Run bipartite matching on the us_educ-filtered candidates
+    _apply_optimal_dedup(con, "_bff_us_educ_base", out_table="_bff_opt_pairs")
+
+    # Keep only winning pairs; retain all columns from the filtered base
+    query = """
+        SELECT b.*
+        FROM _bff_us_educ_base AS b
+        INNER JOIN _bff_opt_pairs AS p
+            ON b.lottery_year = p.lottery_year
+           AND b.foia_indiv_id = p.foia_indiv_id
+           AND b.user_id = p.user_id
+    """
+    n_post = con.execute(f"SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM ({query})").fetchone()
+    pct = 100.0 * n_post[1] / n_pre[1] if n_pre[1] > 0 else 0.0
+    print(f"  After optimal dedup: {n_post[0]:,} rows, {n_post[1]:,} apps ({pct:.1f}% of us_educ base)")
+    write_query_to_parquet(query, dst_path, overwrite=overwrite, con=con)
+
+
 def build_reg_inputs(
     overwrite = None,
     testing = None,
@@ -1823,6 +2316,10 @@ def build_reg_inputs(
     test_materialize_intermediate_tables = None,
     test_table_prefix = None,
     strict_only = False,
+    us_educ_only = False,
+    build_from_file = False,    # skip full pipeline; load baseline parquet and build new samples from it
+    us_educ_as_baseline = None,  # if True, filter to us_educ=1 after match_filt; all variants built from filtered universe
+    build_outputs = None,   # list of output names to build; None = use config (icfg.BUILD_OUTPUTS); empty list = all
     con = con_indiv,
 ):
     """Builds merge outputs consumed by 04_analysis/reg.py."""
@@ -1831,6 +2328,14 @@ def build_reg_inputs(
 
     if overwrite is None:
         overwrite = icfg.BUILD_OVERWRITE
+    if strict_only is False:
+        strict_only = icfg.BUILD_STRICT_ONLY
+    if us_educ_only is False:
+        us_educ_only = icfg.BUILD_US_EDUC_ONLY
+    if build_from_file is False:
+        build_from_file = icfg.BUILD_FROM_FILE
+    if us_educ_as_baseline is None:
+        us_educ_as_baseline = icfg.BUILD_US_EDUC_AS_BASELINE
     if testing is None:
         testing = icfg.TESTING_ENABLED
     if test_sample_matches is None:
@@ -1845,6 +2350,10 @@ def build_reg_inputs(
         test_materialize_intermediate_tables = icfg.TESTING_MATERIALIZE_INTERMEDIATE_TABLES
     if test_table_prefix is None:
         test_table_prefix = icfg.TESTING_TABLE_PREFIX
+    if build_outputs is None:
+        build_outputs = icfg.BUILD_OUTPUTS  # None means build all
+    # Normalise: None or empty list both mean "all outputs"
+    build_outputs_set = set(build_outputs) if build_outputs else None
 
     if testing:
         print("Testing mode enabled: running merge only on one foia_firm_uid x lottery_year subset.")
@@ -1888,11 +2397,84 @@ def build_reg_inputs(
         print(f"Total strict_only runtime: {_fmt_elapsed(time.perf_counter() - pipeline_t0)}")
         return
 
-    prefilt = (icfg.BUILD_PREFILT_SQL or "").strip()
-    if prefilt:
-        print(f"Using configured prefilter: {prefilt}")
+    if us_educ_only:
+        # Load the already-built baseline parquet (which has t-vars pre-joined) and apply us_educ filter.
+        # This avoids re-running the full merge pipeline.
+        baseline_path = icfg.choose_path(icfg.MERGE_FILT_BASELINE_PARQUET, icfg.MERGE_FILT_BASELINE_PARQUET_LEGACY)
+        print(f"us_educ_only mode: loading baseline from {baseline_path}")
+        con.execute(f"CREATE OR REPLACE TABLE _merge_baseline_base AS SELECT * FROM read_parquet('{baseline_path}')")
+        # us_educ may be absent in older baseline parquets; join it from rev_indiv if needed
+        baseline_cols = {r[0] for r in con.execute("DESCRIBE _merge_baseline_base").fetchall()}
+        if "us_educ" not in baseline_cols:
+            print("  us_educ column not found in baseline parquet; joining from rev_indiv...")
+            con.execute("""
+                CREATE OR REPLACE TABLE _merge_baseline_base AS
+                SELECT b.*, r.us_educ
+                FROM _merge_baseline_base AS b
+                LEFT JOIN (SELECT DISTINCT user_id, us_educ FROM rev_indiv) AS r ON b.user_id = r.user_id
+            """)
+        materialize_table("_merge_us_educ_base", _build_stage_us_educ_query("_merge_baseline_base"), con=con)
+        n_us_educ = con.execute("SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM _merge_us_educ_base").fetchone()
+        n_baseline_all = con.execute("SELECT COUNT(DISTINCT foia_indiv_id) FROM _merge_baseline_base").fetchone()
+        pct_us = 100.0 * n_us_educ[1] / n_baseline_all[0] if n_baseline_all[0] > 0 else 0.0
+        print(f"  US-educ sample: {n_us_educ[1]:,} apps ({pct_us:.1f}% of baseline), {n_us_educ[0]:,} rows")
+        # Baseline parquet already has t-vars joined; save us_educ rows directly (no second t-vars join)
+        write_query_to_parquet("SELECT * FROM _merge_us_educ_base", icfg.MERGE_FILT_US_EDUC_PARQUET, overwrite=overwrite, con=con)
+        print(f"Total us_educ_only runtime: {_fmt_elapsed(time.perf_counter() - pipeline_t0)}")
+        return
+
+    if build_from_file:
+        # Skip the full merge pipeline. Load the already-built baseline parquet (which has
+        # t-vars pre-joined) and build new samples by applying post-hoc filters.
+        baseline_path = icfg.choose_path(icfg.MERGE_FILT_BASELINE_PARQUET, icfg.MERGE_FILT_BASELINE_PARQUET_LEGACY)
+        print(f"build_from_file mode: loading baseline from {baseline_path}")
+
+        # (1) us_educ: baseline filtered to us_educ=1
+        print("Building us_educ from baseline parquet...")
+        _build_us_educ_from_baseline(con, baseline_path, icfg.MERGE_FILT_US_EDUC_PARQUET, overwrite=overwrite)
+
+        # (2) us_educ + prefilt: apply both us_educ and the prefilt WHERE clause to baseline
+        if icfg.BUILD_US_EDUC_PREFILT:
+            prefilt_sql = icfg.BUILD_PREFILT_VARIANTS.get("prefilt", "")
+            # Strip leading WHERE keyword if present (extra_where is just the condition expression)
+            prefilt_cond = re.sub(r"^\s*WHERE\s+", "", prefilt_sql, flags=re.IGNORECASE).strip()
+            print(f"Building us_educ_prefilt from baseline parquet (prefilt condition: {prefilt_cond})...")
+            _build_us_educ_from_baseline(
+                con, baseline_path, icfg.MERGE_FILT_US_EDUC_PREFILT_PARQUET,
+                extra_where=prefilt_cond, overwrite=overwrite,
+            )
+
+        # (3) us_educ + optimal dedup: filter to us_educ=1 then run bipartite matching
+        if icfg.BUILD_US_EDUC_OPTIMAL:
+            print("Building us_educ_opt from baseline parquet (us_educ=1 then optimal dedup)...")
+            _build_us_educ_optimal_from_baseline(
+                con, baseline_path, icfg.MERGE_FILT_US_EDUC_OPT_PARQUET, overwrite=overwrite,
+            )
+
+        # (4) Strict quantile variants: rank-1, weight_norm=0, total_score >= Q25/Q50/Q75
+        if icfg.BUILD_STRICT_QUANTILE_VARIANTS:
+            for label, q_level, dst_path in [
+                ("low",  icfg.STRICT_QUANTILE_LOW,  icfg.MERGE_FILT_STRICT_LOW_PARQUET),
+                ("med",  icfg.STRICT_QUANTILE_MED,  icfg.MERGE_FILT_STRICT_MED_PARQUET),
+                ("high", icfg.STRICT_QUANTILE_HIGH, icfg.MERGE_FILT_STRICT_HIGH_PARQUET),
+            ]:
+                print(f"Building strict_{label} (Q{q_level:.0%} total_score cutoff, weight_norm=0)...")
+                _build_strict_quantile_from_baseline(
+                    con, baseline_path, dst_path, q_level, overwrite=overwrite,
+                )
+
+        print(f"Total build_from_file runtime: {_fmt_elapsed(time.perf_counter() - pipeline_t0)}")
+        return
+
+    prefilt_variants = icfg.BUILD_PREFILT_VARIANTS  # dict: name -> SQL WHERE clause
+    # If a selective output list is active, restrict prefilt variants to only those requested.
+    if build_outputs_set is not None:
+        prefilt_variants = {k: v for k, v in prefilt_variants.items() if k in build_outputs_set}
+        print(f"Selective build active — outputs requested: {sorted(build_outputs_set)}")
+    if prefilt_variants:
+        print(f"Using {len(prefilt_variants)} prefilt variant(s): {list(prefilt_variants)}")
     else:
-        print("No prefilter configured; prefilt output will mirror baseline.")
+        print("No prefilt variants configured; skipping prefilt outputs.")
 
     country_score_cutoff = 0.03
     country_fallback_topn = 3
@@ -1933,6 +2515,8 @@ def build_reg_inputs(
     print(f"Occupation score: w_occ={w_occ}, occ_score_halflife={occ_score_halflife}, foia_occ_rank_cutoff={foia_occ_rank_cutoff}")
     print(f"Score mode: {'multiplicative (weighted geometric mean)' if multiplicative_score else 'additive (weighted sum)'}")
     print(f"Country competition: weight={competition_weight}, threshold={competition_threshold}")
+    if us_educ_as_baseline:
+        print("us_educ_as_baseline=True: all outputs derived from us_educ-filtered universe.")
 
     print("Building shared raw/base stages...")
     materialize_table(
@@ -2021,6 +2605,26 @@ def build_reg_inputs(
         match_filt_tab_base = "_merge_match_filt_deduped"
         firm_year_user_dedup_sql = False  # SQL QUALIFY dedup already applied via pre-filter
 
+    # us_educ_as_baseline: filter the match_filt universe to users with US education before
+    # building baseline and all derived outputs. This makes us_educ the primary baseline
+    # (written to MERGE_FILT_US_EDUC_BASELINE_PARQUET) and skips the separate us_educ output.
+    # Skip gracefully if rev_indiv was built without the us_educ column.
+    if us_educ_as_baseline and not HAS_US_EDUC_COL:
+        print("WARNING: us_educ_as_baseline=True but rev_indiv missing us_educ column. Skipping us_educ filter.")
+        us_educ_as_baseline = False
+    if us_educ_as_baseline:
+        print("us_educ_as_baseline: filtering match_filt to us_educ=1 users...")
+        materialize_table(
+            "_merge_match_filt_us_educ",
+            f"SELECT m.* FROM {match_filt_tab_base} m "
+            f"JOIN (SELECT DISTINCT user_id FROM rev_indiv WHERE us_educ = 1) u ON m.user_id = u.user_id",
+            con = con,
+        )
+        n_base = con.execute(f"SELECT COUNT(DISTINCT foia_indiv_id) FROM {match_filt_tab_base}").fetchone()[0]
+        n_us = con.execute("SELECT COUNT(DISTINCT foia_indiv_id) FROM _merge_match_filt_us_educ").fetchone()[0]
+        print(f"  us_educ filter: {n_us:,} apps ({100.0*n_us/n_base:.1f}% of {n_base:,} match_filt apps)")
+        match_filt_tab_base = "_merge_match_filt_us_educ"
+
     materialize_table(
         "_merge_baseline_base",
         _build_stage_queries_from_match_filt(
@@ -2046,96 +2650,102 @@ def build_reg_inputs(
         con = con,
     )
 
-    if prefilt:
-        print("Building prefilt base with one extra raw pass...")
-        materialize_table(
-            "_merge_raw_prefilt",
-            merge_raw_func("rev_indiv", "foia_indiv", foia_prefilt = prefilt, subregion = True, ALPHA = alpha, COMPETITION_WEIGHT = competition_weight, COMPETITION_THRESHOLD = competition_threshold),
-            con = con,
-        )
-        prefilt_stage = _build_merge_filt_stage_queries(
-            "_merge_raw_prefilt",
-            postfilt = "none",
-            MATCH_MULT_CUTOFF = 4,
-            REV_MULT_COEFF = rev_mult_coeff,
-            COUNTRY_SCORE_CUTOFF = country_score_cutoff,
-            COUNTRY_FALLBACK_TOPN = country_fallback_topn,
-            COUNTRY_TOTAL_MARGIN = country_total_margin,
-            MONTH_BUFFER = month_buffer,
-            YOB_BUFFER = yob_buffer,
-            F_PROB_BUFFER = f_prob_buffer,
-            firm_year_user_dedup = firm_year_user_dedup,
-            NO_COUNTRY_MIN_SUBREGION_SCORE = no_country_min_subregion,
-            NO_COUNTRY_MIN_TOTAL_SCORE = no_country_min_total,
-            NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL = no_country_min_f_score_if_yob_null,
-            AMBIGUITY_WEIGHT_GAP_CUTOFF = ambiguity_weight_gap_cutoff,
-            BAD_MATCH_GUARD_ENABLED = bad_match_guard_enabled,
-            BAD_MATCH_GUARD_SUBREGION_SCORE_LT = bad_match_guard_subregion_lt,
-            BAD_MATCH_GUARD_F_SCORE_LT = bad_match_guard_f_score_lt,
-            BAD_MATCH_GUARD_TOTAL_SCORE_LT = bad_match_guard_total_score_lt,
-            W_COUNTRY = w_country,
-            W_YOB = w_yob,
-            W_GENDER = w_gender,
-            W_OCC = w_occ,
-            OCC_SCORE_HALFLIFE = occ_score_halflife,
-            FOIA_OCC_RANK_CUTOFF = foia_occ_rank_cutoff,
-            MULTIPLICATIVE_SCORE = multiplicative_score,
-        )
-        materialize_table("_merge_match_filt_prefilt", prefilt_stage["match_filt"], con = con)
-
-        match_filt_tab_prefilt = "_merge_match_filt_prefilt"
-        if firm_year_user_dedup and firm_year_user_dedup_optimal:
-            print("Computing optimal dedup for prefilt branch...")
-            _tmp_weighted_q = _build_stage_weighted_query(
-                "SELECT * FROM _merge_match_filt_prefilt",
-                firm_year_user_dedup = False,
-                YOB_BUFFER = yob_buffer,
-                F_PROB_BUFFER = f_prob_buffer,
-                W_COUNTRY = w_country,
-                W_YOB = w_yob,
-                W_GENDER = w_gender,
-                W_OCC = w_occ,
-                OCC_SCORE_HALFLIFE = occ_score_halflife,
-                MULTIPLICATIVE_SCORE = multiplicative_score,
-            )
-            materialize_table("_merge_weighted_tmp", _tmp_weighted_q, con = con)
-            _apply_optimal_dedup(con, "_merge_weighted_tmp", out_table = "_optimal_dedup_pairs_prefilt")
+    for variant_name, variant_sql in prefilt_variants.items():
+        variant_sql = (variant_sql or "").strip()
+        if variant_sql:
+            print(f"Building {variant_name} base with prefilt: {variant_sql}")
             materialize_table(
-                "_merge_match_filt_prefilt_deduped",
-                "SELECT m.* FROM _merge_match_filt_prefilt m JOIN _optimal_dedup_pairs_prefilt p USING (lottery_year, foia_indiv_id, user_id)",
+                f"_merge_raw_{variant_name}",
+                merge_raw_func("rev_indiv", "foia_indiv", foia_prefilt = variant_sql, subregion = True, ALPHA = alpha, COMPETITION_WEIGHT = competition_weight, COMPETITION_THRESHOLD = competition_threshold),
                 con = con,
             )
-            con.sql("DROP TABLE IF EXISTS _merge_weighted_tmp")
-            match_filt_tab_prefilt = "_merge_match_filt_prefilt_deduped"
-
-        materialize_table(
-            "_merge_prefilt_base",
-            _build_stage_queries_from_match_filt(
-                match_filt_tab_prefilt,
+            variant_stage = _build_merge_filt_stage_queries(
+                f"_merge_raw_{variant_name}",
                 postfilt = "none",
                 MATCH_MULT_CUTOFF = 4,
                 REV_MULT_COEFF = rev_mult_coeff,
+                COUNTRY_SCORE_CUTOFF = country_score_cutoff,
+                COUNTRY_FALLBACK_TOPN = country_fallback_topn,
+                COUNTRY_TOTAL_MARGIN = country_total_margin,
+                MONTH_BUFFER = month_buffer,
                 YOB_BUFFER = yob_buffer,
                 F_PROB_BUFFER = f_prob_buffer,
-                firm_year_user_dedup = firm_year_user_dedup_sql,
-                W_COUNTRY = w_country,
-                W_YOB = w_yob,
-                W_GENDER = w_gender,
-                W_OCC = w_occ,
-                OCC_SCORE_HALFLIFE = occ_score_halflife,
-                MULTIPLICATIVE_SCORE = multiplicative_score,
+                firm_year_user_dedup = firm_year_user_dedup,
+                NO_COUNTRY_MIN_SUBREGION_SCORE = no_country_min_subregion,
+                NO_COUNTRY_MIN_TOTAL_SCORE = no_country_min_total,
+                NO_COUNTRY_MIN_F_SCORE_IF_EST_YOB_NULL = no_country_min_f_score_if_yob_null,
                 AMBIGUITY_WEIGHT_GAP_CUTOFF = ambiguity_weight_gap_cutoff,
                 BAD_MATCH_GUARD_ENABLED = bad_match_guard_enabled,
                 BAD_MATCH_GUARD_SUBREGION_SCORE_LT = bad_match_guard_subregion_lt,
                 BAD_MATCH_GUARD_F_SCORE_LT = bad_match_guard_f_score_lt,
                 BAD_MATCH_GUARD_TOTAL_SCORE_LT = bad_match_guard_total_score_lt,
-            )["final"],
-            con = con,
-        )
-    else:
-        materialize_table("_merge_prefilt_base", "SELECT * FROM _merge_baseline_base", con = con)
+                W_COUNTRY = w_country,
+                W_YOB = w_yob,
+                W_GENDER = w_gender,
+                W_OCC = w_occ,
+                OCC_SCORE_HALFLIFE = occ_score_halflife,
+                FOIA_OCC_RANK_CUTOFF = foia_occ_rank_cutoff,
+                MULTIPLICATIVE_SCORE = multiplicative_score,
+            )
+            materialize_table(f"_merge_match_filt_{variant_name}", variant_stage["match_filt"], con = con)
+
+            match_filt_tab_variant = f"_merge_match_filt_{variant_name}"
+            if firm_year_user_dedup and firm_year_user_dedup_optimal:
+                print(f"Computing optimal dedup for {variant_name} branch...")
+                _tmp_weighted_q = _build_stage_weighted_query(
+                    f"SELECT * FROM _merge_match_filt_{variant_name}",
+                    firm_year_user_dedup = False,
+                    YOB_BUFFER = yob_buffer,
+                    F_PROB_BUFFER = f_prob_buffer,
+                    W_COUNTRY = w_country,
+                    W_YOB = w_yob,
+                    W_GENDER = w_gender,
+                    W_OCC = w_occ,
+                    OCC_SCORE_HALFLIFE = occ_score_halflife,
+                    MULTIPLICATIVE_SCORE = multiplicative_score,
+                )
+                materialize_table("_merge_weighted_tmp", _tmp_weighted_q, con = con)
+                _apply_optimal_dedup(con, "_merge_weighted_tmp", out_table = f"_optimal_dedup_pairs_{variant_name}")
+                materialize_table(
+                    f"_merge_match_filt_{variant_name}_deduped",
+                    f"SELECT m.* FROM _merge_match_filt_{variant_name} m JOIN _optimal_dedup_pairs_{variant_name} p USING (lottery_year, foia_indiv_id, user_id)",
+                    con = con,
+                )
+                con.sql("DROP TABLE IF EXISTS _merge_weighted_tmp")
+                match_filt_tab_variant = f"_merge_match_filt_{variant_name}_deduped"
+
+            materialize_table(
+                f"_merge_{variant_name}_base",
+                _build_stage_queries_from_match_filt(
+                    match_filt_tab_variant,
+                    postfilt = "none",
+                    MATCH_MULT_CUTOFF = 4,
+                    REV_MULT_COEFF = rev_mult_coeff,
+                    YOB_BUFFER = yob_buffer,
+                    F_PROB_BUFFER = f_prob_buffer,
+                    firm_year_user_dedup = firm_year_user_dedup_sql,
+                    W_COUNTRY = w_country,
+                    W_YOB = w_yob,
+                    W_GENDER = w_gender,
+                    W_OCC = w_occ,
+                    OCC_SCORE_HALFLIFE = occ_score_halflife,
+                    MULTIPLICATIVE_SCORE = multiplicative_score,
+                    AMBIGUITY_WEIGHT_GAP_CUTOFF = ambiguity_weight_gap_cutoff,
+                    BAD_MATCH_GUARD_ENABLED = bad_match_guard_enabled,
+                    BAD_MATCH_GUARD_SUBREGION_SCORE_LT = bad_match_guard_subregion_lt,
+                    BAD_MATCH_GUARD_F_SCORE_LT = bad_match_guard_f_score_lt,
+                    BAD_MATCH_GUARD_TOTAL_SCORE_LT = bad_match_guard_total_score_lt,
+                )["final"],
+                con = con,
+            )
+        else:
+            # Empty SQL: mirror baseline (no filtering)
+            materialize_table(f"_merge_{variant_name}_base", "SELECT * FROM _merge_baseline_base", con = con)
 
     for cutoff in (2, 4, 6):
+        if build_outputs_set is not None and f"mult{cutoff}" not in build_outputs_set:
+            print(f"Skipping mult{cutoff} (not in requested outputs).")
+            continue
         print(f"Building mult{cutoff} base from shared stage...")
         materialize_table(
             f"_merge_mult{cutoff}_base",
@@ -2191,38 +2801,81 @@ def build_reg_inputs(
         _educ_rawmerge_query("_merge_baseline_base", "_merge_educ_subset"),
         con = con,
     )
-    materialize_table(
+    # Build pos/educ long tables in sequential materialized steps (much faster than one
+    # monolithic nested query — each step can plan/spill independently in DuckDB).
+    _materialize_pos_long(
         "_merge_pos_long",
-        get_rel_year_inds_pos("_merge_baseline_base", t0 = -1, t1 = 2, pos_tab = "_merge_pos_subset", rcid_lookup_tab = "_merge_rcid_fuid_lookup", rawmerge_tab = "_merge_rawmerge_pos"),
+        merge_tab = "_merge_baseline_base",
+        pos_tab = "_merge_pos_subset",
+        t0 = -2, t1 = 3,
+        rcid_lookup_tab = "_merge_rcid_fuid_lookup",
+        rawmerge_tab = "_merge_rawmerge_pos",
         con = con,
     )
-    materialize_table(
+    _materialize_educ_long(
         "_merge_educ_long",
-        get_rel_year_inds_educ("_merge_baseline_base", t0 = -1, t1 = 2, educ_tab = "_merge_educ_subset", rawmerge_tab = "_merge_rawmerge_educ"),
+        merge_tab = "_merge_baseline_base",
+        educ_tab = "_merge_educ_subset",
+        t0 = -2, t1 = 3,
+        rawmerge_tab = "_merge_rawmerge_educ",
         con = con,
     )
     materialize_table(
         "_merge_baseline_tvars",
-        _tvars_pivot_query("_merge_pos_long", "_merge_educ_long", t0 = -1, t1 = 2),
+        _tvars_pivot_query("_merge_pos_long", "_merge_educ_long", t0 = -2, t1 = 3),
         con = con,
     )
 
     # Build strict sample as post-hoc filter on baseline (rank=1, high weight/score/firm/country thresholds)
-    print("Building strict base from baseline...")
-    materialize_table("_merge_strict_base", _build_stage_strict_query("_merge_baseline_base"), con=con)
-    n_strict = con.execute("SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM _merge_strict_base").fetchone()
-    n_baseline = con.execute("SELECT COUNT(DISTINCT foia_indiv_id) FROM _merge_baseline_base WHERE match_rank = 1").fetchone()
-    pct = 100.0 * n_strict[1] / n_baseline[0] if n_baseline[0] > 0 else 0.0
-    print(f"  Strict sample: {n_strict[1]:,} apps ({pct:.1f}% of baseline rank-1), {n_strict[0]:,} rows")
+    if build_outputs_set is None or "strict" in build_outputs_set:
+        print("Building strict base from baseline...")
+        materialize_table("_merge_strict_base", _build_stage_strict_query("_merge_baseline_base"), con=con)
+        n_strict = con.execute("SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM _merge_strict_base").fetchone()
+        n_baseline = con.execute("SELECT COUNT(DISTINCT foia_indiv_id) FROM _merge_baseline_base WHERE match_rank = 1").fetchone()
+        pct = 100.0 * n_strict[1] / n_baseline[0] if n_baseline[0] > 0 else 0.0
+        print(f"  Strict sample: {n_strict[1]:,} apps ({pct:.1f}% of baseline rank-1), {n_strict[0]:,} rows")
+    else:
+        print("Skipping strict (not in requested outputs).")
+
+    # Build US-education sample: baseline rows where matched user has US education.
+    # Skip when us_educ_as_baseline=True: the baseline already IS the us_educ universe.
+    if not us_educ_as_baseline and (build_outputs_set is None or "us_educ" in build_outputs_set):
+        print("Building us_educ base from baseline...")
+        materialize_table("_merge_us_educ_base", _build_stage_us_educ_query("_merge_baseline_base"), con = con)
+        n_us_educ = con.execute("SELECT COUNT(*), COUNT(DISTINCT foia_indiv_id) FROM _merge_us_educ_base").fetchone()
+        n_baseline_all = con.execute("SELECT COUNT(DISTINCT foia_indiv_id) FROM _merge_baseline_base").fetchone()
+        pct_us = 100.0 * n_us_educ[1] / n_baseline_all[0] if n_baseline_all[0] > 0 else 0.0
+        print(f"  US-educ sample: {n_us_educ[1]:,} apps ({pct_us:.1f}% of baseline), {n_us_educ[0]:,} rows")
+    elif not us_educ_as_baseline:
+        print("Skipping us_educ (not in requested outputs).")
+    else:
+        print("Skipping separate us_educ output (us_educ_as_baseline=True: baseline already is us_educ universe).")
+
+    # Determine output path for baseline: when us_educ_as_baseline, write to dedicated path
+    # so the standard MERGE_FILT_BASELINE_PARQUET is not overwritten with the filtered data.
+    baseline_out_path = (
+        icfg.MERGE_FILT_US_EDUC_BASELINE_PARQUET
+        if us_educ_as_baseline and icfg.MERGE_FILT_US_EDUC_BASELINE_PARQUET
+        else icfg.MERGE_FILT_BASELINE_PARQUET
+    )
 
     outputs = [
-        ("baseline", "_merge_baseline_base", icfg.MERGE_FILT_BASELINE_PARQUET),
-        ("prefilt", "_merge_prefilt_base", icfg.MERGE_FILT_PREFILT_PARQUET),
+        ("baseline", "_merge_baseline_base", baseline_out_path),
+        # All named prefilt variants (already filtered to requested set above)
+        *[
+            (name, f"_merge_{name}_base", icfg.PREFILT_PARQUET_MAP[name])
+            for name in prefilt_variants
+            if name in icfg.PREFILT_PARQUET_MAP
+        ],
         ("mult2", "_merge_mult2_base", icfg.MERGE_FILT_MULT2_PARQUET),
         ("mult4", "_merge_mult4_base", icfg.MERGE_FILT_MULT4_PARQUET),
         ("mult6", "_merge_mult6_base", icfg.MERGE_FILT_MULT6_PARQUET),
         ("strict", "_merge_strict_base", icfg.MERGE_FILT_STRICT_PARQUET),
+        *([("us_educ", "_merge_us_educ_base", icfg.MERGE_FILT_US_EDUC_PARQUET)] if not us_educ_as_baseline else []),
     ]
+    # Filter to only requested outputs (baseline is always saved; it's the core deliverable)
+    if build_outputs_set is not None:
+        outputs = [(n, t, p) for n, t, p in outputs if n in build_outputs_set or n == "baseline"]
     # Optimal dedup outputs go to separate files with _opt suffix so they don't
     # overwrite the standard (greedy) outputs.
     if firm_year_user_dedup and firm_year_user_dedup_optimal:
@@ -2236,6 +2889,40 @@ def build_reg_inputs(
             overwrite = overwrite,
             con = con,
         )
+
+    # --- New samples derived from already-written baseline parquet ---
+    # These use the same helper functions as build_from_file mode, operating on the
+    # saved baseline parquet (which already has t-vars joined).
+
+    # (2) us_educ + prefilt: apply us_educ=1 AND prefilt WHERE clause to baseline
+    if icfg.BUILD_US_EDUC_PREFILT and icfg.MERGE_FILT_US_EDUC_PREFILT_PARQUET:
+        prefilt_sql = icfg.BUILD_PREFILT_VARIANTS.get("prefilt", "")
+        prefilt_cond = re.sub(r"^\s*WHERE\s+", "", prefilt_sql, flags=re.IGNORECASE).strip()
+        print(f"Building us_educ_prefilt from baseline parquet (prefilt condition: {prefilt_cond})...")
+        _build_us_educ_from_baseline(
+            con, baseline_out_path, icfg.MERGE_FILT_US_EDUC_PREFILT_PARQUET,
+            extra_where=prefilt_cond, overwrite=overwrite,
+        )
+
+    # (3) us_educ + optimal dedup: filter to us_educ=1 then run bipartite matching
+    if icfg.BUILD_US_EDUC_OPTIMAL and icfg.MERGE_FILT_US_EDUC_OPT_PARQUET:
+        print("Building us_educ_opt from baseline parquet (us_educ=1 then optimal dedup)...")
+        _build_us_educ_optimal_from_baseline(
+            con, baseline_out_path, icfg.MERGE_FILT_US_EDUC_OPT_PARQUET, overwrite=overwrite,
+        )
+
+    # (4) Strict quantile variants: rank-1, weight_norm=0, total_score >= Q25/Q50/Q75
+    if icfg.BUILD_STRICT_QUANTILE_VARIANTS:
+        for label, q_level, dst_path in [
+            ("low",  icfg.STRICT_QUANTILE_LOW,  icfg.MERGE_FILT_STRICT_LOW_PARQUET),
+            ("med",  icfg.STRICT_QUANTILE_MED,  icfg.MERGE_FILT_STRICT_MED_PARQUET),
+            ("high", icfg.STRICT_QUANTILE_HIGH, icfg.MERGE_FILT_STRICT_HIGH_PARQUET),
+        ]:
+            if dst_path:
+                print(f"Building strict_{label} (Q{q_level:.0%} total_score cutoff, weight_norm=0)...")
+                _build_strict_quantile_from_baseline(
+                    con, baseline_out_path, dst_path, q_level, overwrite=overwrite,
+                )
 
     print(f"Total indiv_merge build runtime: {_fmt_elapsed(time.perf_counter() - pipeline_t0)}")
 

@@ -2,9 +2,29 @@ run_tag: "feb2026"
 
 build:
   overwrite: true
-  firm_year_user_dedup: true   # within a lottery_year, keep each revelio user_id at most once (matched to their highest-scoring applicant). set false to revert to m:1 matching.
-  firm_year_user_dedup_optimal: true  # if true (requires firm_year_user_dedup=true): use maximum weight bipartite matching (Jonker-Volgenant) instead of greedy per-user best-match; also enforces each foia_indiv_id appears at most once; output parquet files get _opt suffix
-  prefilt_sql: "WHERE subregion != 'Southern Asia' AND country != 'Canada' AND country != 'United Kingdom' AND country != 'Australia' AND country != 'China' AND country != 'Taiwan' AND country != 'Singapore' AND country != 'New Zealand' AND country != 'Ireland'"
+  firm_year_user_dedup: false   # within a lottery_year, keep each revelio user_id at most once (matched to their highest-scoring applicant). set false to revert to m:1 matching.
+  firm_year_user_dedup_optimal: false  # if true (requires firm_year_user_dedup=true): use maximum weight bipartite matching (Jonker-Volgenant) instead of greedy per-user best-match; also enforces each foia_indiv_id appears at most once; output parquet files get _opt suffix
+  strict_only: false    # skip full pipeline: load existing baseline parquet and output only strict parquet
+  us_educ_only: false   # skip full pipeline: load existing baseline parquet and output only us_educ parquet
+  build_from_file: false  # skip full pipeline: load existing baseline parquet and build new samples from it (us_educ, us_educ_prefilt, us_educ_optimal, strict quantile variants)
+  us_educ_prefilt: true   # (build_from_file) apply us_educ=1 AND prefilt SQL to baseline
+  us_educ_optimal: true   # (build_from_file) apply us_educ=1 filter to baseline, then run optimal dedup on that subset
+  strict_quantile_variants: true  # build strict_low/med/high at Q25/Q50/Q75 total_score thresholds (weight_norm threshold = 0)
+  strict_quantile_low: 0.25   # quantile of total_score (rank-1 matches) for 'low' strict threshold
+  strict_quantile_med: 0.50   # quantile for 'medium' threshold
+  strict_quantile_high: 0.75  # quantile for 'high' threshold
+  us_educ_as_baseline: true  # if true, filter to us_educ=1 users after match_filt and use as primary baseline (all mult/prefilt/strict variants derived from this filtered universe)
+  # Which outputs to build and save. null (or omit) = build all.
+  # Valid names: baseline, mult2, mult4, mult6, strict, us_educ, prefilt, prefilt_sa, prefilt_anglo, prefilt_cjk
+  # Baseline is always computed (required as dependency); listing only e.g. [strict] skips mult/prefilt computation.
+  outputs: null
+  # Named prefilt variants — each runs a separate merge pass with a different FOIA intake filter.
+  # "prefilt" is the original combined filter; prefilt_sa/anglo/cjk are disaggregated versions.
+  prefilt_variants:
+    prefilt: "WHERE subregion != 'Southern Asia' AND country NOT IN ('Canada', 'United Kingdom', 'Australia', 'China', 'Taiwan', 'Singapore', 'New Zealand', 'Ireland')"
+    prefilt_sa: "WHERE subregion != 'Southern Asia'"
+    prefilt_anglo: "WHERE country NOT IN ('United Kingdom', 'Canada', 'Australia', 'New Zealand', 'Ireland')"
+    prefilt_cjk: "WHERE country NOT IN ('China', 'Taiwan', 'Hong Kong', 'Singapore')"
   ambiguity_weight_gap_cutoff: 0.03
   no_country_min_subregion_score: 0.20
   no_country_min_total_score: 0.12
@@ -18,15 +38,15 @@ build:
   country_competition_weight: 0.0      # downweight country_score when user has strong other-country evidence; 0 = disabled
   country_competition_threshold: 0.0   # min other-country score before penalty kicks in (e.g. 0.5 ignores weak signals)
   w_country: 0.70             # weight on country_score in total_score (w_country+w_yob+w_gender must sum to 1)
-  w_yob: 0.20                 # weight on yob signal
-  w_gender: 0.10              # weight on gender signal
-  w_occ: 0.1                  # occupation score weight; 0 = no change; e.g. 0.05 means 5% on occ, 95% on (country+yob+gender)
-  multiplicative_score: false  # if true, use weighted geometric mean (POWER(score, weight)) instead of weighted sum
+  w_yob: 0.10                 # weight on yob signal
+  w_gender: 0.20              # weight on gender signal
+  w_occ: 0.10                  # occupation score weight; 0 = no change; e.g. 0.05 means 5% on occ, 95% on (country+yob+gender)
+  multiplicative_score: true  # if true, use weighted geometric mean (POWER(score, weight)) instead of weighted sum
   occ_score_halflife: 500     # hyperbolic half-life rank K: at rank K, occ_score=0.5; higher K = gentler decay (rank 100 -> 0.83, rank 500 -> 0.50, rank 2000 -> 0.20)
   foia_occ_rank_cutoff: null  # null = no cutoff; integer = only keep users whose best H-1B occ rank <= this value
   # strict sample: post-hoc filter on baseline for high-precision (low false positive) analysis
-  strict_min_weight_norm: 0.90       # >=90% of score mass on this candidate
-  strict_min_total_score: 0.55       # absolute match quality floor (guards against weight_norm=1 on weak single candidate)
+  strict_min_weight_norm: 0       # >=90% of score mass on this candidate
+  strict_min_total_score: 0.50       # absolute match quality floor (guards against weight_norm=1 on weak single candidate)
   strict_min_firm_quality: 0.80      # firm_match_quality_mult >= 0.80 (1.0 if name match; else llm_match_score_norm — handles rebrands)
   strict_min_country_score: 0.50     # strong country-level evidence required
   strict_require_est_yob: true       # est_yob must be non-null (yob component not imputed)
@@ -59,6 +79,9 @@ paths:
 
   merge_filt_prefilt_parquet: "{root}/data/int/merge_filt_prefilt_${run_tag}.parquet"
   merge_filt_prefilt_parquet_legacy: "{root}/data/int/merge_filt_prefilt_sep8.parquet"
+  merge_filt_prefilt_sa_parquet: "{root}/data/int/merge_filt_prefilt_sa_${run_tag}.parquet"
+  merge_filt_prefilt_anglo_parquet: "{root}/data/int/merge_filt_prefilt_anglo_${run_tag}.parquet"
+  merge_filt_prefilt_cjk_parquet: "{root}/data/int/merge_filt_prefilt_cjk_${run_tag}.parquet"
 
   merge_filt_mult2_parquet: "{root}/data/int/merge_filt_mult2_${run_tag}.parquet"
   merge_filt_mult2_parquet_legacy: "{root}/data/int/merge_filt_mult2_sep8.parquet"
@@ -68,5 +91,13 @@ paths:
   merge_filt_mult6_parquet_legacy: "{root}/data/int/merge_filt_mult6_sep8.parquet"
 
   merge_filt_strict_parquet: "{root}/data/int/merge_filt_strict_${run_tag}.parquet"
+  merge_filt_us_educ_parquet: "{root}/data/int/merge_filt_us_educ_${run_tag}.parquet"
+  merge_filt_us_educ_baseline_parquet: "{root}/data/int/merge_filt_us_educ_baseline_${run_tag}.parquet"
+
+  merge_filt_us_educ_prefilt_parquet: "{root}/data/int/merge_filt_us_educ_prefilt_${run_tag}.parquet"
+  merge_filt_us_educ_opt_parquet: "{root}/data/int/merge_filt_us_educ_opt_${run_tag}.parquet"
+  merge_filt_strict_low_parquet: "{root}/data/int/merge_filt_strict_low_${run_tag}.parquet"
+  merge_filt_strict_med_parquet: "{root}/data/int/merge_filt_strict_med_${run_tag}.parquet"
+  merge_filt_strict_high_parquet: "{root}/data/int/merge_filt_strict_high_${run_tag}.parquet"
 
   optimal_dedup_prededup_parquet: "{root}/data/int/optimal_dedup_prededup_${run_tag}.parquet"

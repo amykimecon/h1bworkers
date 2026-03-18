@@ -147,6 +147,9 @@ MERGE_FILT_BASELINE_PARQUET = PATHS["merge_filt_baseline_parquet"]
 MERGE_FILT_BASELINE_PARQUET_LEGACY = PATHS["merge_filt_baseline_parquet_legacy"]
 MERGE_FILT_PREFILT_PARQUET = PATHS["merge_filt_prefilt_parquet"]
 MERGE_FILT_PREFILT_PARQUET_LEGACY = PATHS["merge_filt_prefilt_parquet_legacy"]
+MERGE_FILT_PREFILT_SA_PARQUET = PATHS.get("merge_filt_prefilt_sa_parquet", "")
+MERGE_FILT_PREFILT_ANGLO_PARQUET = PATHS.get("merge_filt_prefilt_anglo_parquet", "")
+MERGE_FILT_PREFILT_CJK_PARQUET = PATHS.get("merge_filt_prefilt_cjk_parquet", "")
 MERGE_FILT_MULT2_PARQUET = PATHS["merge_filt_mult2_parquet"]
 MERGE_FILT_MULT2_PARQUET_LEGACY = PATHS["merge_filt_mult2_parquet_legacy"]
 MERGE_FILT_MULT4_PARQUET = PATHS["merge_filt_mult4_parquet"]
@@ -155,9 +158,46 @@ MERGE_FILT_MULT6_PARQUET = PATHS["merge_filt_mult6_parquet"]
 MERGE_FILT_MULT6_PARQUET_LEGACY = PATHS["merge_filt_mult6_parquet_legacy"]
 
 MERGE_FILT_STRICT_PARQUET = PATHS["merge_filt_strict_parquet"]
+MERGE_FILT_US_EDUC_PARQUET = PATHS["merge_filt_us_educ_parquet"]
+MERGE_FILT_US_EDUC_BASELINE_PARQUET = PATHS.get("merge_filt_us_educ_baseline_parquet", "")
+
+MERGE_FILT_US_EDUC_PREFILT_PARQUET = PATHS.get("merge_filt_us_educ_prefilt_parquet", "")
+MERGE_FILT_US_EDUC_OPT_PARQUET = PATHS.get("merge_filt_us_educ_opt_parquet", "")
+MERGE_FILT_STRICT_LOW_PARQUET = PATHS.get("merge_filt_strict_low_parquet", "")
+MERGE_FILT_STRICT_MED_PARQUET = PATHS.get("merge_filt_strict_med_parquet", "")
+MERGE_FILT_STRICT_HIGH_PARQUET = PATHS.get("merge_filt_strict_high_parquet", "")
 
 BUILD_OVERWRITE = _as_bool(BUILD_CFG.get("overwrite"), False)
-BUILD_PREFILT_SQL = _as_optional_str(BUILD_CFG.get("prefilt_sql")) or ""
+BUILD_STRICT_ONLY = _as_bool(BUILD_CFG.get("strict_only"), False)
+BUILD_US_EDUC_ONLY = _as_bool(BUILD_CFG.get("us_educ_only"), False)
+BUILD_FROM_FILE = _as_bool(BUILD_CFG.get("build_from_file"), False)
+BUILD_US_EDUC_PREFILT = _as_bool(BUILD_CFG.get("us_educ_prefilt"), False)
+BUILD_US_EDUC_OPTIMAL = _as_bool(BUILD_CFG.get("us_educ_optimal"), False)
+BUILD_STRICT_QUANTILE_VARIANTS = _as_bool(BUILD_CFG.get("strict_quantile_variants"), False)
+STRICT_QUANTILE_LOW = _as_float(BUILD_CFG.get("strict_quantile_low"), 0.25)
+STRICT_QUANTILE_MED = _as_float(BUILD_CFG.get("strict_quantile_med"), 0.50)
+STRICT_QUANTILE_HIGH = _as_float(BUILD_CFG.get("strict_quantile_high"), 0.75)
+BUILD_US_EDUC_AS_BASELINE = _as_bool(BUILD_CFG.get("us_educ_as_baseline"), False)
+# Selective output list: None = build all; list of names = only build those outputs.
+_raw_outputs = BUILD_CFG.get("outputs")
+BUILD_OUTPUTS: list[str] | None = list(_raw_outputs) if _raw_outputs is not None else None
+# Named prefilt variants: dict mapping variant_name -> SQL WHERE clause.
+# Backward-compat: if legacy scalar prefilt_sql is present, wrap it as {"prefilt": sql}.
+_raw_prefilt_variants = BUILD_CFG.get("prefilt_variants")
+if isinstance(_raw_prefilt_variants, dict) and _raw_prefilt_variants:
+    BUILD_PREFILT_VARIANTS: dict[str, str] = {k: (v or "").strip() for k, v in _raw_prefilt_variants.items()}
+else:
+    _legacy_sql = _as_optional_str(BUILD_CFG.get("prefilt_sql")) or ""
+    BUILD_PREFILT_VARIANTS = {"prefilt": _legacy_sql} if _legacy_sql else {}
+# Keep for backward compatibility
+BUILD_PREFILT_SQL = BUILD_PREFILT_VARIANTS.get("prefilt", "")
+# Parquet path map for all known prefilt variants
+PREFILT_PARQUET_MAP: dict[str, str] = {
+    "prefilt": MERGE_FILT_PREFILT_PARQUET,
+    "prefilt_sa": MERGE_FILT_PREFILT_SA_PARQUET,
+    "prefilt_anglo": MERGE_FILT_PREFILT_ANGLO_PARQUET,
+    "prefilt_cjk": MERGE_FILT_PREFILT_CJK_PARQUET,
+}
 BUILD_FIRM_YEAR_USER_DEDUP = _as_bool(BUILD_CFG.get("firm_year_user_dedup"), True)
 BUILD_FIRM_YEAR_USER_DEDUP_OPTIMAL = _as_bool(BUILD_CFG.get("firm_year_user_dedup_optimal"), False)
 OPTIMAL_DEDUP_PREDEDUP_PARQUET = PATHS.get("optimal_dedup_prededup_parquet", "")

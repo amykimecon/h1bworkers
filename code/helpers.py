@@ -314,19 +314,33 @@ def get_est_yob():
     return str_out
 
 # given table with list of some position/education type thing with start and enddate, returns sql string long on year x position for year t in (t_ref + t0, t_ref + t1) if t falls between startyr and endyr EXCLUDE({','.join([f"x.{joinid.strip()}, time.{joinid.strip()}" for joinid in joinids.split(',')])}),  
-def long_by_year(tab, t0, t1, t_ref, enddatenull, startdatecol = 'startdate', enddatecol = 'enddate', joinids = 'user_id', distinct_ids_tab = None):
+def long_by_year(tab, t0, t1, t_ref, enddatenull, startdatecol = 'startdate', enddatecol = 'enddate', joinids = 'user_id', distinct_ids_tab = None, compute_frac_t = True):
     # When distinct_ids_tab is provided, use it for the time-grid CROSS JOIN instead
     # of tab itself.  This avoids scanning a large event table just to get distinct
     # (foia_indiv_id, user_id) pairs, which can be read from the smaller merge table.
     ids_src = distinct_ids_tab if distinct_ids_tab is not None else tab
 
+    # frac_t: fraction of calendar year covered by the event. Only needed for positions
+    # (compensation weighting). Set compute_frac_t=False for education to skip the
+    # date arithmetic over millions of rows.
+    frac_t_expr = (
+        f"(LEAST(({t_ref} + time.t || '-12-31')::DATE, {enddatecol}::DATE) - GREATEST(({t_ref} + time.t || '-01-01')::DATE, {startdatecol}::DATE) + 1)/(({t_ref} + time.t || '-12-31')::DATE - ({t_ref} + time.t || '-01-01')::DATE + 1)"
+        if compute_frac_t else "NULL::DOUBLE"
+    )
+
+    # Use LEFT JOIN from the time grid: every (joinids, t) combination in the time grid
+    # is always present in the output (with NULL event columns when no event overlaps that
+    # year). FULL OUTER JOIN was used previously, but right-only rows (events whose year
+    # range falls entirely outside [t0, t1]) are never needed and are dropped in
+    # downstream aggregation anyway. LEFT JOIN is semantically equivalent and avoids the
+    # more expensive FULL OUTER JOIN execution plan.
     str_out = f"""
-        SELECT {', '.join([f"CASE WHEN time.{joinid.strip()} IS NULL THEN x.{joinid.strip()} ELSE time.{joinid.strip()} END AS {joinid.strip()}" for joinid in joinids.split(',')])}, *,
+        SELECT {', '.join([f"time.{joinid.strip()} AS {joinid.strip()}" for joinid in joinids.split(',')])}, *,
         -- variable for fraction of year covered by position
-            (LEAST(({t_ref} + time.t || '-12-31')::DATE, {enddatecol}::DATE) - GREATEST(({t_ref} + time.t || '-01-01')::DATE, {startdatecol}::DATE) + 1)/(({t_ref} + time.t || '-12-31')::DATE - ({t_ref} + time.t || '-01-01')::DATE + 1)
+            {frac_t_expr}
             AS frac_t
         FROM (SELECT generate_series AS t, {joinids} FROM generate_series({t0}, {t1}) CROSS JOIN (SELECT {joinids} FROM {ids_src} GROUP BY {joinids})) AS time
-        FULL OUTER JOIN
+        LEFT JOIN
         (SELECT *,
             SUBSTRING({startdatecol}, 1, 4)::INT AS startyr,
             CASE WHEN {enddatecol} IS NULL THEN {enddatenull} ELSE SUBSTRING({enddatecol}, 1, 4)::INT END AS endyr FROM {tab}
