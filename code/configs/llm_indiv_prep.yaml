@@ -1,0 +1,19 @@
+run_tag: "feb2026"
+
+options:
+  max_candidates_per_group: 30  # skip firm×year groups with more unique Revelio users than this
+  max_apps_per_group: 10        # skip groups with more FOIA apps than this (very large firms)
+
+testing:
+  enabled: false
+  n_groups: 5       # if testing: randomly sample this many eligible firm×year groups
+  random_seed: 0
+
+paths:
+  # {root} is resolved from config.py; ${run_tag} is substituted at load time
+  baseline_parquet:        "{root}/data/int/merge_filt_baseline_${run_tag}.parquet"
+  foia_indiv_parquet:      "{root}/data/clean/foia_indiv_${run_tag}.parquet"
+  rev_educ_long_parquet:   "{root}/data/int/rev_educ_long_${run_tag}.parquet"
+  merged_pos_clean_parquet: "{root}/data/int/merged_pos_clean_${run_tag}.parquet"
+  wrds_users_parquet:      "{root}/data/int/wrds_users_${run_tag}.parquet"
+  output_dir: "{root}/data/int/"

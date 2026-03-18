@@ -1,0 +1,7 @@
+run_tag: "feb2026"
+
+# All data paths are derived automatically from run_tag and the root/code directories.
+# Override individual paths here only if needed.
+
+# foia_raw_csv: "{root}/data/raw/foia_bloomberg/foia_bloomberg_all_withids.csv"
+# output_dir:   "{code}/output/summary_stats"
