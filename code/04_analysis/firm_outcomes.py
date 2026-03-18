@@ -253,6 +253,16 @@ FE_SPECS        = [_normalize_fe_spec(v) for v in _FE_SPECS_RAW]
 if not FE_SPECS:
     FE_SPECS = ["none", "firm_year"]
 FE_SPECS = list(dict.fromkeys(FE_SPECS))
+_INDIV_RESTRICT_CFG        = CFG.get("indiv_sample_restrict", {}) or {}
+INDIV_SAMPLE_RESTRICT_ENABLED  = bool(_INDIV_RESTRICT_CFG.get("enabled", False))
+_INDIV_RESTRICT_PARQUET_RAW    = _INDIV_RESTRICT_CFG.get("merge_parquet", "")
+# Fall back to top-level merge_parquet when the sub-key is empty/omitted
+INDIV_SAMPLE_RESTRICT_PARQUET  = (
+    _INDIV_RESTRICT_PARQUET_RAW.strip()
+    if isinstance(_INDIV_RESTRICT_PARQUET_RAW, str) and _INDIV_RESTRICT_PARQUET_RAW.strip()
+    else MERGE_PARQUET
+)
+
 STATUS_SEL      = CFG.get("status_selected", "SELECTED")
 STATUS_ELIG     = CFG.get("status_eligible", "ELIGIBLE")
 
@@ -266,6 +276,11 @@ PRE2021_PROXY_COL = str(_PRE2021_CFG.get("proxy_col", "n_lca_workers"))
 # When present, these rows are concatenated with the main FOIA input so that the
 # pre-2021 SELECTED split in build_hib_panel has non-zero data.
 FOIA_PRE2021_PARQUET = str(CFG.get("foia_pre2021_parquet", ""))
+# Optional firm-level foia_firm_uid → rcid crosswalk for pre-2021 TRK_12704 firms.
+# Built by revelio_h1b_company_matching/build_trk_rcid_crosswalk.py.
+# Pre-2021 rows have main_rcid=NaN; this crosswalk fills in Revelio IDs at the
+# firm level so pre-2021 firms can be linked to WRDS headcounts.
+PRE2021_RCID_CROSSWALK = str(CFG.get("pre2021_rcid_crosswalk", ""))
 
 print("=== firm_outcomes.py ===")
 print(f"run_tag : {CFG.get('run_tag', 'feb2026')}")
@@ -329,6 +344,15 @@ if FOIA_PRE2021_PARQUET:
     print(f"foia_pre2021_parquet: {FOIA_PRE2021_PARQUET} ({'found' if _pre21_exists else 'NOT FOUND'})")
 else:
     print("foia_pre2021_parquet: not configured")
+if INDIV_SAMPLE_RESTRICT_ENABLED:
+    _restrict_exists = Path(INDIV_SAMPLE_RESTRICT_PARQUET).exists() if INDIV_SAMPLE_RESTRICT_PARQUET else False
+    print(
+        f"indiv_sample_restrict: ENABLED  "
+        f"(parquet={INDIV_SAMPLE_RESTRICT_PARQUET}, "
+        f"{'found' if _restrict_exists else 'NOT FOUND'})"
+    )
+else:
+    print("indiv_sample_restrict: disabled")
 print()
 
 
@@ -764,6 +788,28 @@ def build_hib_panel(foia_path: str, merge_path: str = "", return_stats: bool = F
             f"  Pre-2021 FOIA rows appended: {len(pre21_df):,} "
             f"(total now {len(df):,} rows)"
         )
+
+        # Backfill main_rcid for pre-2021 rows using the firm-level crosswalk
+        # (pre2021_foia.parquet has main_rcid=NaN for all rows by construction).
+        if PRE2021_RCID_CROSSWALK and Path(PRE2021_RCID_CROSSWALK).exists():
+            _cw = pd.read_parquet(PRE2021_RCID_CROSSWALK, columns=["foia_firm_uid", "rcid"])
+            _cw = _cw.rename(columns={"rcid": "_pre21_rcid"})
+            _cw["_pre21_rcid"] = pd.to_numeric(_cw["_pre21_rcid"], errors="coerce")
+            df = df.merge(_cw, on="foia_firm_uid", how="left")
+            _pre_year = pd.to_numeric(df["lottery_year"], errors="coerce")
+            _pre_mask = _pre_year <= PRE2021_MAX_YEAR
+            _fill_mask = _pre_mask & df["main_rcid"].isna() & df["_pre21_rcid"].notna()
+            df.loc[_fill_mask, "main_rcid"] = df.loc[_fill_mask, "_pre21_rcid"]
+            df = df.drop(columns=["_pre21_rcid"])
+            n_filled = int(_fill_mask.sum())
+            n_pre21_rows = int(_pre_mask.sum())
+            print(
+                f"  Pre-2021 rcid backfill: {n_filled:,} / {n_pre21_rows:,} rows filled "
+                f"({n_filled / max(n_pre21_rows, 1) * 100:.1f}%)"
+            )
+        else:
+            print("  [INFO] pre2021_rcid_crosswalk not configured or not found; pre-2021 rcid will be NaN")
+
     stats["foia_rows_loaded"] = int(len(df))
     stats["foia_unique_apps_loaded"] = int(df["foia_indiv_id"].nunique())
     stats["foia_unique_firms_loaded"] = int(df["foia_firm_uid"].nunique())
@@ -1150,6 +1196,37 @@ def build_hib_panel(foia_path: str, merge_path: str = "", return_stats: bool = F
         stats["panel_firm_years_dropped_above_max_apps"] = int((panel_pre_app["n_apps"] > MAX_APPS).sum())
     else:
         stats["panel_firm_years_dropped_above_max_apps"] = 0
+
+    # Optionally restrict to (foia_firm_uid, lottery_year) pairs present in the
+    # individual merge sample.  Useful for apples-to-apples comparison with the
+    # individual-level estimates.
+    if INDIV_SAMPLE_RESTRICT_ENABLED:
+        _restrict_path = INDIV_SAMPLE_RESTRICT_PARQUET
+        if _restrict_path and Path(_restrict_path).exists():
+            _indiv_keys = pd.read_parquet(_restrict_path, columns=["foia_firm_uid", "lottery_year"])
+            _indiv_keys["lottery_year"] = _indiv_keys["lottery_year"].astype(str)
+            _indiv_keys = _indiv_keys.drop_duplicates()
+            _n_before_restrict = len(panel)
+            panel = panel.merge(_indiv_keys, on=["foia_firm_uid", "lottery_year"], how="inner")
+            _n_after_restrict  = len(panel)
+            _n_dropped_restrict = _n_before_restrict - _n_after_restrict
+            print(
+                f"  [indiv_sample_restrict] {_n_after_restrict:,} / {_n_before_restrict:,} firm-years "
+                f"kept ({_n_dropped_restrict:,} dropped — not in individual sample)"
+            )
+            stats["panel_firm_years_dropped_indiv_restrict"] = _n_dropped_restrict
+            stats["panel_firm_years_post_indiv_restrict"]    = _n_after_restrict
+            stats["panel_firms_post_indiv_restrict"]         = int(panel["foia_firm_uid"].nunique())
+        else:
+            print(f"  [WARN] indiv_sample_restrict enabled but parquet not found: {_restrict_path}")
+            stats["panel_firm_years_dropped_indiv_restrict"] = 0
+            stats["panel_firm_years_post_indiv_restrict"]    = int(len(panel))
+            stats["panel_firms_post_indiv_restrict"]         = int(panel["foia_firm_uid"].nunique())
+    else:
+        stats["panel_firm_years_dropped_indiv_restrict"] = 0
+        stats["panel_firm_years_post_indiv_restrict"]    = int(len(panel))
+        stats["panel_firms_post_indiv_restrict"]         = int(panel["foia_firm_uid"].nunique())
+
     panel_by_year = (
         panel.groupby("lottery_year")
         .agg(
@@ -2833,6 +2910,26 @@ def write_sample_construction_summary(
             "n_apps": np.nan,
             "n_years": np.nan,
             "notes": "Firm-year rows removed by upper app-count threshold.",
+        },
+        {
+            "stage": "05b_after_indiv_sample_restrict",
+            "n_rows": step1_stats.get("panel_firm_years_post_indiv_restrict"),
+            "n_firms": step1_stats.get("panel_firms_post_indiv_restrict"),
+            "n_apps": np.nan,
+            "n_years": np.nan,
+            "notes": (
+                "Restricted to (foia_firm_uid, lottery_year) pairs in individual sample."
+                if INDIV_SAMPLE_RESTRICT_ENABLED
+                else "indiv_sample_restrict disabled."
+            ),
+        },
+        {
+            "stage": "05b_rows_dropped_indiv_restrict",
+            "n_rows": step1_stats.get("panel_firm_years_dropped_indiv_restrict"),
+            "n_firms": np.nan,
+            "n_apps": np.nan,
+            "n_years": np.nan,
+            "notes": "Firm-years not present in individual merge sample (dropped).",
         },
         {
             "stage": "06_panel_rcid_nonmissing",

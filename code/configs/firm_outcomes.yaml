@@ -80,10 +80,19 @@ diagnostics:
 fe_specs: ["none", "firm_year"]
 force_requery: false # if true, ignore cached WRDS headcount parquet and re-query
 
+# Optional: restrict to firm-years present in the individual merge sample.
+# When enabled, only (foia_firm_uid, lottery_year) pairs found in the individual
+# merge parquet are kept in the firm-year panel. Useful for comparing firm-level
+# and individual-level estimates on a common sample.
+# merge_parquet defaults to the top-level merge_parquet when left empty ("").
+indiv_sample_restrict:
+  enabled: true
+  merge_parquet: ""   # leave empty to use top-level merge_parquet
+
 # Minimum number of lottery-pool applications (SELECTED + ELIGIBLE) to include a firm-year
 min_apps: 1
 # Maximum number of applications to include a firm-year (set null to disable cap)
-max_apps: 500
+max_apps: 50
 
 # FOIA status values
 status_selected: "SELECTED"
@@ -96,6 +105,10 @@ status_eligible: "ELIGIBLE"   # non-selected lottery participants (FY2022+)
 # lottery_year <= max_lottery_year, feeding the pre2021_lca_proxy branch.
 # Set to "" or omit to disable.
 foia_pre2021_parquet: "{root}/data/int/pre2021_foia.parquet"
+# Firm-level foia_firm_uid -> rcid crosswalk for pre-2021 TRK_12704 firms.
+# Built by revelio_h1b_company_matching/build_trk_rcid_crosswalk.py.
+# Set to "" or omit to leave pre-2021 rcid as NaN.
+pre2021_rcid_crosswalk: "{root}/data/int/pre2021_rcid_crosswalk.parquet"
 
 # Pre-2021 LCA proxy for application denominator.
 # Before FY2021 electronic registration, FOIA only records petition approvals (winners).
