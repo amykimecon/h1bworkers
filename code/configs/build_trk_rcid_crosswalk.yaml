@@ -1,0 +1,25 @@
+run_tag: "v1"
+
+testing:
+  enabled: false
+  n_firms: 500          # number of is_new=True TRK firm UIDs to sample when testing
+
+# TRK12704 → foia_firm_uid crosswalk (built by extend_foia_dedup_trk12704.py)
+trk_crosswalk: "{root}/data/int/trk12704_to_foiafirm.csv"
+
+# Extended FOIA dedup (superset of Bloomberg + TRK12704 firms)
+foia_firms_dedup_extended: "{root}/data/int/foia_firms_dedup_extended.csv"
+
+# Existing LLM-reviewed FOIA → rcid crosswalk (covers is_new=False / Bloomberg firms)
+llm_rcid_crosswalk: "{root}/data/int/company_matching_jan28/llm_review_all_foia_to_rcid_crosswalk.csv"
+
+# Revelio company entity table (from WRDS / company_matching pipeline)
+revelio_rcid_entities: "{root}/data/int/company_matching_jan28/revelio_rcid_entities.csv"
+
+# Output: foia_firm_uid → rcid crosswalk for all TRK12704 firms
+output_path: "{root}/data/int/pre2021_rcid_crosswalk.parquet"
+
+# Fuzzy matching parameters (for is_new=True firms)
+match_threshold: 90.0     # minimum token_sort_ratio score to accept a match
+block_prefix_len: 10      # chars of name_base used for blocking
+max_block_size: 500       # skip blocks larger than this to avoid runaway compute
