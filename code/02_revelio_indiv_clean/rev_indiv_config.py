@@ -143,6 +143,7 @@ REV_EDUC_LONG_PARQUET = PATHS["rev_educ_long_parquet"]
 MERGED_POS_CLEAN_PARQUET = PATHS["merged_pos_clean_parquet"]
 COMPANY_MERGE_SAMPLE_PARQUET = PATHS["company_merge_sample_parquet"]
 FOIA_INDIV_PARQUET = PATHS["foia_indiv_parquet"]
+FOIA_RAW_MATCH_PARQUET = PATHS["foia_raw_match_parquet"]
 REV_INDIV_PARQUET = PATHS["rev_indiv_parquet"]
 
 # Legacy WRDS shard format (used as fallback by some scripts)

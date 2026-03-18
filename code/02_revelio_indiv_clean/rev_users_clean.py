@@ -117,8 +117,16 @@ good_matches = con.read_csv(
     all_varchar=True,
 )
 
-## raw FOIA bloomberg data
-foia_raw_file = con.read_csv(f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all.csv")
+## raw FOIA Bloomberg data
+# foia_unique_id is required later to build deterministic foia_indiv_id values
+# that align with downstream spotchecks and firm-outcomes code.
+foia_raw_path = f"{root}/data/raw/foia_bloomberg/foia_bloomberg_all_withids.csv"
+if not os.path.exists(foia_raw_path):
+    raise FileNotFoundError(
+        f"Missing FOIA raw file with ids: {foia_raw_path}. "
+        "rev_users_clean expects foia_unique_id in the Bloomberg source."
+    )
+foia_raw_file = con.read_csv(foia_raw_path)
 
 ## Normalize raw LLM crosswalk first (used for bridge/lookup tables).
 con.sql(
@@ -602,6 +610,27 @@ print(f"Total script runtime: {round((time.time() - t_script0)/3600, 2)} hours")
 #####################################
 print('Cleaning Individual-level H-1B Data...')
 
+# Save lean raw match parquet (15 raw Bloomberg cols + foia_indiv_id + foia_firm_uid).
+# Save lean raw match parquet (15 raw Bloomberg cols + foia_indiv_id + foia_firm_uid).
+# foia_indiv_id uses ROW_NUMBER() OVER(ORDER BY foia_unique_id) — same ORDER BY used in
+# foia_indiv's inner subquery — so IDs are deterministic and aligned across both parquets.
+if not test:
+    print("Writing foia_raw_match parquet (raw match cols for TRK exact matching)...")
+    con.sql(f"""
+        COPY (
+            SELECT ROW_NUMBER() OVER(ORDER BY foia_unique_id) AS foia_indiv_id,
+                   foia_firm_uid,
+                   FIRST_DECISION, BASIS_FOR_CLASSIFICATION, BEN_SEX, BEN_COUNTRY_OF_BIRTH,
+                   S3Q1, ED_LEVEL_DEFINITION, BEN_PFIELD_OF_STUDY, i129_employer_name,
+                   PET_CITY, PET_STATE, JOB_TITLE, DOT_CODE, BEN_COMP_PAID,
+                   valid_from, valid_to
+            FROM foia_with_ids
+            WHERE foia_firm_uid IS NOT NULL
+        ) TO '{rcfg.FOIA_RAW_MATCH_PARQUET}'
+    """)
+    n_raw = con.execute(f"SELECT COUNT(*) FROM read_parquet('{rcfg.FOIA_RAW_MATCH_PARQUET}')").fetchone()[0]
+    print(f"  foia_raw_match: {n_raw:,} rows saved to {rcfg.FOIA_RAW_MATCH_PARQUET}")
+
 # identifying companies that submit 'repeat applications' for losers
 # Uses grouped counts to avoid a large row-level self-join on FOIA rows.
 con.sql(
@@ -722,7 +751,7 @@ SELECT a.foia_firm_uid, a.FEIN, a.lottery_year, a.country,
     FROM (
         SELECT FEIN, lottery_year, COALESCE(cw.std_country, fi.country_of_nationality) AS country,
             foia_firm_uid,
-            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_unique_country, ROW_NUMBER() OVER() AS foia_indiv_id
+            CASE WHEN gender = 'female' THEN 1 ELSE 0 END AS female_ind, ben_year_of_birth AS yob, status_type, ben_multi_reg_ind, employer_name, BEN_PFIELD_OF_STUDY, BEN_EDUCATION_CODE, DOT_CODE, NAICS_CODE, SUBSTRING(NAICS_CODE, 1, 4) AS NAICS4, SUBSTRING(NAICS_CODE, 1, 2) AS NAICS2, JOB_TITLE, BEN_CURRENT_CLASS, S3Q1, COUNT(*) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_apps, COUNT(DISTINCT country_of_nationality) OVER(PARTITION BY foia_firm_uid, lottery_year) AS n_unique_country, ROW_NUMBER() OVER(ORDER BY fi.foia_unique_id) AS foia_indiv_id
         FROM foia_with_ids AS fi
         LEFT JOIN _country_cw AS cw ON fi.country_of_nationality = cw.raw_country
         WHERE foia_firm_uid IS NOT NULL
@@ -1344,7 +1373,9 @@ if dup_profile_dedup:
         GROUP BY p.user_id
     ),
     user_name AS (
-        SELECT user_id, ANY_VALUE(fullname_clean) AS fullname_clean
+        SELECT user_id,
+               ANY_VALUE(fullname_clean) AS fullname_clean,
+               ANY_VALUE(fullname)       AS fullname_raw   -- raw, for single-word gate
         FROM rev_users_filt
         WHERE fullname_clean IS NOT NULL AND LENGTH(TRIM(fullname_clean)) > 0
         GROUP BY user_id
@@ -1378,6 +1409,8 @@ if dup_profile_dedup:
         WHERE university_raw IS NOT NULL AND LENGTH(TRIM(university_raw)) > 0
     ),
     -- All (fullname_clean, rcid) groups with 2+ in-scope users — GROUP BY only, no self-join.
+    -- Gate: single-word fullname_clean values (last initial stripped by regex) must also match
+    -- on the raw fullname to avoid grouping all "Christopher"s at the same company as duplicates.
     dup_groups_raw AS (
         SELECT n.fullname_clean, da.rcid
         FROM user_name AS n
@@ -1385,6 +1418,10 @@ if dup_profile_dedup:
         JOIN user_rcid_dates AS da ON n.user_id = da.user_id
         GROUP BY n.fullname_clean, da.rcid
         HAVING COUNT(DISTINCT n.user_id) > 1
+           AND (
+               n.fullname_clean LIKE '% %'
+               OR COUNT(DISTINCT LOWER(TRIM(n.fullname_raw))) = 1
+           )
     ),
     -- Position date overlap: sort each group by pos_start and check if LAG(pos_end) >= pos_start.
     -- Detecting any pairwise overlap via a sorted sweep is O(n log n) with no self-join.

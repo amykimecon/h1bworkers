@@ -79,4 +79,5 @@ paths:
   merged_pos_clean_parquet: "{root}/data/int/merged_pos_clean_${run_tag}.parquet"
   company_merge_sample_parquet: "{root}/data/int/company_merge_sample_${run_tag}.parquet"
   foia_indiv_parquet: "{root}/data/clean/foia_indiv_${run_tag}.parquet"
+  foia_raw_match_parquet: "{root}/data/int/foia_raw_match_${run_tag}.parquet"
   rev_indiv_parquet: "{root}/data/clean/rev_indiv_${run_tag}.parquet"
