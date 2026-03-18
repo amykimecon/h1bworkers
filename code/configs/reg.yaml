@@ -10,23 +10,35 @@ output_dir: "{root}/output/reg"
 
 # Which merged parquets to run regressions on (parquet key maps to icfg.*_PARQUET)
 variants:
-  - name: "baseline"
-    parquet_key: "MERGE_FILT_BASELINE_PARQUET"
-  - name: "mult2"
-    parquet_key: "MERGE_FILT_MULT2_PARQUET"
-  - name: "mult4"
-    parquet_key: "MERGE_FILT_MULT4_PARQUET"
-  - name: "mult6"
-    parquet_key: "MERGE_FILT_MULT6_PARQUET"
-  - name: "prefilt"
-    parquet_key: "MERGE_FILT_PREFILT_PARQUET"
-  - name: "strict"
-    parquet_key: "MERGE_FILT_STRICT_PARQUET"
+  # - name: "baseline"
+  #   parquet_key: "MERGE_FILT_BASELINE_PARQUET"
+  # - name: "mult2"
+  #   parquet_key: "MERGE_FILT_MULT2_PARQUET"
+  # - name: "mult4"
+  #   parquet_key: "MERGE_FILT_MULT4_PARQUET"
+  # - name: "mult6"
+  #   parquet_key: "MERGE_FILT_MULT6_PARQUET"
+  # - name: "prefilt"
+  #   parquet_key: "MERGE_FILT_PREFILT_PARQUET"
+  # - name: "strict"
+  #   parquet_key: "MERGE_FILT_STRICT_PARQUET"
+  - name: "us_educ"
+    parquet_key: "MERGE_FILT_US_EDUC_PARQUET"
+  - name: "us_educ_prefilt"
+    parquet_key: "MERGE_FILT_US_EDUC_PREFILT_PARQUET"
+  - name: "us_educ_opt"
+    parquet_key: "MERGE_FILT_US_EDUC_OPT_PARQUET"
+  - name: "strict_low"
+    parquet_key: "MERGE_FILT_STRICT_LOW_PARQUET"
+  - name: "strict_med"
+    parquet_key: "MERGE_FILT_STRICT_MED_PARQUET"
+  - name: "strict_high"
+    parquet_key: "MERGE_FILT_STRICT_HIGH_PARQUET"
 
 # FE specifications to run
 # Options: "none", "firm_year" (firm x year combined), "firm_plus_year" (separate firm + year)
 fe_specs:
-  - "none"
+#  - "none"
   - "firm_year"
 #  - "firm_plus_year"
 
@@ -59,10 +71,26 @@ outcomes:
     - same_pos_null_end2
     - same_pos_nonnull_end1     # same position, explicit non-null enddate
     - same_pos_nonnull_end2
+  # Conditional-on-staying sample: regress the same same_firm_new_position outcome
+  # only among applicants with still_at_firm_t = 1 at the same horizon.
+  within_firm_conditional:
+    - name: same_firm_new_position_conditional1
+      source_outcome: same_firm_new_position1
+      subset_var: still_at_firm1
+      subset_value: 1
+    - name: same_firm_new_position_conditional2
+      source_outcome: same_firm_new_position2
+      subset_var: still_at_firm2
+      subset_value: 1
+    - name: same_firm_new_position_conditional3
+      source_outcome: same_firm_new_position3
+      subset_var: still_at_firm3
+      subset_value: 1
   # LOCATION BASELINE: combined position + education (in_us + in_home_country + non_us_non_home + loc_null = 1)
   location:
     - in_us1
     - in_us2
+    - in_us3
     - in_home_country1
     - in_home_country2
     - non_us_non_home1
@@ -73,32 +101,58 @@ outcomes:
     - new_educ2
     - continuing_educ1    # active education started before lottery (snapshot at t)
     - continuing_educ2
-  compensation:
-    - agg_compensation1
-    - agg_compensation2
-  # Non-updating bias diagnostics — regresses winner on profile-update proxies and null-enddate measures.
-  # If winner predicts updatediff/updatediff_activity, there is differential profile updating.
-  # If winner predicts null_enddate_stayer (negatively), losers are more stuck via imputation.
-  diagnostic:
-    - updatediff          # months from pre-lottery ref to Revelio's profile refresh date
-    - updatediff_activity # months from pre-lottery ref to most recent position/educ startdate (better proxy)
-    - frac_null_enddate1  # fraction of yr+1 active positions with null enddate
-    - frac_null_enddate2
-    - null_enddate_stayer1 # at orig. firm in yr+1 ONLY due to null-enddate imputation
-    - null_enddate_stayer2
+  # compensation:
+  #   - agg_compensation1
+  #   - agg_compensation2
+  # # Non-updating bias diagnostics — regresses winner on profile-update proxies and null-enddate measures.
+  # # If winner predicts updatediff/updatediff_activity, there is differential profile updating.
+  # # If winner predicts null_enddate_stayer (negatively), losers are more stuck via imputation.
+  # diagnostic:
+  #   - updatediff          # months from pre-lottery ref to Revelio's profile refresh date
+  #   - updatediff_activity # months from pre-lottery ref to most recent position/educ startdate (better proxy)
+  #   - frac_null_enddate1  # fraction of yr+1 active positions with null enddate
+  #   - frac_null_enddate2
+  #   - null_enddate_stayer1 # at orig. firm in yr+1 ONLY due to null-enddate imputation
+  #   - null_enddate_stayer2
 
 # Balance table comparing pre-lottery covariates by winner status
-balance_table: true
+balance_table: false
 
 # Heterogeneous effects (subgroup + interaction regressions)
 # Runs on all retention outcomes using the primary FE spec
-het_effects: true
+het_effects: false
+
+# Combined in_us2 heterogeneity table: graddiff=0/1/2/3 + norep/highrep columns
+in_us_het_effects: true
 
 # Non-updating bias diagnostics: split sample by profile recency and compare treatment effects
 # on mobility outcomes. See run_profile_recency_subsample() in reg_new.py.
-run_updating_diagnostics: true
+run_updating_diagnostics: false
 
 # Ex-post match quality check: compare FOIA characteristics (institution, field, ed level,
 # job title) to linked Revelio profile data, producing weighted match rates per variant.
 # See 04_analysis/match_quality_check.py and configs/match_quality.yaml.
-run_match_quality_check: true
+run_match_quality_check: false
+
+# When false, omit the winner:ade interaction from all regressions.
+# Default true preserves backwards compatibility.
+include_winner_ade_interaction: false
+
+# How to binarize ade (from Revelio) to the applicant level.
+# ade is a 0/1 indicator per candidate row; both options produce a binary 0/1:
+#   "max"       → 1 if any candidate is ADE-eligible (liberal)
+#   "threshold" → 1 if weighted avg of candidate ade >= 0.5
+ade_agg: "max"
+
+# Use pyfixest.feols() backend if installed (much faster; falls back to linearmodels).
+use_pyfixest: true
+
+# Event-time coefficient graphs: plot winner coef ± 95% CI at each time horizon.
+event_time_graphs:
+  enabled: true
+  # Base outcome names; suffixes 1/2/3 are appended to find per-period columns.
+  outcome_bases:
+    - in_us
+    - still_at_firm
+  # Which variants to plot (must match a name in `variants`). null = all variants.
+  variants: null

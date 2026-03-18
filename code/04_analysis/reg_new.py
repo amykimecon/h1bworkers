@@ -9,6 +9,7 @@
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 
 # Ensure stdout is line-buffered so nohup logs update in real time (no-op in IPython)
@@ -52,6 +53,56 @@ def _load_reg_config() -> dict:
     return raw
 
 
+def _normalize_outcome_groups(raw_groups: dict) -> dict:
+    """
+    Normalize config outcomes into a uniform list of specs per group.
+
+    Supported YAML entries:
+      - plain string outcome name
+      - dict with:
+          name: regression/table label
+          source_outcome: column in df_app to regress on
+          subset_var: optional column used to subset the sample
+          subset_value: value required in subset_var (default = 1)
+    """
+    normalized = {}
+
+    for group_name, entries in (raw_groups or {}).items():
+        normalized[group_name] = []
+        for entry in entries or []:
+            if isinstance(entry, str):
+                normalized[group_name].append({
+                    "name": entry,
+                    "source_outcome": entry,
+                    "subset_var": None,
+                    "subset_value": None,
+                })
+                continue
+
+            if not isinstance(entry, dict):
+                raise TypeError(
+                    f"Outcome entry in group '{group_name}' must be a string or dict, got {type(entry)}"
+                )
+
+            source_outcome = entry.get("source_outcome") or entry.get("outcome") or entry.get("name")
+            name = entry.get("name") or source_outcome
+            if not source_outcome or not name:
+                raise ValueError(
+                    f"Outcome entry in group '{group_name}' must define 'name' and/or 'source_outcome'"
+                )
+
+            subset_var = entry.get("subset_var")
+            subset_value = entry.get("subset_value", 1 if subset_var is not None else None)
+            normalized[group_name].append({
+                "name": name,
+                "source_outcome": source_outcome,
+                "subset_var": subset_var,
+                "subset_value": subset_value,
+            })
+
+    return normalized
+
+
 CFG = _load_reg_config()
 TESTING = CFG.get("testing", {})
 TESTING_ENABLED = bool(TESTING.get("enabled", False))
@@ -61,12 +112,26 @@ OUTPUT_DIR = Path(CFG["output_dir"])
 PRIMARY_FE_SPEC = CFG.get("primary_fe_spec", "firm_year")
 BALANCE_TABLE = bool(CFG.get("balance_table", True))
 HET_EFFECTS = bool(CFG.get("het_effects", True))
+IN_US_HET_EFFECTS = bool(CFG.get("in_us_het_effects", False))
 RUN_UPDATING_DIAGNOSTICS = bool(CFG.get("run_updating_diagnostics", True))
 RUN_MATCH_QUALITY_CHECK = bool(CFG.get("run_match_quality_check", False))
-OUTCOME_GROUPS: dict = CFG.get("outcomes", {})
+OUTCOME_GROUPS: dict = _normalize_outcome_groups(CFG.get("outcomes", {}))
 FE_SPECS: list = CFG.get("fe_specs", ["firm_year"])
 VARIANTS: list = CFG.get("variants", [])
 USE_OPTIMAL_DEDUP: bool = bool(CFG.get("use_optimal_dedup", False))
+INCLUDE_WINNER_ADE_INTERACTION: bool = bool(CFG.get("include_winner_ade_interaction", True))
+ADE_AGG: str = CFG.get("ade_agg", "max")  # "max" or "weighted_avg"
+USE_PYFIXEST: bool = bool(CFG.get("use_pyfixest", True))
+EVENT_TIME_CFG: dict = CFG.get("event_time_graphs", {})
+
+# Try importing pyfixest once at module load; fall back to linearmodels gracefully.
+_PYFIXEST_AVAILABLE = False
+if USE_PYFIXEST:
+    try:
+        import pyfixest as pf
+        _PYFIXEST_AVAILABLE = True
+    except ImportError:
+        pass
 
 print(f"=== reg_new.py ===")
 print(f"run_tag:         {CFG.get('run_tag', 'feb2026')}")
@@ -74,6 +139,10 @@ print(f"use_optimal_dedup: {USE_OPTIMAL_DEDUP}")
 print(f"testing:         {'ENABLED (n=' + str(TESTING_N_APPS) + ')' if TESTING_ENABLED else 'disabled'}")
 print(f"variants: {[v['name'] for v in VARIANTS]}")
 print(f"fe_specs: {FE_SPECS}")
+print(f"include_winner_ade_interaction: {INCLUDE_WINNER_ADE_INTERACTION}")
+print(f"ade_agg:         {ADE_AGG}")
+print(f"regression backend: {'pyfixest' if _PYFIXEST_AVAILABLE else 'linearmodels'}")
+print(f"event_time_graphs: {'enabled' if EVENT_TIME_CFG.get('enabled') else 'disabled'}")
 print()
 
 
@@ -209,11 +278,15 @@ def collapse_to_app_level(df: pd.DataFrame) -> pd.DataFrame:
     # Applicant-level constants (same value across all rows for a given applicant)
     id_cols = [
         "foia_indiv_id", "female_ind", "yob", "age",
-        "lottery_year", "foia_country", "winner", "ade",
+        "lottery_year", "foia_country", "winner",
         "n_apps", "n_unique_country", "high_rep_emp_ind", "no_rep_emp_ind",
         "graddiff_agg",
     ]
     id_cols = [c for c in id_cols if c in df.columns]
+
+    # ade is binarized separately after the main collapse (see below).
+    has_ade = "ade" in df.columns
+    weighted_avg_cols = []  # ade excluded from weighted avg loop; handled below
 
     # Step 1: Identify best firm per applicant (highest total weight_norm)
     firm_weights = (
@@ -227,18 +300,52 @@ def collapse_to_app_level(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Step 2: Collapse outcomes to applicant level via weighted average.
-    # Group by foia_indiv_id only (not all id_cols) to avoid duplicate rows when
-    # any id_col has inconsistent values across candidate rows for the same applicant.
-    agg_dict = {
-        var: (var, lambda x, var=var: (
-            np.average(x.dropna(), weights=df.loc[x.dropna().index, "weight_norm"])
-            if x.notna().any() else np.nan
-        ))
-        for var in outcomes
-    }
-    agg_dict["weight_norm"] = ("weight_norm", "sum")  # total match weight per applicant
+    # Vectorized: for each outcome col, compute (col * weight_norm) then groupby-sum
+    # and divide by sum of weights. This avoids per-group df.loc indexing which is
+    # O(n_applicants * n_outcomes) label lookups and is extremely slow.
+    wa_cols = outcomes + weighted_avg_cols
+    g = df.groupby("foia_indiv_id")
 
-    app_df = df.groupby("foia_indiv_id").agg(**agg_dict).reset_index()
+    # Sum of weights per applicant (also needed for the division)
+    weight_sum = g["weight_norm"].sum().rename("weight_norm")
+
+    # For each outcome, compute weighted sum of non-null values and sum of weights
+    # over non-null observations only (so NaNs don't dilute the average).
+    wa_results = {}
+    for var in wa_cols:
+        mask_col = f"_w_{var}"
+        val_col  = f"_wv_{var}"
+        notna = df[var].notna()
+        df[mask_col] = np.where(notna, df["weight_norm"], 0.0)
+        df[val_col]  = np.where(notna, df[var] * df["weight_norm"], 0.0)
+        wsum  = df.groupby("foia_indiv_id")[mask_col].sum()
+        wvsum = df.groupby("foia_indiv_id")[val_col].sum()
+        wa_results[var] = (wvsum / wsum).where(wsum > 0)   # NaN when all obs are NaN
+        df.drop(columns=[mask_col, val_col], inplace=True)
+
+    app_df = pd.DataFrame(wa_results)
+    app_df.index.name = "foia_indiv_id"
+    app_df = app_df.reset_index()
+    app_df = app_df.merge(weight_sum.reset_index(), on="foia_indiv_id", how="left")
+
+    # ade binarization: always produces a 0/1 column.
+    #   "max"       → 1 if any candidate is ADE-eligible
+    #   "threshold" → 1 if weighted avg of ADE >= 0.5
+    if has_ade:
+        if ADE_AGG == "max":
+            ade_series = df.groupby("foia_indiv_id")["ade"].max()
+        else:  # "threshold": weighted avg >= 0.5
+            notna = df["ade"].notna()
+            df["_w_ade"]  = np.where(notna, df["weight_norm"], 0.0)
+            df["_wv_ade"] = np.where(notna, df["ade"] * df["weight_norm"], 0.0)
+            wsum  = df.groupby("foia_indiv_id")["_w_ade"].sum()
+            wvsum = df.groupby("foia_indiv_id")["_wv_ade"].sum()
+            df.drop(columns=["_w_ade", "_wv_ade"], inplace=True)
+            ade_series = ((wvsum / wsum.where(wsum > 0)) >= 0.5).astype(float)
+        ade_series = ade_series.rename("ade")
+        app_df = app_df.merge(ade_series.reset_index(), on="foia_indiv_id", how="left")
+        print(f"  [ade_agg={ADE_AGG}] ade=1: {int(app_df['ade'].sum()):,}  "
+              f"ade=0: {int((app_df['ade'] == 0).sum()):,}")
 
     # Merge applicant-level constants back in (take first value per applicant)
     id_cols_no_id = [c for c in id_cols if c != "foia_indiv_id"]
@@ -289,6 +396,59 @@ def maybe_sample(df: pd.DataFrame) -> pd.DataFrame:
 # PANEL REGRESSION
 ###############################################################################
 
+class _RegressionResult:
+    """
+    Thin adapter that normalises pyfixest or linearmodels results to a uniform interface.
+
+    Attributes:
+        params       pd.Series  — coefficient estimates, indexed by variable name
+        std_errors   pd.Series  — standard errors
+        pvalues      pd.Series  — p-values
+        nobs         int        — number of observations
+        model        object     — linearmodels model object (None for pyfixest path)
+    """
+    def __init__(self, params, std_errors, pvalues, nobs, model=None):
+        self.params = params
+        self.std_errors = std_errors
+        self.pvalues = pvalues
+        self.nobs = nobs
+        self.model = model  # only populated on the linearmodels path
+
+    @classmethod
+    def from_linearmodels(cls, res):
+        obj = cls(res.params, res.std_errors, res.pvalues, int(res.nobs), model=res.model)
+        obj._raw_lm = res  # preserve raw result for linearmodels.compare()
+        return obj
+
+    @classmethod
+    def from_pyfixest(cls, fit):
+        tidy = fit.tidy()
+        # pyfixest versions differ: older ones return "Coefficient" as a column;
+        # newer ones return it as the index, or use "term" as the column name.
+        if "Coefficient" in tidy.columns:
+            tidy = tidy.set_index("Coefficient")
+        elif "term" in tidy.columns:
+            tidy = tidy.set_index("term")
+        # else: coefficient names are already the index — use as-is
+
+        # Column names also vary across versions; try known aliases.
+        def _col(candidates):
+            for c in candidates:
+                if c in tidy.columns:
+                    return tidy[c]
+            raise ValueError(f"None of {candidates} found in pyfixest tidy() columns: {list(tidy.columns)}")
+
+        obj = cls(
+            params=_col(["Estimate", "coef", "estimate"]),
+            std_errors=_col(["Std. Error", "se", "std_error"]),
+            pvalues=_col(["Pr(>|t|)", "pvalue", "p_value", "Pr(>|z|)"]),
+            nobs=int(fit._N),
+            model=None,
+        )
+        obj._raw_pf = fit  # preserve for pf.etable() display
+        return obj
+
+
 def _build_panel_df(df: pd.DataFrame, fe_spec: str) -> pd.DataFrame:
     """
     Set the MultiIndex required by linearmodels.PanelOLS.
@@ -314,9 +474,17 @@ def _build_panel_df(df: pd.DataFrame, fe_spec: str) -> pd.DataFrame:
         raise ValueError(f"Unknown fe_spec: {fe_spec}")
 
 
-def _fe_formula(outcome: str, fe_spec: str, df: pd.DataFrame) -> str:
+def _fe_formula(
+    outcome: str,
+    fe_spec: str,
+    df: pd.DataFrame,
+    include_interaction: bool = True,
+) -> str:
     """Build the PanelOLS formula string for a given FE spec."""
-    base = f"{outcome} ~ winner + ade + winner:ade"
+    if include_interaction:
+        base = f"{outcome} ~ winner + ade + winner:ade"
+    else:
+        base = f"{outcome} ~ winner + ade"
     if fe_spec == "none":
         return base + " + 1"
     elif fe_spec == "firm_year":
@@ -330,49 +498,57 @@ def _fe_formula(outcome: str, fe_spec: str, df: pd.DataFrame) -> str:
         raise ValueError(f"Unknown fe_spec: {fe_spec}")
 
 
-def run_regression(
-    df: pd.DataFrame,
-    outcome: str,
+def _run_pyfixest(
+    sub: pd.DataFrame,
+    reg_outcome: str,
     fe_spec: str,
-):
+    include_interaction: bool,
+) -> "_RegressionResult | None":
     """
-    Run a single weighted PanelOLS regression.
-    Returns PanelOLSResults or None if the outcome column is missing / all NaN.
+    Run one regression via pyfixest.feols().
+
+    Uses | separator for FEs; CRV1 clustering at firm level; fixef_rm='singleton'
+    handles singleton entity removal automatically inside pyfixest.
     """
-    if outcome not in df.columns or df[outcome].isna().all():
+    rhs = "winner + ade + winner:ade" if include_interaction else "winner + ade"
+    fe_map = {
+        "none":           "",
+        "firm_year":      " | firm_year_fe",
+        "firm_plus_year": " | firm_key + lottery_year",
+    }
+    fml = f"{reg_outcome} ~ {rhs}{fe_map[fe_spec]}"
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning, module="pyfixest")
+            warnings.filterwarnings("ignore", message=".*singleton.*", category=UserWarning)
+            fit = pf.feols(
+                fml,
+                data=sub,
+                vcov={"CRV1": "firm_key"},
+                weights="weight_norm",
+                fixef_rm="singleton",
+            )
+        return _RegressionResult.from_pyfixest(fit)
+    except Exception as e:
+        print(f"    [ERR pyfixest] {reg_outcome} ({fe_spec}): {e}")
         return None
 
-    # Drop rows where outcome or key regressors are NaN
-    keep_cols = [outcome, "winner", "ade", "weight_norm", "lottery_year",
-                 "firm_key", "firm_year_fe", "foia_indiv_id"]
-    sub = df[keep_cols].dropna(subset=[outcome, "winner", "ade", "weight_norm"])
 
-    if len(sub) < 10:
-        print(f"    [SKIP] {outcome} ({fe_spec}): too few obs ({len(sub)})")
-        return None
-
-    # Drop singleton entities — required for PanelOLS (nobs must exceed nentity).
-    # Only applies when entity FEs are actually estimated (firm_year or firm_plus_year).
-    # For fe_spec == "none", no EntityEffects are absorbed so singletons are harmless.
-    if fe_spec != "none":
-        entity_col = "firm_key" if fe_spec == "firm_plus_year" else "firm_year_fe"
-        entity_counts = sub.groupby(entity_col)[entity_col].transform("count")
-        n_before = len(sub)
-        sub = sub[entity_counts > 1].copy()
-        if len(sub) < n_before:
-            print(f"    [INFO] {outcome} ({fe_spec}): dropped {n_before - len(sub):,} singleton {entity_col}s")
-        if len(sub) < 10:
-            print(f"    [SKIP] {outcome} ({fe_spec}): too few obs after dropping singletons ({len(sub)})")
-            return None
-
-    # Add year dummies before building panel index (needed for firm_plus_year)
+def _run_linearmodels(
+    sub: pd.DataFrame,
+    reg_outcome: str,
+    fe_spec: str,
+    include_interaction: bool,
+) -> "_RegressionResult | None":
+    """Run one regression via linearmodels.PanelOLS (original backend)."""
+    # Add year dummies before building panel index (firm_plus_year only)
     if fe_spec == "firm_plus_year":
         years = sorted(sub["lottery_year"].unique())[1:]
         for yr in years:
             sub[f"yr_{yr}"] = (sub["lottery_year"] == yr).astype(int)
 
     panel_df = _build_panel_df(sub, fe_spec)
-    formula = _fe_formula(outcome, fe_spec, sub)
+    formula  = _fe_formula(reg_outcome, fe_spec, sub, include_interaction=include_interaction)
 
     try:
         model = PanelOLS.from_formula(
@@ -380,46 +556,168 @@ def run_regression(
             data=panel_df,
             weights=panel_df["weight_norm"],
         )
-        # Always cluster at firm level.
-        # firm_plus_year: entity IS firm_key → cluster_entity=True is correct.
-        # none/firm_year: entity is firm_year_fe → pass firm_key column explicitly.
         if fe_spec == "firm_plus_year":
             result = model.fit(cov_type="clustered", cluster_entity=True)
         else:
             result = model.fit(cov_type="clustered", clusters=panel_df["firm_key"])
-        return result
+        return _RegressionResult.from_linearmodels(result)
     except Exception as e:
-        print(f"    [ERR] {outcome} ({fe_spec}): {e}")
+        print(f"    [ERR linearmodels] {reg_outcome} ({fe_spec}): {e}")
         return None
+
+
+def _pre_build_spec_panel(df_app: pd.DataFrame, fe_spec: str) -> dict:
+    """
+    Pre-compute singleton mask once per (df_app, fe_spec) to avoid repeated
+    groupby().transform() calls inside run_regression() for every outcome.
+
+    Returns a dict with key 'non_singleton_mask': a pd.Series[bool] aligned to
+    df_app's index, True for rows NOT in singleton entities.
+    For fe_spec=="none" the mask is None (singletons don't matter without entity FEs).
+    """
+    if fe_spec == "none":
+        return {"non_singleton_mask": None}
+    entity_col = "firm_key" if fe_spec == "firm_plus_year" else "firm_year_fe"
+    counts = df_app.groupby(entity_col)[entity_col].transform("count")
+    mask = counts > 1
+    n_singleton_rows = int((~mask).sum())
+    if n_singleton_rows:
+        print(f"    [pre-build {fe_spec}] {n_singleton_rows:,} singleton rows pre-flagged")
+    return {"non_singleton_mask": mask}
+
+
+def run_regression(
+    df: pd.DataFrame,
+    outcome_spec: dict,
+    fe_spec: str,
+    include_interaction: bool = True,
+    pre_built_panel: dict | None = None,
+) -> "_RegressionResult | None":
+    """
+    Run a single weighted regression (pyfixest or linearmodels).
+
+    Parameters
+    ----------
+    df                  applicant-level DataFrame (post-collapse, one row per applicant)
+    outcome_spec        normalized outcome dict: name, source_outcome, subset_var, subset_value
+    fe_spec             one of "none", "firm_year", "firm_plus_year"
+    include_interaction if False, omit winner:ade from formula
+    pre_built_panel     optional dict from _pre_build_spec_panel(); when provided,
+                        the singleton mask is reused instead of recomputed (speed-up)
+
+    Returns _RegressionResult or None if outcome missing / too few observations.
+    """
+    outcome_name   = outcome_spec["name"]
+    source_outcome = outcome_spec.get("source_outcome", outcome_name)
+    subset_var     = outcome_spec.get("subset_var")
+    subset_value   = outcome_spec.get("subset_value")
+
+    if source_outcome not in df.columns or df[source_outcome].isna().all():
+        return None
+
+    # --- Build working subset ---
+    keep_cols = [source_outcome, "winner", "ade", "weight_norm", "lottery_year",
+                 "firm_key", "firm_year_fe", "foia_indiv_id"]
+    if subset_var is not None:
+        keep_cols.append(subset_var)
+    missing_cols = [c for c in keep_cols if c not in df.columns]
+    if missing_cols:
+        print(f"    [SKIP] {outcome_name} ({fe_spec}): missing columns {missing_cols}")
+        return None
+
+    sub = df[keep_cols].copy()
+    if subset_var is not None:
+        sub = sub[sub[subset_var] == subset_value].copy()
+    sub = sub.dropna(subset=[source_outcome, "winner", "ade", "weight_norm"])
+
+    reg_outcome = source_outcome
+    if outcome_name != source_outcome:
+        sub[outcome_name] = sub[source_outcome]
+        reg_outcome = outcome_name
+
+    if len(sub) < 10:
+        print(f"    [SKIP] {outcome_name} ({fe_spec}): too few obs ({len(sub)})")
+        return None
+
+    # --- Singleton dropping ---
+    # For pyfixest, fixef_rm='singleton' handles this internally; skip here.
+    # For linearmodels, use pre-computed mask if available (no subset) else recompute.
+    if not _PYFIXEST_AVAILABLE and fe_spec != "none":
+        if pre_built_panel is not None and subset_var is None:
+            # Reuse pre-computed mask (aligned to df's original index)
+            mask = pre_built_panel.get("non_singleton_mask")
+            if mask is not None:
+                n_before = len(sub)
+                sub = sub[mask.reindex(sub.index, fill_value=False)].copy()
+                if len(sub) < n_before:
+                    print(f"    [INFO] {outcome_name} ({fe_spec}): dropped "
+                          f"{n_before - len(sub):,} singleton rows (pre-built mask)")
+        else:
+            # Recompute singleton mask for this subset
+            entity_col = "firm_key" if fe_spec == "firm_plus_year" else "firm_year_fe"
+            entity_counts = sub.groupby(entity_col)[entity_col].transform("count")
+            n_before = len(sub)
+            sub = sub[entity_counts > 1].copy()
+            if len(sub) < n_before:
+                print(f"    [INFO] {outcome_name} ({fe_spec}): dropped "
+                      f"{n_before - len(sub):,} singleton {entity_col}s")
+        if len(sub) < 10:
+            print(f"    [SKIP] {outcome_name} ({fe_spec}): too few obs after singletons ({len(sub)})")
+            return None
+
+    # --- Dispatch to backend ---
+    if _PYFIXEST_AVAILABLE:
+        result = _run_pyfixest(sub, reg_outcome, fe_spec, include_interaction)
+    else:
+        result = _run_linearmodels(sub, reg_outcome, fe_spec, include_interaction)
+
+    # Attach ctrl_mean (loser mean of outcome) while sub is still in scope.
+    if result is not None and "winner" in sub.columns:
+        ctrl_mask = sub["winner"] == 0
+        result.ctrl_mean = float(sub.loc[ctrl_mask, reg_outcome].mean()) if ctrl_mask.any() else None
+    return result
 
 
 def run_all_outcomes(
     df_app: pd.DataFrame,
     outcome_groups: dict,
     fe_specs: list,
+    include_interaction: bool = True,
 ) -> dict:
     """
     Run regressions for all outcomes × all FE specs.
+
+    Pre-builds singleton mask once per spec (avoids redundant groupby per outcome).
     Returns nested dict: {fe_spec: {group_name: {outcome: result_or_None}}}.
     """
     results = {spec: {} for spec in fe_specs}
-    all_outcomes = [o for grp in outcome_groups.values() for o in grp]
 
     for spec in fe_specs:
         print(f"  FE spec: {spec}")
-        for group, outcomes in outcome_groups.items():
+        # Pre-compute singleton mask once for this spec (speed-up for linearmodels path)
+        pre_built = _pre_build_spec_panel(df_app, spec)
+
+        for group, outcome_specs in outcome_groups.items():
             results[spec][group] = {}
-            for outcome in outcomes:
-                res = run_regression(df_app, outcome, spec)
-                results[spec][group][outcome] = res
+            for outcome_spec in outcome_specs:
+                outcome_name = outcome_spec["name"]
+                res = run_regression(
+                    df_app, outcome_spec, spec,
+                    include_interaction=include_interaction,
+                    pre_built_panel=pre_built,
+                )
+                results[spec][group][outcome_name] = res
                 if res is not None:
                     coef = res.params.get("winner", np.nan)
-                    se = res.std_errors.get("winner", np.nan)
-                    coef_int = res.params.get("winner:ade", np.nan)
-                    se_int = res.std_errors.get("winner:ade", np.nan)
-                    n = int(res.nobs)
-                    print(f"    {outcome:30s}  winner={coef:+.4f} ({se:.4f})  "
-                          f"winner:ade={coef_int:+.4f} ({se_int:.4f})  N={n:,}")
+                    se   = res.std_errors.get("winner", np.nan)
+                    n    = int(res.nobs)
+                    if include_interaction:
+                        coef_int = res.params.get("winner:ade", np.nan)
+                        se_int   = res.std_errors.get("winner:ade", np.nan)
+                        print(f"    {outcome_name:30s}  winner={coef:+.4f} ({se:.4f})  "
+                              f"winner:ade={coef_int:+.4f} ({se_int:.4f})  N={n:,}")
+                    else:
+                        print(f"    {outcome_name:30s}  winner={coef:+.4f} ({se:.4f})  N={n:,}")
 
     return results
 
@@ -440,7 +738,9 @@ def _coef_row(results: list, var: str) -> tuple[list, list]:
         se = res.std_errors[var]
         p = res.pvalues[var]
         stars = "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.1 else ""
-        coefs.append(f"{b:.4f}{stars}")
+        star_str = f"\\sym{{{stars}}}" if stars else ""
+        sign = "$-$" if b < 0 else ""
+        coefs.append(f"{sign}{abs(b):.4f}{star_str}")
         ses.append(f"({se:.4f})")
     return coefs, ses
 
@@ -451,25 +751,44 @@ def make_regression_table(
     row_vars: list = None,
     title: str = "",
     verbose: bool = True,
+    include_interaction: bool = True,
 ) -> str:
     """
-    Format a list of PanelOLSResults into a LaTeX table string.
+    Format a list of regression results into a LaTeX table string.
 
     Parameters
     ----------
-    results   : list of PanelOLSResults (None entries produce blank cells)
-    col_labels: column header strings
-    row_vars  : list of coefficient names to display (default: ['winner', 'ade'])
-    title     : optional title comment at top of LaTeX
-    verbose   : if True, also print linearmodels compare() table to console
+    results             list of _RegressionResult (None entries produce blank cells)
+    col_labels          column header strings
+    row_vars            list of coefficient names to display; defaults to
+                        ['winner', 'ade', 'winner:ade'] when include_interaction=True,
+                        else ['winner', 'ade']
+    title               optional title comment at top of LaTeX
+    verbose             if True, print linearmodels compare() table to console
+                        (only works on the linearmodels path; skipped for pyfixest)
+    include_interaction whether winner:ade was included in the regressions
     """
     if row_vars is None:
-        row_vars = ["winner", "ade", "winner:ade"]
+        row_vars = ["winner", "ade", "winner:ade"] if include_interaction else ["winner", "ade"]
 
     valid = {lab: res for lab, res in zip(col_labels, results) if res is not None}
 
     if verbose and valid:
-        print(compare(valid, stars=True, precision="std_errors"))
+        # pyfixest path: use pf.etable() for a side-by-side markdown summary
+        pf_fits = [res._raw_pf for res in valid.values() if hasattr(res, "_raw_pf")]
+        if pf_fits and _PYFIXEST_AVAILABLE:
+            try:
+                print(pf.etable(pf_fits, type="md",
+                                model_heads=list(valid.keys()),
+                                keep=["winner", "ade", "winner:ade"]))
+            except Exception as e:
+                print(f"  [etable warn] {e}")
+        else:
+            # linearmodels path fallback
+            lm_valid = {lab: res._raw_lm for lab, res in valid.items()
+                        if res.model is not None and hasattr(res, "_raw_lm")}
+            if lm_valid:
+                print(compare(lm_valid, stars=True, precision="std_errors"))
 
     ncols = len(results)
     latex = f"% {title}\n" if title else ""
@@ -485,26 +804,27 @@ def make_regression_table(
         latex += " & " + " & ".join(ses) + " \\\\\n"
 
     latex += "\\midrule\n"
-    obs_strs = [str(int(r.nobs)) if r is not None else "" for r in results]
-    latex += "\\textbf{N} & " + " & ".join(obs_strs) + " \\\\\n"
 
-    dv_means = []
     ctrl_means = []
     for res in results:
         if res is None:
-            dv_means.append("")
             ctrl_means.append("")
-        else:
+        elif hasattr(res, "ctrl_mean") and res.ctrl_mean is not None:
+            ctrl_means.append(f"{res.ctrl_mean:.3f}")
+        elif res.model is not None:
+            # linearmodels fallback (no ctrl_mean attribute)
             dv_series = res.model.dependent.dataframe.squeeze()
-            dv_means.append(f"{dv_series.mean():.3f}")
             exog_df = res.model.exog.dataframe
             if "winner" in exog_df.columns:
-                ctrl_mask = exog_df["winner"] == 0
-                ctrl_means.append(f"{dv_series[ctrl_mask].mean():.3f}")
+                ctrl_means.append(f"{dv_series[exog_df['winner'] == 0].mean():.3f}")
             else:
                 ctrl_means.append("")
-    latex += "\\textbf{DV mean} & " + " & ".join(dv_means) + " \\\\\n"
+        else:
+            ctrl_means.append("")
     latex += "\\textbf{Control mean} & " + " & ".join(ctrl_means) + " \\\\\n"
+
+    obs_strs = [str(int(r.nobs)) if r is not None else "" for r in results]
+    latex += "\\textbf{N} & " + " & ".join(obs_strs) + " \\\\\n"
 
     if verbose and any(m != "" for m in ctrl_means):
         print("Control mean (losers): " + "  ".join(
@@ -514,6 +834,39 @@ def make_regression_table(
     latex += "\\bottomrule\n"
     latex += "\\end{tabular}"
     return latex
+
+
+# ---------------------------------------------------------------------------
+# PAPER TABLE CONFIG
+# ---------------------------------------------------------------------------
+# Each entry: (outcome_group, outcome_var, column_label_for_paper)
+# These define the 6 columns used in the main results and robustness tables.
+PAPER_MAIN_COLS = [
+    ("location",               "in_us2",                               "In U.S."),
+    ("location",               "in_home_country2",                     "In home ctry"),
+    ("retention",              "still_at_firm2",                       "Same firm"),
+    ("within_firm_conditional","same_firm_new_position_conditional2",  "New pos.\\ (cond.)"),
+    ("mobility",               "new_diff_firm2",                       "New diff.\\ firm"),
+    ("education",              "new_educ2",                            "New educ."),
+]
+
+# Panels for the robustness table, in display order.
+# Each entry: (variant_name, panel_label)
+PAPER_ROBUSTNESS_PANELS = [
+    ("us_educ",        "U.S.-educated"),
+    ("us_educ_opt",    "One-to-one (optimal bipartite matching)"),
+    ("us_educ_prefilt","Pre-filtered (excl.\\ Southern Asia, East Asia, UK, CA, AU)"),
+    ("strict_low",     "Strict (Q25 score threshold)"),
+    ("strict_med",     "Strict (Q50 score threshold)"),
+    ("strict_high",    "Strict (Q75 score threshold)"),
+]
+
+# Variants to include as panels in the combined heterogeneity table.
+PAPER_HET_PANELS = [
+    ("us_educ",        "U.S.-educated"),
+    ("us_educ_opt",    "One-to-one"),
+    ("strict_high",    "Strict (Q75)"),
+]
 
 
 def save_table(latex: str, path: Path, verbose: bool = True):
@@ -529,6 +882,151 @@ def save_table(latex: str, path: Path, verbose: bool = True):
 ###############################################################################
 # BALANCE TABLE
 ###############################################################################
+
+def build_paper_tables(all_variant_results: dict, all_het_results: dict, output_dir: Path):
+    """
+    Assemble paper-ready LaTeX tabular files from regression results.
+
+    Writes two files to output_dir/tables/:
+      paper_main_results.tex  — 6-column main results (us_educ, primary FE spec)
+      paper_robustness.tex    — winner row across three sample panels
+
+    Parameters
+    ----------
+    all_variant_results : dict  variant_name -> run_all_outcomes() output
+    output_dir          : base output directory
+    """
+    spec = PRIMARY_FE_SPEC
+    tables_dir = output_dir / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    def _col_result(variant_results, group, outcome):
+        return variant_results.get(spec, {}).get(group, {}).get(outcome)
+
+    # ------------------------------------------------------------------
+    # Main results table (us_educ, 6 columns)
+    # ------------------------------------------------------------------
+    if "us_educ" not in all_variant_results:
+        print("  [SKIP] paper_main_results.tex: us_educ variant not in results")
+    else:
+        res_us = all_variant_results["us_educ"]
+        col_results = [_col_result(res_us, grp, out) for grp, out, _ in PAPER_MAIN_COLS]
+        col_labels  = [lbl for _, _, lbl in PAPER_MAIN_COLS]
+        latex = make_regression_table(
+            col_results, col_labels,
+            title="Main results — us_educ — FE: firm_year",
+            verbose=False,
+            include_interaction=INCLUDE_WINNER_ADE_INTERACTION,
+        )
+        save_table(latex, tables_dir / "paper_main_results.tex")
+
+    # ------------------------------------------------------------------
+    # Robustness table (winner row only, one panel per variant)
+    # ------------------------------------------------------------------
+    panels = [(name, lbl) for name, lbl in PAPER_ROBUSTNESS_PANELS
+              if name in all_variant_results]
+    if not panels:
+        print("  [SKIP] paper_robustness.tex: no robustness variants in results")
+        return
+
+    ncols = len(PAPER_MAIN_COLS)
+    col_header = " & ".join(f"({i})" for i in range(1, ncols + 1))
+    col_names  = " & ".join(lbl for _, _, lbl in PAPER_MAIN_COLS)
+
+    latex  = "% Robustness — winner effects across sample variants — FE: firm_year\n"
+    latex += f"\\begin{{tabular}}{{l{'c' * ncols}}}\n"
+    latex += "\\toprule\n"
+    latex += f"& {col_header} \\\\\n"
+    latex += f"& {col_names} \\\\\n"
+    latex += "\\midrule\n"
+
+    for idx, (var_name, panel_label) in enumerate(panels):
+        res_v = all_variant_results[var_name]
+        col_results = [_col_result(res_v, grp, out) for grp, out, _ in PAPER_MAIN_COLS]
+
+        n_obs = next((int(r.nobs) for r in col_results if r is not None), None)
+        n_str = f"{n_obs:,}" if n_obs is not None else "---"
+
+        latex += f"\\multicolumn{{{ncols + 1}}}{{l}}{{\\textit{{Panel: {panel_label} (N = {n_str})}}}}\\\\\n"
+
+        coefs, ses = _coef_row(col_results, "winner")
+        latex += "Winner   & " + " & ".join(coefs) + " \\\\\n"
+        latex += "         & " + " & ".join(ses) + " \\\\\n"
+
+        ctrl_means = []
+        for res in col_results:
+            if res is None:
+                ctrl_means.append("")
+            elif hasattr(res, "ctrl_mean") and res.ctrl_mean is not None:
+                ctrl_means.append(f"{res.ctrl_mean:.3f}")
+            elif res.model is not None:
+                dv = res.model.dependent.dataframe.squeeze()
+                exog = res.model.exog.dataframe
+                if "winner" in exog.columns:
+                    ctrl_means.append(f"{dv[exog['winner'] == 0].mean():.3f}")
+                else:
+                    ctrl_means.append("")
+            else:
+                ctrl_means.append("")
+        sep = " \\\\[6pt]\n" if idx < len(panels) - 1 else " \\\\\n"
+        latex += "Ctrl.\\ mean & " + " & ".join(ctrl_means) + sep
+
+    latex += "\\bottomrule\n\\end{tabular}"
+    save_table(latex, tables_dir / "paper_robustness.tex")
+
+    # ------------------------------------------------------------------
+    # Combined match quality table
+    # ------------------------------------------------------------------
+    try:
+        from match_quality_check import build_paper_match_quality_table
+        build_paper_match_quality_table(output_dir=output_dir)
+    except Exception as e:
+        print(f"  [WARN] build_paper_match_quality_table failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Combined het table (still_at_firm2, multi-panel)
+    # ------------------------------------------------------------------
+    het_panels = [(name, lbl) for name, lbl in PAPER_HET_PANELS if name in all_het_results]
+    if not het_panels:
+        print("  [SKIP] paper_het_in_us2.tex: no het results available")
+        return
+
+    # Use col_labels from first available panel
+    _, first_col_labels = all_het_results[het_panels[0][0]]
+    ncols = len(first_col_labels)
+
+    latex  = "% Combined het table — in_us2 — multi-panel\n"
+    latex += f"\\begin{{tabular}}{{l{'c' * ncols}}}\n"
+    latex += "\\toprule\n"
+    latex += "& " + " & ".join(first_col_labels) + " \\\\\n"
+    latex += "& (" + ") & (".join(str(i) for i in range(1, ncols + 1)) + ") \\\\\n"
+    latex += "\\midrule\n"
+
+    for idx, (var_name, panel_label) in enumerate(het_panels):
+        res_list, col_labels = all_het_results[var_name]
+        n_obs = next((int(r.nobs) for r in res_list if r is not None), None)
+        n_str = f"{n_obs:,}" if n_obs is not None else "---"
+
+        latex += f"\\multicolumn{{{ncols + 1}}}{{l}}{{\\textit{{Panel: {panel_label} (N = {n_str})}}}}\\\\\n"
+
+        coefs, ses = _coef_row(res_list, "winner")
+        latex += "Winner   & " + " & ".join(coefs) + " \\\\\n"
+        latex += "         & " + " & ".join(ses) + " \\\\\n"
+
+        ctrl_means = []
+        for res in res_list:
+            if res is None:
+                ctrl_means.append("")
+            elif hasattr(res, "ctrl_mean") and res.ctrl_mean is not None:
+                ctrl_means.append(f"{res.ctrl_mean:.3f}")
+            else:
+                ctrl_means.append("")
+        sep = " \\\\[6pt]\n" if idx < len(het_panels) - 1 else " \\\\\n"
+        latex += "Ctrl.\\ mean & " + " & ".join(ctrl_means) + sep
+
+    latex += "\\bottomrule\n\\end{tabular}"
+    save_table(latex, tables_dir / "paper_het_in_us2.tex")
+
 
 def make_balance_table(df_app: pd.DataFrame, variant_name: str, output_dir: Path):
     """
@@ -669,8 +1167,11 @@ def run_het_effects(
       1. Employer reputation: all / high_rep / no_rep
       2. Years since graduation: all / graddiff<3 / graddiff>=3 / interaction term
     """
-    ret_outcomes = [o for o in OUTCOME_GROUPS.get("retention", []) if o in df_app.columns]
-    if not ret_outcomes:
+    ret_outcome_specs = [
+        spec for spec in OUTCOME_GROUPS.get("retention", [])
+        if spec.get("source_outcome") in df_app.columns
+    ]
+    if not ret_outcome_specs:
         return
 
     spec = PRIMARY_FE_SPEC
@@ -685,21 +1186,24 @@ def run_het_effects(
                       if "no_rep_emp_ind"  in df_app.columns else None,
     }
 
-    for outcome in ret_outcomes:
+    for outcome_spec in ret_outcome_specs:
+        outcome_name = outcome_spec["name"]
         res_list, col_labels = [], []
         for label, sub in rep_subgroups.items():
             if sub is None or len(sub) < 10:
                 continue
-            res = run_regression(sub, outcome, spec)
+            res = run_regression(sub, outcome_spec, spec,
+                                 include_interaction=INCLUDE_WINNER_ADE_INTERACTION)
             res_list.append(res)
             col_labels.append(label)
 
         if any(r is not None for r in res_list):
-            title = f"Het effects (employer rep) — {outcome} — {variant_name}"
-            latex = make_regression_table(res_list, col_labels, title=title, verbose=True)
+            title = f"Het effects (employer rep) — {outcome_name} — {variant_name}"
+            latex = make_regression_table(res_list, col_labels, title=title, verbose=True,
+                                          include_interaction=INCLUDE_WINNER_ADE_INTERACTION)
             save_table(
                 latex,
-                output_dir / "tables" / f"het_{variant_name}_rep_{outcome}.tex",
+                output_dir / "tables" / f"het_{variant_name}_rep_{outcome_name}.tex",
                 verbose=False,
             )
 
@@ -710,70 +1214,95 @@ def run_het_effects(
     print(f"\n  [het] graddiff subgroups ({variant_name})")
     grad_subgroups = {
         "all":        df_app,
-        "graddiff$<$3": df_app[(df_app["graddiff_agg"].round() < 3) &
-                                (df_app["graddiff_agg"] >= -1)],
-        "graddiff$>$3": df_app[(df_app["graddiff_agg"].round() > 3) &
-                                (df_app["graddiff_agg"] <= 6)],
+        "graddiff=0": df_app[df_app["graddiff_agg"].round() == 0],
+        "graddiff=1": df_app[df_app["graddiff_agg"].round() == 1],
+        "graddiff=2": df_app[df_app["graddiff_agg"].round() == 2],
+        "graddiff=3": df_app[df_app["graddiff_agg"].round() == 3],
     }
 
-    for outcome in ret_outcomes:
+    for outcome_spec in ret_outcome_specs:
+        outcome_name = outcome_spec["name"]
+        source_outcome = outcome_spec.get("source_outcome", outcome_name)
         res_list, col_labels = [], []
 
         # Subgroup regressions
         for label, sub in grad_subgroups.items():
             if len(sub) < 10:
                 continue
-            res = run_regression(sub, outcome, spec)
+            res = run_regression(sub, outcome_spec, spec,
+                                 include_interaction=INCLUDE_WINNER_ADE_INTERACTION)
             res_list.append(res)
             col_labels.append(label)
 
-        # Interaction specification: winner * graddiff3 (graddiff_agg rounded == 3)
-        df_int = df_app.copy()
-        df_int["graddiff3"] = (df_int["graddiff_agg"].round() == 3).astype(int)
-        keep_cols = [outcome, "winner", "ade", "graddiff3", "weight_norm",
-                     "lottery_year", "firm_key", "firm_year_fe", "foia_indiv_id"]
-        sub_int = df_int[[c for c in keep_cols if c in df_int.columns]].dropna(
-            subset=[outcome, "winner", "ade", "weight_norm"]
-        )
-
-        if len(sub_int) >= 10:
-            if spec == "firm_plus_year":
-                years = sorted(sub_int["lottery_year"].unique())[1:]
-                for yr in years:
-                    sub_int[f"yr_{yr}"] = (sub_int["lottery_year"] == yr).astype(int)
-
-            sub_int["_indiv_int"] = pd.Categorical(sub_int["foia_indiv_id"]).codes
-
-            if spec in ("none", "firm_year"):
-                panel_sub = sub_int.set_index(["firm_year_fe", "_indiv_int"])
-                fe_term = "EntityEffects" if spec == "firm_year" else "1"
-            else:
-                panel_sub = sub_int.set_index(["firm_key", "_indiv_int"])
-                yr_terms = " + ".join(f"yr_{yr}" for yr in years)
-                fe_term = f"EntityEffects + {yr_terms}"
-
-            formula = f"{outcome} ~ winner * graddiff3 + ade + winner:ade + {fe_term}"
-            try:
-                int_res = PanelOLS.from_formula(
-                    formula, data=panel_sub, weights=panel_sub["weight_norm"]
-                ).fit(cov_type="clustered", cluster_entity=True)
-                res_list.append(int_res)
-                col_labels.append("interact")
-            except Exception as e:
-                print(f"    [ERR] interact {outcome}: {e}")
-
         if any(r is not None for r in res_list):
-            title = f"Het effects (graddiff) — {outcome} — {variant_name}"
+            title = f"Het effects (graddiff) — {outcome_name} — {variant_name}"
             latex = make_regression_table(
                 res_list, col_labels,
-                row_vars=["winner", "ade", "winner:ade", "graddiff3", "winner:graddiff3"],
+                row_vars=["winner", "ade", "winner:ade"] if INCLUDE_WINNER_ADE_INTERACTION
+                         else ["winner", "ade"],
                 title=title, verbose=True,
             )
             save_table(
                 latex,
-                output_dir / "tables" / f"het_{variant_name}_graddiff_{outcome}.tex",
+                output_dir / "tables" / f"het_{variant_name}_graddiff_{outcome_name}.tex",
                 verbose=False,
             )
+
+
+def run_in_us_het_table(
+    df_app: pd.DataFrame,
+    variant_name: str,
+    output_dir: Path,
+):
+    """
+    Combined heterogeneity table for in_us2: graddiff=0/1/2/3 subgroups followed by
+    norep/highrep employer-reputation subgroups, all in a single table.
+    """
+    if "in_us2" not in df_app.columns:
+        return
+
+    outcome_spec = {
+        "name": "in_us2",
+        "source_outcome": "in_us2",
+        "subset_var": None,
+        "subset_value": None,
+    }
+    spec = PRIMARY_FE_SPEC
+
+    subgroups = {}
+    if "graddiff_agg" in df_app.columns:
+        for g in [0, 1, 2, 3]:
+            subgroups[f"graddiff$={g}$"] = df_app[df_app["graddiff_agg"].round() == g]
+    if "no_rep_emp_ind" in df_app.columns:
+        subgroups["no\\_rep"] = df_app[df_app["no_rep_emp_ind"] == 1]
+    if "high_rep_emp_ind" in df_app.columns:
+        subgroups["high\\_rep"] = df_app[df_app["high_rep_emp_ind"] == 1]
+
+    res_list, col_labels = [], []
+    for label, sub in subgroups.items():
+        if len(sub) < 10:
+            continue
+        res = run_regression(sub, outcome_spec, spec,
+                             include_interaction=INCLUDE_WINNER_ADE_INTERACTION)
+        res_list.append(res)
+        col_labels.append(label)
+
+    if not any(r is not None for r in res_list):
+        return None, None
+
+    title = f"Het effects (in_us2) — graddiff + rep — {variant_name}"
+    latex = make_regression_table(
+        res_list, col_labels,
+        row_vars=["winner", "ade"],
+        title=title, verbose=True,
+        include_interaction=INCLUDE_WINNER_ADE_INTERACTION,
+    )
+    save_table(
+        latex,
+        output_dir / "tables" / f"het_{variant_name}_in_us2_combined.tex",
+        verbose=False,
+    )
+    return res_list, col_labels
 
 
 ###############################################################################
@@ -824,11 +1353,14 @@ def run_profile_recency_subsample(df_app: pd.DataFrame, variant_name: str, outpu
     (output_dir / "tables").mkdir(parents=True, exist_ok=True)
     for outcome in mobility_outcomes:
         res_list, col_labels = [], []
+        outcome_spec = {"name": outcome, "source_outcome": outcome,
+                        "subset_var": None, "subset_value": None}
         for label, sub in subgroups.items():
             if len(sub) < 50:
                 print(f"    [diag] Skipping '{label}' for {outcome} (n={len(sub)} < 50)")
                 continue
-            res = run_regression(sub, outcome, spec)
+            res = run_regression(sub, outcome_spec, spec,
+                                 include_interaction=INCLUDE_WINNER_ADE_INTERACTION)
             res_list.append(res)
             col_labels.append(label)
         if any(r is not None for r in res_list):
@@ -840,6 +1372,103 @@ def run_profile_recency_subsample(df_app: pd.DataFrame, variant_name: str, outpu
             out_path = output_dir / "tables" / f"diag_recency_{variant_name}_{outcome}.tex"
             save_table(latex, out_path, verbose=False)
             print(f"    [diag] Saved {out_path.name}")
+
+
+###############################################################################
+# EVENT-TIME GRAPHS
+###############################################################################
+
+def run_event_time_graphs(
+    df_app: pd.DataFrame,
+    variant_name: str,
+    output_dir: Path,
+    et_cfg: dict,
+    include_interaction: bool = True,
+):
+    """
+    For each configured outcome base, run regressions at t=1, 2, 3 and plot
+    the winner coefficient ± 95% CI error bars vs. years post-lottery.
+
+    X-axis: years post-lottery (t = 1, 2, 3)
+    Y-axis: winner coefficient from  outcome_t ~ winner + ade [+ winner:ade] + FE
+    Error bars: ±1.96 × SE (firm-clustered)
+
+    Saves PNGs to: {output_dir}/graphs/event_time_{variant_name}_{outcome_base}.png
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    spec       = PRIMARY_FE_SPEC
+    graphs_dir = output_dir / "graphs"
+    graphs_dir.mkdir(parents=True, exist_ok=True)
+
+    outcome_bases = et_cfg.get("outcome_bases", ["in_us", "still_at_firm"])
+    print(f"  [event_time] variant={variant_name}  spec={spec}  "
+          f"bases={outcome_bases}")
+
+    for base in outcome_bases:
+        periods, coefs, ses = [], [], []
+
+        for t in [-2, -1, 0, 1, 2, 3]:
+            col = f"{base}{t}"
+            if col not in df_app.columns:
+                print(f"    [SKIP] {col} not in data")
+                continue
+            outcome_spec = {"name": col, "source_outcome": col,
+                            "subset_var": None, "subset_value": None}
+            res = run_regression(
+                df_app, outcome_spec, spec,
+                include_interaction=include_interaction,
+            )
+            if res is None:
+                print(f"    [SKIP] {col}: regression returned None")
+                continue
+            if "winner" not in res.params.index:
+                print(f"    [SKIP] {col}: 'winner' not in params")
+                continue
+
+            coef = float(res.params["winner"])
+            se   = float(res.std_errors["winner"])
+            periods.append(t)
+            coefs.append(coef)
+            ses.append(se)
+            print(f"    {col}: winner={coef:+.4f}  SE={se:.4f}  N={res.nobs:,}")
+
+        if len(periods) < 2:
+            print(f"    [SKIP] {base}: fewer than 2 periods estimated, skipping plot")
+            continue
+
+        # --- Build plot ---
+        coefs_arr = np.array(coefs)
+        ses_arr   = np.array(ses)
+        ci95      = 1.96 * ses_arr
+
+        sns.set_style("whitegrid")
+        fig, ax = plt.subplots(figsize=(5, 4))
+
+        ax.errorbar(
+            periods, coefs_arr,
+            yerr=ci95,
+            fmt="o-",
+            capsize=5,
+            linewidth=1.5,
+            markersize=6,
+            color=sns.color_palette("deep")[0],
+            label="Winner coef. ± 1.96 SE",
+        )
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax.set_xticks(periods)
+        ax.set_xlabel("Years post-lottery (t)")
+        ax.set_ylabel("Winner coefficient")
+        ax.set_title(f"Event-time: {base}\n{variant_name} — {spec}")
+        ax.legend(fontsize=9)
+        plt.tight_layout()
+
+        out_path = graphs_dir / f"event_time_{variant_name}_{base}.png"
+        plt.savefig(out_path, dpi=150)
+        plt.show()
+        plt.close()
+        print(f"    Saved: {out_path}")
 
 
 ###############################################################################
@@ -886,15 +1515,18 @@ def process_variant(variant: dict, output_dir: Path):
 
     # 5. Run all regressions
     print(f"\n  Running regressions...")
-    results = run_all_outcomes(df_app, OUTCOME_GROUPS, FE_SPECS)
+    results = run_all_outcomes(
+        df_app, OUTCOME_GROUPS, FE_SPECS,
+        include_interaction=INCLUDE_WINNER_ADE_INTERACTION,
+    )
 
     # 6. Save regression tables (one per FE spec per outcome group)
     for spec in FE_SPECS:
         is_primary = (spec == PRIMARY_FE_SPEC)
         for group, group_outcomes in OUTCOME_GROUPS.items():
             group_results = results[spec].get(group, {})
-            res_list = [group_results.get(o) for o in group_outcomes]
-            col_labels = group_outcomes
+            res_list = [group_results.get(o["name"]) for o in group_outcomes]
+            col_labels = [o["name"] for o in group_outcomes]
 
             # Skip if all None
             if all(r is None for r in res_list):
@@ -905,14 +1537,21 @@ def process_variant(variant: dict, output_dir: Path):
                 res_list, col_labels,
                 title=title,
                 verbose=is_primary,   # print compare() only for primary spec
+                include_interaction=INCLUDE_WINNER_ADE_INTERACTION,
             )
             out_path = output_dir / "tables" / f"reg_{name}_{group}_{spec}.tex"
-            save_table(latex, out_path, verbose=False)
+            save_table(latex, out_path, verbose=is_primary)
 
     # 7. Heterogeneous effects (primary spec only)
     if HET_EFFECTS:
         print(f"\n  Running heterogeneous effects...")
         run_het_effects(df_app, name, output_dir)
+
+    # 7b. In-US heterogeneity table (graddiff=0/1/2/3 + norep/highrep, in_us2 only)
+    het_results = None
+    if IN_US_HET_EFFECTS:
+        print(f"\n  Running in_us2 heterogeneity table...")
+        het_results = run_in_us_het_table(df_app, name, output_dir)
 
     # 8. Non-updating bias diagnostics
     if RUN_UPDATING_DIAGNOSTICS:
@@ -925,7 +1564,19 @@ def process_variant(variant: dict, output_dir: Path):
         from match_quality_check import run_match_quality_check
         run_match_quality_check(name, CFG.get("run_tag", icfg.RUN_TAG), output_dir, parquet_path)
 
+    # 10. Event-time coefficient graphs
+    if EVENT_TIME_CFG.get("enabled", False):
+        et_variants = EVENT_TIME_CFG.get("variants")  # None = all variants
+        if et_variants is None or name in et_variants:
+            print(f"\n  Running event-time graphs...")
+            run_event_time_graphs(
+                df_app, name, output_dir,
+                et_cfg=EVENT_TIME_CFG,
+                include_interaction=INCLUDE_WINNER_ADE_INTERACTION,
+            )
+
     print(f"\n  Done with {name} ({time.time()-t_start:.1f}s total)")
+    return results, het_results
 
 
 def main():
@@ -937,8 +1588,20 @@ def main():
     print(f"Output directory: {output_dir}")
     print()
 
+    all_variant_results = {}
+    all_het_results = {}
     for variant in VARIANTS:
-        process_variant(variant, output_dir)
+        out = process_variant(variant, output_dir)
+        if out is not None:
+            results, het = out
+            all_variant_results[variant["name"]] = results
+            if het is not None:
+                res_list, col_labels = het
+                all_het_results[variant["name"]] = (res_list, col_labels)
+
+    print(f"\n{'='*60}")
+    print("Building paper tables...")
+    build_paper_tables(all_variant_results, all_het_results, output_dir)
 
     print(f"\n{'='*60}")
     print(f"All variants complete. Total time: {time.time()-t0:.1f}s")
