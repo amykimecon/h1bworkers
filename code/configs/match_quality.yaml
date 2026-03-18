@@ -3,11 +3,17 @@ run_tag: "feb2026"
 # Path to TRK_12704 raw FOIA xlsx files (pre-2021 H-1B approvals)
 trk_data_dir: "{root}/data/raw/H-1B Data"
 
-# Crosswalk: PET_FIRM_NAME + PET_STATE → foia_firm_uid (built by extend_foia_dedup_trk12704.py)
-trk_crosswalk: "{root}/data/int/trk12704_to_foiafirm.csv"
+# Cached raw TRK data (institution_txt rows only, all columns uppercased).
+# Built once from xlsx by _load_trk_raw(); exact-match join to FOIA happens in main script.
+trk_raw_cache: "{root}/data/int/trk_raw.parquet"
 
-# Cached TRK institution supplement (built once from xlsx, reused across runs)
+# Legacy keys (no longer used by match_quality_check.py but kept for reference)
+trk_crosswalk: "{root}/data/int/trk12704_to_foiafirm.csv"
 trk_supplement_cache: "{root}/data/int/trk_institution_supplement.parquet"
+
+# Raw FOIA match columns (saved by rev_users_clean.py, used for TRK exact-match join).
+# Path uses {run_tag} substitution applied at load time
+foia_raw_match_parquet: "{root}/data/int/foia_raw_match_{run_tag}.parquet"
 
 # Revelio WRDS raw education data (has field/field_raw columns not in rev_educ_long)
 # Path uses {run_tag} substitution applied at load time
@@ -20,14 +26,24 @@ output_dir: "{root}/output/match_quality"
 # Fuzzy similarity thresholds
 thresholds:
   institution: 0.85   # Lev+JW threshold for institution name match
-  field_str: 0.80     # Lev+JW threshold for field-of-study string match
+  field_str: 0.80     # Lev+JW threshold for field-of-study string match (field_raw)
   title: 0.75         # Lev+JW threshold for job title match (lower: titles vary)
+
+# How many top Revelio titles to match each FOIA title to.
+# top_n=1 is too strict (only one Revelio title per FOIA title); 5-10 captures
+# variant spellings (e.g. "Software Engineer I/II/Senior") and raises match rates.
+title_top_n: 20
 
 # Testing mode: subsample to n_apps applicants
 testing:
   enabled: false
   n_apps: 200
   seed: 42
+
+# Minimum number of non-NULL TRK join columns required for a TRK row to participate
+# in the exact-match join. TRK redacts some fields; rows with too many NULLs would
+# match too broadly (fan-out). 8/15 is a reasonable default.
+trk_min_nonnull_join_cols: 8
 
 # Force rebuild of TRK institution supplement even if cache exists
 force_rebuild_supplement: false
