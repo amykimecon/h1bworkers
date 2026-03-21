@@ -34,8 +34,40 @@
             \item What happens to workers who lose the lottery?
         \end{itemize}
         \vspace{4mm}
-        \item \textcolor{maincolor}{\textbf{This Project:}} New application-level data + linkage strategy $\rightarrow$ first to estimate \textbf{worker-level effects} of winning H-1B lottery
+        \item \textcolor{maincolor}{\textbf{This Project:}} Estimating \textbf{worker-level effects} of winning H-1B lottery
     \end{itemize}
+\end{frame}
+
+
+\begin{frame}
+    \frametitle{Linkage Strategy}
+    Empirical hurdles in estimating worker-level H-1B effects:
+    \vspace{2mm}
+    \begin{enumerate}
+        \item Lack of information on H-1B lottery losers or activity outside U.S. 
+        \begin{itemize}
+            \item \textbf{This Project:} New data on universe of H-1B applicants + LinkedIn profiles
+        \end{itemize}
+        \vspace{2mm}
+        \item No personal identifiers (name, ID number) in H-1B data 
+        \begin{itemize}
+            \item \textbf{This Project:} Probabilistic linking to LinkedIn profile data across many sparse fields (including firm) 
+        \end{itemize}
+        \vspace{2mm}
+        \item Don't observe workers' outcomes unless they win visa 
+        \begin{itemize}
+            \item Traditional view of H-1B: firm hires worker if they win visa, otherwise don't 
+            \vspace{2mm}
+            \item In reality, majority of H-1B applicants are \textit{already working at firm} on a different temporary visa
+            \begin{itemize}
+                \item New view of H-1B: firm employs worker who stays if they win visa, otherwise leaves 
+            \end{itemize}
+            \vspace{2mm}
+            \item \textbf{This Project:} Link by subsetting to workers already at firm at time of application
+        \end{itemize}
+    \end{enumerate}
+    \vspace{2mm}
+    \textbf{Result:} Individual-level panel data on 65k H-1B lottery applicants
 \end{frame}
 
 \begin{frame}
@@ -43,30 +75,28 @@
     \textbf{Research Question:} What are the effects of winning the H-1B lottery on the individual worker?
     \vspace{4mm}
     \begin{enumerate}
-        \item Novel linked panel data: focus on \textbf{international students} applying for H-1B
-        \only<1>{
-        \begin{itemize}
-            \item Large subset of modern H-1B applicants (40--50\%) are recent U.S. graduates
-            \item Linked panel of 167k H-1B lottery applications to LinkedIn work + location histories
-        \end{itemize}
-        }
-        \vspace{3mm}
+        % \item Novel linked panel data: focus on \textbf{international students} applying for H-1B
+        % \only<1>{
+        % \begin{itemize}
+        %     \item Large subset of modern H-1B applicants (40--50\%) are recent U.S. graduates
+        %     \item Linked panel of 167k H-1B lottery applications to LinkedIn work + location histories
+        % \end{itemize}
+        % }
+        % \vspace{3mm}
         \item Estimate effects of lottery win on indiv. outcomes
-        \only<2>{
         \begin{itemize}
-            \item \textbf{Preview:} Winning $\uparrow$ U.S. retention by 1.52 pp (1.7\%) 2 yrs post-lottery
-            \item \textcolor{red}{fill in with more results}
+            \item \textbf{Preview:} Winning $\uparrow$ U.S. retention by 1.16 pp (1.2\%); firm retention by 2.64 pp (3.6\%) 1 yr post-lottery
+            \item Suggestive evidence of job stagnation for winners (stay at same firm but less likely to get promotion)
+            \item Losers do not reallocate to new education
         \end{itemize}
-        }
+        
         \vspace{3mm}
         \item Investigating robustness and heterogeneity: why are effects small?
-        \only<3>{
         \begin{enumerate}
             \item \textbf{Measurement Error:} Estimated effects 3-4x larger in higher-confidence linked samples, but still small
             \item \textbf{Student visa:} Effects largest for workers near student work authorization expiration, but still small
         \end{enumerate}
-        }
-    \end{enumerate} \vspace{4mm}
+    \end{enumerate} \vspace{2mm}
     \only<4>{\textbf{Empirical Puzzle:} How are lottery losers managing to stay?}
 \end{frame}
 
@@ -201,7 +231,7 @@
 \begin{frame}
     \frametitle{Data Sources}
     \begin{itemize}
-        \item \textbf{H-1B Application Data} (FOIA via Bloomberg, FY2020--2023)
+        \item \textbf{H-1B Application Data} (FOIA via Bloomberg, 2020--2023)
         \begin{itemize}
             \item All applicants: country of birth, birth year, sex, employer name/location
             \item Winners only: current visa type, education level/field, job title/salary
@@ -211,38 +241,37 @@
         \item \textbf{Revelio Labs LinkedIn Data}
         \begin{itemize}
             \item Profiles (894m individuals): full name, education history, work history
-            \item Positions (1.7b records): employer, title, start/end dates, location, imputed salary
-            \item Cross-sectional snapshot; not directly identified with H-1B status
         \end{itemize}
         \vspace{4mm}
         \item \textbf{Challenge:} H-1B data is deidentified --- no names, no unique identifiers
         \begin{itemize}
-            \item Standard text matching infeasible
+            \item `Needle in a haystack' problem without employer
         \end{itemize}
+        \vspace{4mm}
+    \item \textbf{Key insight:} restrict candidates to workers already at sponsoring firm before lottery
     \end{itemize}
 \end{frame}
 
 \begin{frame}
-    \frametitle{Linkage: Using Pre-Lottery Employment as an Anchor}
-    \textbf{Key insight:} restrict candidates to workers already at sponsoring firm before lottery
+    \frametitle{Overview of Linkage Strategy}
     \vspace{3mm}
     \begin{enumerate}
         \item \textbf{Employer crosswalk:} fuzzy match H-1B firms to Revelio firms (93\% match rate)
         \begin{itemize}
             \item Exclude firm-years with 10+ applications or any duplicate applicants
+            \item Iterative process: deterministic matching $\rightarrow$ LLM review 
         \end{itemize}
         \vspace{2mm}
-        \item \textbf{Revelio imputation:} estimate country of birth, birth year, sex, graduation year
+        \item \textbf{Revelio imputation:} estimate country of birth, birth year, sex
         \begin{itemize}
-            \item Country: from education history location (high school) + name-based model
-            \item Birth year: inferred from education timing
-            \item Sex: name-based probabilistic imputation
+            \item For now: simple ML model using Wikipedia data (name2nat) + deterministic rules 
+            \item Future: LLM-based review using full profile information (description, etc.)
         \end{itemize}
         \vspace{2mm}
-        \item \textbf{Candidate scoring:} for each applicant, score LinkedIn workers at same firm
+        \item \textbf{Candidate scoring:} for each applicant, pick `close-enough' candidates matches \textit{working at sponsoring firm} at time of lottery
         \begin{itemize}
-            \item Weights: country of birth (70\%), birth year (20\%), sex (10\%)
-            \item Convert scores to within-applicant weights summing to 1
+            \item Restrict to LinkedIn users with US education (OPT eligible) but no US high school (not native)
+            \item Score candidates on match quality
         \end{itemize}
     \end{enumerate}
     \vspace{2mm}
@@ -252,20 +281,11 @@
 \begin{frame}
     \frametitle{Sample Variants}
     \begin{itemize}
+        \item \textbf{Baseline:} keep unrestricted sample, collapse at application level (N = 70,580)
+        \vspace{3mm}
         \item \textbf{One-to-one} \textcolor{maincolor}{(preferred):} optimal bipartite matching (N = 64,781)
         \begin{itemize}
-            \item Each applicant assigned to at most one Revelio candidate
-        \end{itemize}
-        \vspace{3mm}
-        \item \textbf{Baseline:} 167,598 linked applications
-        \begin{itemize}
-            \item Restrict to U.S.-educated applicants (not U.S. high school); 70,580 with firm-year FE
-        \end{itemize}
-        \vspace{3mm}
-        \item \textbf{Rare Country:} exclude high-multiplicity countries (N = 10,440)
-        \begin{itemize}
-            \item Drop applicants from Southern Asia, East Asia, UK, Canada, Australia
-            \item Lower candidate pool multiplicity $\rightarrow$ sharper individual identification
+            \item Each applicant assigned to at most one Revelio candidate (and vice versa) within a lottery year
         \end{itemize}
         \vspace{3mm}
         \item \textbf{Strict (Q25 / Q50 / Q75):} score threshold samples
@@ -273,25 +293,32 @@
             \item Restrict to applicants whose best match score exceeds the 25th, 50th, or 75th percentile
             \item Higher confidence matches; trade off sample size for precision
         \end{itemize}
+        \vspace{3mm}
+        \item \textbf{Rare Country:} exclude high-multiplicity countries (N = 10,440)
+        \begin{itemize}
+            \item Drop applicants from Southern Asia, East Asia, UK, Canada, Australia
+            \item Lower candidate pool multiplicity $\rightarrow$ sharper individual identification
+        \end{itemize}
     \end{itemize}
+    Can evaluate match quality using H-1B winners: for now overly strict 
+        \hyperlink{match_quality}{\beamerbutton{Match Quality Table}}
 \end{frame}
 
-\begin{frame}
-    \frametitle{Sample Variants: Match Validation}
-    \vfill
-    \begin{center}
-        Higher-confidence samples show better agreement between FOIA fields and matched Revelio profiles.\\[6mm]
-        \hyperlink{match_quality}{\beamerbutton{Match Quality Table}}
-    \end{center}
-    \vfill
-\end{frame}
+% \begin{frame}
+%     \frametitle{Sample Variants: Match Validation}
+%     \vfill
+%     \begin{center}
+%         Higher-confidence samples show better agreement between FOIA fields and matched Revelio profiles.\\[6mm]
+%         \hyperlink{match_quality}{\beamerbutton{Match Quality Table}}
+%     \end{center}
+%     \vfill
+% \end{frame}
 
 \section{Results}
 \begin{frame}
     \frametitle{Empirical Specification}
     For applicant $i$ at firm $c$ in lottery year $t$, estimate:
     $$y_{ict}^s = \beta_0 + \beta_1 Win_{ict} + \beta_2 ADE_{it} + \gamma_{ct} + \varepsilon_{ict}^s$$
-    \vspace{2mm}
     \begin{itemize}
         \item $Win_{ict}$: lottery selection indicator
         \vspace{2mm}
@@ -302,16 +329,27 @@
         \item Outcomes measured $s$ years post-lottery; weights from probabilistic linkage
         \vspace{2mm}
         \item Standard errors clustered by firm
+        \vspace{2mm}
+        \item Alternate specification: include Win $\times$ ADE interaction (results similar)
     \end{itemize}
     \vspace{3mm}
-    \textbf{Identification:} within firm-year, lottery selection is quasi-random conditional on ADE status
+    \textbf{Identification:} within firm-year, lottery selection random conditional on ADE 
+\end{frame}
+
+\begin{frame}
+    \frametitle{Outcome Variables}
+    \begin{itemize}
+        \item \textbf{Location:} In U.S., in home country, in non-U.S. non-home country
+        \item \textbf{Employment:} still at same firm, new position conditional on same firm (proxy for promotion)
+        \item \textbf{Education:} new education (possible channel for staying in U.S.)
+    \end{itemize}
 \end{frame}
 
 \begin{frame}
     \hypertarget{winning_lottery}{}
-    \frametitle<1>{Winning the Lottery Stabilizes U.S. Presence}
-    \frametitle<2>{Winning the Lottery Stabilizes U.S. Presence and Firm Retention}
-    \frametitle<3>{Winning the Lottery Stabilizes U.S. Presence, Firm Retention, and Education}
+    \frametitle<1>{Winning the Lottery $\uparrow$ U.S. Presence...}
+    \frametitle<2>{...and $\uparrow$ Job Stability (or stagnation)?}
+    \frametitle<3>{Losers do not reallocate to new education}
     \vfill
     \begin{center}
     \resizebox{\textwidth}{!}{%
@@ -338,7 +376,7 @@
 
 \begin{frame}
     \hypertarget{eventtime_in_us}{}
-    \frametitle{Effect on U.S. Presence Grows as OPT Runway Shrinks}
+    \frametitle{Effect on U.S. Presence Grows Over Time}
     \vfill
     \begin{center}
         \includegraphics[height=0.73\textheight]{/home/yk0581/output/reg/graphs/event_time_us_educ_opt_in_us.png}\\[2mm]
@@ -349,7 +387,7 @@
 
 \begin{frame}
     \hypertarget{eventtime_still_at_firm}{}
-    \frametitle{Winners Remain Locked Into Sponsoring Firm Over Time}
+    \frametitle{But Firm Retention Effect Peaks in Year 1}
     \vfill
     \begin{center}
         \includegraphics[height=0.73\textheight]{/home/yk0581/output/reg/graphs/event_time_us_educ_opt_still_at_firm.png}\\[2mm]
@@ -362,7 +400,7 @@
 \begin{frame}
     \frametitle{Taking Stock: Why Are Effects Small?}
     \begin{itemize}
-        \item Effects are statistically significant but moderate in the one-to-one sample (1.52 pp U.S.\ presence)
+        \item Effects are statistically significant but moderate in the one-to-one sample (1.16 pp $\uparrow$ U.S.\ presence)
         \vspace{4mm}
         \item \textbf{Reason 1:} Measurement error attenuates estimates
         \begin{itemize}
@@ -370,7 +408,9 @@
             \item \textbf{How do effects vary by linkage quality?}
         \end{itemize}
         \vspace{4mm}
-        \item \textbf{Reason 2: OPT workers have fallback options}
+        \item \textcolor{gray}{\textbf{Reason 2:} OPT workers have fallback options}
+        \vspace{4mm}
+        \item \textcolor{gray}{\textbf{Reason 3:} Firms have other ways to retain workers}
     \end{itemize}
 \end{frame}
 
@@ -380,22 +420,22 @@
     \frametitle{Effects Robust Across Higher-Confidence Linked Samples}
     \vfill
     \begin{center}
-    \resizebox{0.75\textwidth}{!}{%
-    \begin{tabular}{lcccc}
+    \resizebox{0.65\textwidth}{!}{%
+    \begin{tabular}{lcc}
     \toprule
-    & In U.S. & Same firm & New pos.\ (cond.) & New educ. \\
-    & (1) & (2) & (3) & (4) \\
+    & In U.S. & Same firm \\
+    & (1) & (2) \\
     \midrule
     % One-to-one (overlay 1)
-    \visible<1->{One-to-one ($N=64{,}781$)} & \visible<1->{0.0116\sym{***} {\scriptsize(0.0027)}} & \visible<1->{0.0264\sym{***} {\scriptsize(0.0053)}} & \visible<1->{$-$0.0146\sym{*} {\scriptsize(0.0075)}} & \visible<1->{$-$0.0042 {\scriptsize(0.0059)}} \\[4pt]
+    \visible<1->{One-to-one ($N=64{,}781$)} & \visible<1->{0.0116\sym{***} {\scriptsize(0.0027)}} & \visible<1->{0.0264\sym{***} {\scriptsize(0.0053)}} \\[4pt]
     % Baseline (overlay 2)
-    \visible<2->{Baseline ($N=70{,}580$)} & \visible<2->{0.0023\sym{***} {\scriptsize(0.0008)}} & \visible<2->{0.0058\sym{***} {\scriptsize(0.0017)}} & \visible<2->{$-$0.0010 {\scriptsize(0.0020)}} & \visible<2->{0.0040\sym{**} {\scriptsize(0.0020)}} \\[4pt]
+    \visible<2->{Baseline ($N=70{,}580$)} & \visible<2->{0.0023\sym{***} {\scriptsize(0.0008)}} & \visible<2->{0.0058\sym{***} {\scriptsize(0.0017)}} \\[4pt]
     % Strict Q25--Q75 (overlay 3)
-    \visible<3->{Strict Q25 ($N=40{,}165$)} & \visible<3->{0.0103\sym{***} {\scriptsize(0.0026)}} & \visible<3->{0.0253\sym{***} {\scriptsize(0.0048)}} & \visible<3->{$-$0.0062 {\scriptsize(0.0063)}} & \visible<3->{$-$0.0073 {\scriptsize(0.0059)}} \\[4pt]
-    \visible<3->{Strict Q50 ($N=27{,}765$)} & \visible<3->{0.0146\sym{***} {\scriptsize(0.0034)}} & \visible<3->{0.0328\sym{***} {\scriptsize(0.0060)}} & \visible<3->{$-$0.0169\sym{**} {\scriptsize(0.0081)}} & \visible<3->{$-$0.0085 {\scriptsize(0.0075)}} \\[4pt]
-    \visible<3->{Strict Q75 ($N=13{,}894$)} & \visible<3->{0.0142\sym{***} {\scriptsize(0.0049)}} & \visible<3->{0.0408\sym{***} {\scriptsize(0.0086)}} & \visible<3->{$-$0.0336\sym{***} {\scriptsize(0.0119)}} & \visible<3->{0.0041 {\scriptsize(0.0113)}} \\[4pt]
+    \visible<3->{Strict Q25 ($N=40{,}165$)} & \visible<3->{0.0103\sym{***} {\scriptsize(0.0026)}} & \visible<3->{0.0253\sym{***} {\scriptsize(0.0048)}} \\[4pt]
+    \visible<3->{Strict Q50 ($N=27{,}765$)} & \visible<3->{0.0146\sym{***} {\scriptsize(0.0034)}} & \visible<3->{0.0328\sym{***} {\scriptsize(0.0060)}} \\[4pt]
+    \visible<3->{Strict Q75 ($N=13{,}894$)} & \visible<3->{0.0142\sym{***} {\scriptsize(0.0049)}} & \visible<3->{0.0408\sym{***} {\scriptsize(0.0086)}} \\[4pt]
     % Rare Country (overlay 4)
-    \visible<4->{Rare Country ($N=10{,}440$)} & \visible<4->{0.0083\sym{**} {\scriptsize(0.0033)}} & \visible<4->{0.0221\sym{***} {\scriptsize(0.0061)}} & \visible<4->{$-$0.0097 {\scriptsize(0.0072)}} & \visible<4->{$-$0.0087 {\scriptsize(0.0069)}} \\
+    \visible<4->{Rare Country ($N=10{,}440$)} & \visible<4->{0.0083\sym{**} {\scriptsize(0.0033)}} & \visible<4->{0.0221\sym{***} {\scriptsize(0.0061)}} \\
     \bottomrule
     \end{tabular}
     }
@@ -413,99 +453,117 @@
     \begin{itemize}
         \item Effects are statistically significant but moderate in the one-to-one sample (1.16 pp U.S.\ presence)
         \vspace{4mm}
-        \item \textbf{Reason 1: Measurement error attenuates estimates}
+        \item \textbf{Reason 1:} Measurement error attenuates estimates
+        \begin{itemize}
+            \item \textbf{Verdict:} Partial driver, but estimates still small in high-confidence samples
+        \end{itemize}
         \vspace{4mm}
-        \item \textbf{Reason 2: OPT workers have fallback options}
+        \item \textbf{Reason 2:} OPT workers...use OPT?
         \begin{itemize}
             \item Selecting on OPT $\implies$ applicants can continue to work through OPT!
-            \item \textbf{Prediction:} effects largest when applicants have no OPT remaining
-            \begin{itemize}
-                \item Workers 1 yr post-graduation: nearing end of initial 12-month OPT
-                \item Workers 3 yrs post-graduation: nearing end of STEM-OPT extension
-            \end{itemize}
-            \item Effects larger for firms less likely to re-sponsor workers (\textit{no-rep}) vs.\ \textit{high-rep} firms
-            \item \textbf{How do effects vary by years since graduation and employer type?}
+            \item \textbf{Prediction:} effects increase as OPT runs out
+            \item \textbf{How do effects vary by years since graduation?}
         \end{itemize}
+        \vspace{4mm}
+        \item \textcolor{gray}{\textbf{Reason 3:} Firms have other ways to retain workers}
     \end{itemize}
 \end{frame}
 
-%%% HETEROGENEITY TABLE
+%%% HETEROGENEITY TABLE (COLS 1-4)
 \begin{frame}
     \frametitle{Effects Strongest for Workers Near OPT Expiration}
     \vfill
     \begin{center}
     \resizebox{\textwidth}{!}{%
-    \begin{tabular}{lcccccc}
+    \begin{tabular}{lcccc}
     \toprule
-    & 0 yrs post-grad & 1 yr post-grad & 2 yrs post-grad & 3 yrs post-grad & No rep. & High rep. \\
-    & (1) & (2) & (3) & (4) & (5) & (6) \\
+    & \multicolumn{4}{c}{\textit{Dependent Variable: In U.S.}} \\
+    & 0 yrs post-grad & 1 yr post-grad & 2 yrs post-grad & 3 yrs post-grad \\
+    & (1) & (2) & (3) & (4) \\
     \midrule
-    winner & 0.0210 & 0.0324\sym{**} & 0.0395\sym{**} & 0.0446\sym{**} & 0.0221 & 0.0029 \\
-     & (0.0195) & (0.0138) & (0.0164) & (0.0194) & (0.0211) & (0.0064) \\
+    winner & 0.0210 & 0.0324\sym{**} & 0.0395\sym{**} & 0.0446\sym{**} \\
+     & (0.0195) & (0.0138) & (0.0164) & (0.0194) \\
     \midrule
-    \textbf{Control mean} & 0.893 & 0.880 & 0.870 & 0.875 & 0.889 & 0.920 \\
-    \textbf{N} & 1{,}980 & 6{,}029 & 4{,}728 & 3{,}043 & 2{,}605 & 19{,}322 \\
+    \textbf{Control mean} & 0.893 & 0.880 & 0.870 & 0.875 \\
+    \textbf{N} & 1{,}980 & 6{,}029 & 4{,}728 & 3{,}043 \\
     \bottomrule
     \end{tabular}
     }
     \end{center}
     \begin{center}
-    \scriptsize\textit{Outcome: \textit{In U.S.}\ (2 years post-lottery). Cols (1)--(4): subgroups by years since graduation at time of lottery application. Cols (5)--(6): by employer repetition. $^*p<0.10$, $^{**}p<0.05$, $^{***}p<0.01$.}
+    \scriptsize\textit{Outcome: \textit{In U.S.}\ (2 years post-lottery). Cols (1)--(4): subgroups by years since graduation at time of lottery application. $^*p<0.10$, $^{**}p<0.05$, $^{***}p<0.01$.}
     \end{center}
     \vfill
 \end{frame}
 
+%%% TAKING STOCK PART 3: REASON 3
 \begin{frame}
-    \frametitle{Summary of Results}
+    \frametitle{Taking Stock: Why Are Effects Small?}
     \begin{itemize}
-        \item \textbf{Main effects:} winning H-1B raises U.S.\ presence (+1.52 pp) and firm retention (+1.23 pp)
+        \item Effects are statistically significant but moderate in the one-to-one sample (1.16 pp U.S.\ presence)
+        \vspace{4mm}
+        \item \textbf{Reason 1:} Measurement error attenuates estimates
         \begin{itemize}
-            \item Winners less likely to leave for a different employer ($-$1.23 pp)
-            \item Winners less likely to appear in home country ($-$0.74 pp)
+            \item \textbf{Verdict:} Partial driver, but estimates still small in high-confidence samples
         \end{itemize}
         \vspace{4mm}
-        \item \textbf{Robustness:} effects consistent across higher-confidence samples
+        \item \textbf{Reason 2:} OPT workers...use OPT?
         \begin{itemize}
-            \item U.S.\ presence reaches 2.0 pp (Q75); firm retention 1.45 pp
-            \item Baseline effects smaller --- consistent with attenuation bias from probabilistic linkage
+            \item \textbf{Verdict:} Effects largest as applicants near OPT expiration, but still small even for those 3 years post-grad
         \end{itemize}
         \vspace{4mm}
-        \item \textbf{Heterogeneity:} effects driven by workers near OPT expiration
+        \item \textbf{Reason 3:} Firms have other ways to retain workers
         \begin{itemize}
-            \item Patterns at 2 and 4 yrs post-graduation consistent with OPT expiration dates
+            \item Firms can re-sponsor lottery losers in subsequent years
+            \item \textbf{Prediction:} effects smaller at firms more likely to re-sponsor (\textit{high-rep})
+            \item \textbf{How do effects vary by employer type?}
         \end{itemize}
-        \vspace{4mm}
-        \item \textbf{Interpretation:} H-1B as \textit{stability lottery} --- reduces disruption, locks workers into firm
     \end{itemize}
 \end{frame}
 
+%%% HETEROGENEITY TABLE (FULL)
+\begin{frame}
+    \frametitle{Effects Concentrated at Firms That Don't Re-Sponsor}
+    \vfill
+    \begin{center}
+    \resizebox{0.5\textwidth}{!}{%
+    \begin{tabular}{lcc}
+    \toprule
+    & \multicolumn{2}{c}{\textit{Dependent Variable: In U.S.}} \\
+    & No rep. & High rep. \\
+    & (1) & (2) \\
+    \midrule
+    winner & 0.0221 & 0.0029 \\
+     & (0.0211) & (0.0064) \\
+    \midrule
+    \textbf{Control mean} & 0.889 & 0.920 \\
+    \textbf{N} & 2{,}605 & 19{,}322 \\
+    \bottomrule
+    \end{tabular}
+    }
+    \end{center}
+    \begin{center}
+    \scriptsize\textit{Outcome: \textit{In U.S.}\ (2 years post-lottery). Cols (1)--(2): subgroups by employer repetition. $^*p<0.10$, $^{**}p<0.05$, $^{***}p<0.01$.}
+    \end{center}
+    \vfill
+\end{frame}
+
 \section{Conclusion}
+
 \begin{frame}
     \frametitle{Conclusion}
     \begin{itemize}
-        \item \textbf{Contribution 1:} first individual-level causal estimates of H-1B lottery effects
-        \begin{itemize}
-            \item Winning stabilizes U.S.\ presence and firm retention; reduces employer mobility
-            \item For OPT workers, H-1B is a stability mechanism, not an entry gate
-        \end{itemize}
-        \vspace{3mm}
-        \item \textbf{Contribution 2:} novel probabilistic linkage for deidentified immigration records
-        \begin{itemize}
-            \item Pre-lottery employment as anchor reduces candidate space from millions to hundreds
-        \end{itemize}
-        \vspace{3mm}
-        \item \textbf{Policy implication:} modest average effects $\neq$ unimportant policy
-        \begin{itemize}
-            \item Repeated reapplication costs, employer dependence, and uncertainty have welfare costs
-            \item Reforms targeting portability and OPT-to-H1B transitions could reduce disruption
-        \end{itemize}
-        \vspace{3mm}
-        \item \textbf{Next steps:}
-        \begin{itemize}
-            \item Wage and compensation effects
-            \item Productivity outcomes via GitHub data
-            \item Return migration and third-country reallocation
-        \end{itemize}
+        \item \textbf{Main effects:} winning H-1B raises U.S.\ presence (+1.16 pp) and firm retention (+2.64 pp)
+        \vspace{2mm}
+        \item \textbf{Magnitude of effects:} not fully explained by measurement error or OPT
+        \vspace{2mm}
+        \item \textbf{Policy Implication/Puzzle:} OPT workers managing to remain without H-1B --- how? 
+    \end{itemize} \vspace{2mm}
+    
+    \textbf{Next Steps:}
+    \begin{itemize}
+        \item Explore more mechanisms: underreporting on LinkedIn, L-1 (intra-firm transfer), heterogeneity in school result
+        \item Firm-level effects: benchmarking my estimates with literature 
     \end{itemize}
 \end{frame}
 
@@ -543,17 +601,17 @@
     \frametitle{Robustness: Control Means by Sample}
     \vfill
     \begin{center}
-    \resizebox{0.75\textwidth}{!}{%
-    \begin{tabular}{lcccc}
+    \resizebox{0.5\textwidth}{!}{%
+    \begin{tabular}{lcc}
     \toprule
-    & In U.S. & Same firm & New pos.\ (cond.) & New educ. \\
+    & In U.S. & Same firm \\
     \midrule
-    One-to-one   & 0.950 & 0.743 & 0.448 & 0.340 \\
-    Baseline     & 0.956 & 0.743 & 0.388 & 0.301 \\
-    Strict Q25   & 0.938 & 0.741 & 0.442 & 0.452 \\
-    Strict Q50   & 0.934 & 0.740 & 0.449 & 0.466 \\
-    Strict Q75   & 0.937 & 0.746 & 0.455 & 0.473 \\
-    Rare Country & 0.948 & 0.749 & 0.413 & 0.304 \\
+    One-to-one   & 0.950 & 0.743 \\
+    Baseline     & 0.956 & 0.743 \\
+    Strict Q25   & 0.938 & 0.741 \\
+    Strict Q50   & 0.934 & 0.740 \\
+    Strict Q75   & 0.937 & 0.746 \\
+    Rare Country & 0.948 & 0.749 \\
     \bottomrule
     \end{tabular}
     }

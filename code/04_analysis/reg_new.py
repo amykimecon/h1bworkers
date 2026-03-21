@@ -16,6 +16,13 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
+import matplotlib
+try:
+    get_ipython()  # only defined in IPython
+    matplotlib.use("module://matplotlib_inline.backend_inline")
+except (NameError, AttributeError):
+    matplotlib.use("Agg")  # headless fallback — saves files but skips display
+
 import numpy as np
 import pandas as pd
 import yaml
@@ -64,6 +71,7 @@ def _normalize_outcome_groups(raw_groups: dict) -> dict:
           source_outcome: column in df_app to regress on
           subset_var: optional column used to subset the sample
           subset_value: value required in subset_var (default = 1)
+          subset_op: comparison operator for subset_var filter; one of "==", ">=", "<=", ">", "<" (default "==")
     """
     normalized = {}
 
@@ -93,11 +101,13 @@ def _normalize_outcome_groups(raw_groups: dict) -> dict:
 
             subset_var = entry.get("subset_var")
             subset_value = entry.get("subset_value", 1 if subset_var is not None else None)
+            subset_op = entry.get("subset_op", "==")
             normalized[group_name].append({
                 "name": name,
                 "source_outcome": source_outcome,
                 "subset_var": subset_var,
                 "subset_value": subset_value,
+                "subset_op": subset_op,
             })
 
     return normalized
@@ -249,18 +259,24 @@ def collapse_to_app_level(df: pd.DataFrame) -> pd.DataFrame:
     # Candidate outcomes to aggregate (only include if present in data)
     candidate_outcomes = [
         # WORK STATUS (exhaustive: still_at_firm + diff_firm + other = 1)
+        "still_at_firm-2", "still_at_firm-1", "still_at_firm0",
         "still_at_firm1", "still_at_firm2", "still_at_firm3",
+        "diff_firm-2", "diff_firm-1", "diff_firm0",
         "diff_firm1", "diff_firm2", "diff_firm3",           # active position at different firm
         "new_diff_firm1", "new_diff_firm2", "new_diff_firm3",   # diff_firm, position started post-lottery
         "old_diff_firm1", "old_diff_firm2", "old_diff_firm3",   # diff_firm, position started pre-lottery
+        "other-2", "other-1", "other0",
         "other1", "other2", "other3",                       # no active position anywhere
         # CONDITIONAL ON still_at_firm (exhaustive within still_at_firm=1)
         "same_firm_new_position1", "same_firm_new_position2", "same_firm_new_position3",
         "same_pos_null_end1", "same_pos_null_end2",         # same position, null enddate (imputed active)
         "same_pos_nonnull_end1", "same_pos_nonnull_end2",   # same position, explicit non-null enddate
         # LOCATION BASELINE (combined position + education; in_us + in_home_country + non_us_non_home + loc_null = 1)
+        "in_us-2", "in_us-1", "in_us0",
         "in_us1", "in_us2", "in_us3",
+        "in_home_country-2", "in_home_country-1", "in_home_country0",
         "in_home_country1", "in_home_country2", "in_home_country3",
+        "non_us_non_home-2", "non_us_non_home-1", "non_us_non_home0",
         "non_us_non_home1", "non_us_non_home2", "non_us_non_home3",
         # EDUCATION (exhaustive: new_educ + continuing_educ + no_educations = 1)
         "new_educ1", "new_educ2", "new_educ3",
@@ -272,6 +288,8 @@ def collapse_to_app_level(df: pd.DataFrame) -> pd.DataFrame:
         "updatediff_activity", # months from pre-lottery ref to most recent position/educ startdate
         "frac_null_enddate1", "frac_null_enddate2",
         "null_enddate_stayer1", "null_enddate_stayer2",
+        # PROFILE LOCATION (static; from user_country on LinkedIn profile)
+        "profile_in_us", "profile_in_home_country", "profile_non_us", "profile_loc_null",
     ]
     outcomes = [v for v in candidate_outcomes if v in df.columns]
 
@@ -482,9 +500,9 @@ def _fe_formula(
 ) -> str:
     """Build the PanelOLS formula string for a given FE spec."""
     if include_interaction:
-        base = f"{outcome} ~ winner + ade + winner:ade"
+        base = f"`{outcome}` ~ winner + ade + winner:ade"
     else:
-        base = f"{outcome} ~ winner + ade"
+        base = f"`{outcome}` ~ winner + ade"
     if fe_spec == "none":
         return base + " + 1"
     elif fe_spec == "firm_year":
@@ -516,7 +534,7 @@ def _run_pyfixest(
         "firm_year":      " | firm_year_fe",
         "firm_plus_year": " | firm_key + lottery_year",
     }
-    fml = f"{reg_outcome} ~ {rhs}{fe_map[fe_spec]}"
+    fml = f"`{reg_outcome}` ~ {rhs}{fe_map[fe_spec]}"
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning, module="pyfixest")
@@ -611,6 +629,7 @@ def run_regression(
     source_outcome = outcome_spec.get("source_outcome", outcome_name)
     subset_var     = outcome_spec.get("subset_var")
     subset_value   = outcome_spec.get("subset_value")
+    subset_op      = outcome_spec.get("subset_op", "==")
 
     if source_outcome not in df.columns or df[source_outcome].isna().all():
         return None
@@ -627,7 +646,9 @@ def run_regression(
 
     sub = df[keep_cols].copy()
     if subset_var is not None:
-        sub = sub[sub[subset_var] == subset_value].copy()
+        _ops = {"==": "__eq__", ">=": "__ge__", "<=": "__le__", ">": "__gt__", "<": "__lt__"}
+        _op_fn = _ops.get(subset_op, "__eq__")
+        sub = sub[getattr(sub[subset_var], _op_fn)(subset_value)].copy()
     sub = sub.dropna(subset=[source_outcome, "winner", "ade", "weight_norm"])
 
     reg_outcome = source_outcome
@@ -1378,6 +1399,18 @@ def run_profile_recency_subsample(df_app: pd.DataFrame, variant_name: str, outpu
 # EVENT-TIME GRAPHS
 ###############################################################################
 
+# Human-readable labels for event-time y-axes
+OUTCOME_BASE_LABELS: dict[str, str] = {
+    "in_us":            "US Presence",
+    "still_at_firm":    "Retention at Sponsoring Firm",
+    "new_educ":         "New Education",
+    "updatediff":       "Profile Update Lag",
+    "diff_firm":        "Employment at Different Firm",
+    "new_diff_firm":    "New Employment at Different Firm",
+    "in_home_country":  "Home Country Presence",
+    "non_us_non_home":  "Non-US, Non-Home Presence",
+}
+
 def run_event_time_graphs(
     df_app: pd.DataFrame,
     variant_name: str,
@@ -1386,10 +1419,11 @@ def run_event_time_graphs(
     include_interaction: bool = True,
 ):
     """
-    For each configured outcome base, run regressions at t=1, 2, 3 and plot
+    For each configured outcome base, run regressions at t=-1,0,1,2,3 and plot
     the winner coefficient ± 95% CI error bars vs. years post-lottery.
+    Periods missing from df_app are skipped automatically.
 
-    X-axis: years post-lottery (t = 1, 2, 3)
+    X-axis: years post-lottery (t = -1 to 3)
     Y-axis: winner coefficient from  outcome_t ~ winner + ade [+ winner:ade] + FE
     Error bars: ±1.96 × SE (firm-clustered)
 
@@ -1406,10 +1440,12 @@ def run_event_time_graphs(
     print(f"  [event_time] variant={variant_name}  spec={spec}  "
           f"bases={outcome_bases}")
 
+    et_data = {}  # {base: {"periods": [...], "coefs": [...], "ses": [...]}}
+
     for base in outcome_bases:
         periods, coefs, ses = [], [], []
 
-        for t in [-2, -1, 0, 1, 2, 3]:
+        for t in [-1, 0, 1, 2, 3]:
             col = f"{base}{t}"
             if col not in df_app.columns:
                 print(f"    [SKIP] {col} not in data")
@@ -1438,33 +1474,313 @@ def run_event_time_graphs(
             print(f"    [SKIP] {base}: fewer than 2 periods estimated, skipping plot")
             continue
 
-        # --- Build plot ---
-        coefs_arr = np.array(coefs)
-        ses_arr   = np.array(ses)
+        # Store for combined cross-variant plot
+        et_data[base] = {"periods": periods, "coefs": coefs, "ses": ses}
+
+        # --- Build per-variant plot ---
+        coefs_arr = np.array(coefs) * 100
+        ses_arr   = np.array(ses) * 100
         ci95      = 1.96 * ses_arr
 
+        _color = sns.color_palette("deep")[0]
+        _var_label = OUTCOME_BASE_LABELS.get(base, base)
         sns.set_style("whitegrid")
-        fig, ax = plt.subplots(figsize=(5, 4))
+        fig, ax = plt.subplots(figsize=(8, 4.5))
 
-        ax.errorbar(
-            periods, coefs_arr,
-            yerr=ci95,
-            fmt="o-",
-            capsize=5,
-            linewidth=1.5,
-            markersize=6,
-            color=sns.color_palette("deep")[0],
-            label="Winner coef. ± 1.96 SE",
-        )
+        # Thick semi-transparent CI lines
+        ax.vlines(periods, coefs_arr - ci95, coefs_arr + ci95,
+                  linewidth=8, alpha=0.30, color=_color)
+        # Dots + connecting line on top
+        ax.plot(periods, coefs_arr, "o-",
+                linewidth=1.5, markersize=15, color=_color,
+                label="Winner coef. ± 1.96 SE", zorder=3)
         ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
         ax.set_xticks(periods)
         ax.set_xlabel("Years post-lottery (t)")
-        ax.set_ylabel("Winner coefficient")
-        ax.set_title(f"Event-time: {base}\n{variant_name} — {spec}")
+        ax.set_ylabel(f"Effect of Win on {_var_label} (pp)")
         ax.legend(fontsize=9)
         plt.tight_layout()
 
         out_path = graphs_dir / f"event_time_{variant_name}_{base}.png"
+        plt.savefig(out_path, dpi=150)
+        plt.show()
+        plt.close()
+        print(f"    Saved: {out_path}")
+
+    return et_data
+
+
+def plot_combined_event_time_graphs(
+    all_et_data: dict,
+    output_dir: Path,
+    et_cfg: dict,
+):
+    """
+    Produce one combined event-time plot per outcome base, overlaying all variants
+    on a single figure with a dark-to-light green color gradient (matching summary_stats
+    plot style) and distinct markers per variant.
+
+    Parameters
+    ----------
+    all_et_data : dict
+        {variant_name: {base: {"periods": [...], "coefs": [...], "ses": [...]}}}
+    output_dir  : base output directory
+    et_cfg      : event_time_graphs config dict
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    # Filter to combined_variants if specified
+    combined_variants = et_cfg.get("combined_variants")  # None = all
+    if combined_variants is not None:
+        all_et_data = {k: v for k, v in all_et_data.items() if k in combined_variants}
+
+    # Collect the set of bases that have data in at least one variant
+    all_bases = set()
+    for base_dict in all_et_data.values():
+        all_bases.update(base_dict.keys())
+    if not all_bases:
+        print("  [combined_event_time] No event-time data to plot.")
+        return
+
+    graphs_dir = output_dir / "graphs"
+    graphs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ordered list of variant names (preserves config order)
+    variant_names = list(all_et_data.keys())
+    n_variants = max(len(variant_names), 1)
+
+    # Dark-to-light green palette matching summary_stats.py
+    green_palette = plt.cm.Greens(np.linspace(0.85, 0.25, n_variants))
+
+    # Distinct markers for accessibility
+    markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
+
+    spec = PRIMARY_FE_SPEC
+
+    print(f"\n  [combined_event_time] Plotting combined graphs for bases: {sorted(all_bases)}")
+
+    for base in sorted(all_bases):
+        _var_label = OUTCOME_BASE_LABELS.get(base, base)
+        sns.set_style("whitegrid")
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+
+        plotted_any = False
+        for i, vname in enumerate(variant_names):
+            base_data = all_et_data[vname].get(base)
+            if base_data is None or len(base_data["periods"]) < 2:
+                continue
+
+            periods   = np.array(base_data["periods"])
+            coefs_arr = np.array(base_data["coefs"]) * 100
+            ses_arr   = np.array(base_data["ses"]) * 100
+            ci95      = 1.96 * ses_arr
+            color     = green_palette[i]
+            marker    = markers[i % len(markers)]
+
+            # Thick semi-transparent CI lines
+            ax.vlines(periods, coefs_arr - ci95, coefs_arr + ci95,
+                      linewidth=8, alpha=0.25, color=color)
+            # Dots + connecting line on top
+            ax.plot(periods, coefs_arr, f"{marker}-",
+                    linewidth=1.4, markersize=15, color=color,
+                    label=vname, zorder=3)
+            plotted_any = True
+
+        if not plotted_any:
+            plt.close()
+            print(f"    [SKIP] {base}: no variants had sufficient data")
+            continue
+
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.7)
+        all_periods = sorted({t for d in all_et_data.values()
+                              if base in d for t in d[base]["periods"]})
+        ax.set_xticks(all_periods)
+        ax.set_xlabel("Years post-lottery (t)")
+        ax.set_ylabel(f"Effect of Win on {_var_label} (pp)")
+        ax.legend(fontsize=8, framealpha=0.85)
+        plt.tight_layout()
+
+        out_path = graphs_dir / f"event_time_combined_{base}.png"
+        plt.savefig(out_path, dpi=150)
+        plt.show()
+        plt.close()
+        print(f"    Saved: {out_path}")
+
+
+def run_event_time_raw_means(
+    df_app: pd.DataFrame,
+    variant_name: str,
+    output_dir: Path,
+    et_cfg: dict,
+):
+    """
+    For each configured outcome base, compute raw (weighted) group means at each
+    time period t = -2,-1,0,1,2,3 and plot winners vs. losers as two lines.
+
+    X-axis: years post-lottery (t = -1 to 3)
+    Y-axis: weighted mean of outcome for winner=1 and winner=0
+    Weights: applicant-level weight (weight column, if present; else unweighted)
+
+    Saves PNGs to: {output_dir}/graphs/event_time_raw_{variant_name}_{outcome_base}.png
+    Returns raw_data dict: {base: {"periods": [...], "means_w": [...], "means_l": [...]}}
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    graphs_dir = output_dir / "graphs"
+    graphs_dir.mkdir(parents=True, exist_ok=True)
+
+    outcome_bases = et_cfg.get("outcome_bases", ["in_us", "still_at_firm"])
+    print(f"  [event_time_raw] variant={variant_name}  bases={outcome_bases}")
+
+    # Use weight column if available
+    has_weight = "weight" in df_app.columns
+
+    winners = df_app[df_app["winner"] == 1]
+    losers  = df_app[df_app["winner"] == 0]
+
+    raw_data = {}  # {base: {"periods": [...], "means_w": [...], "means_l": [...]}}
+
+    palette = sns.color_palette("deep")
+    color_w = palette[0]  # blue — winners
+    color_l = palette[3]  # red — losers
+
+    for base in outcome_bases:
+        periods, means_w, means_l = [], [], []
+
+        for t in [-1, 0, 1, 2, 3]:
+            col = f"{base}{t}"
+            if col not in df_app.columns:
+                continue
+
+            # Weighted mean helper
+            def wmean(sub):
+                s = sub[col].dropna()
+                if len(s) == 0:
+                    return np.nan
+                if has_weight:
+                    w = sub.loc[s.index, "weight"]
+                    return float(np.average(s, weights=w))
+                return float(s.mean())
+
+            mw = wmean(winners)
+            ml = wmean(losers)
+            periods.append(t)
+            means_w.append(mw)
+            means_l.append(ml)
+            print(f"    {col}: winner_mean={mw:.4f}  loser_mean={ml:.4f}  "
+                  f"N_w={winners[col].notna().sum():,}  N_l={losers[col].notna().sum():,}")
+
+        if len(periods) < 2:
+            print(f"    [SKIP] {base}: fewer than 2 periods, skipping plot")
+            continue
+
+        raw_data[base] = {"periods": periods, "means_w": means_w, "means_l": means_l}
+
+        # --- Plot ---
+        sns.set_style("whitegrid")
+        fig, ax = plt.subplots(figsize=(5, 4))
+
+        means_w_pp = [m * 100 if m is not None and not np.isnan(m) else m for m in means_w]
+        means_l_pp = [m * 100 if m is not None and not np.isnan(m) else m for m in means_l]
+        ax.plot(periods, means_w_pp, "o-", color=color_w, linewidth=1.5, markersize=6,
+                label="Winners (H-1B granted)")
+        ax.plot(periods, means_l_pp, "s--", color=color_l, linewidth=1.5, markersize=6,
+                label="Losers (H-1B denied)")
+        ax.axvline(-0.5, color="gray", linewidth=0.8, linestyle=":", alpha=0.7)
+        ax.set_xticks(periods)
+        ax.set_xlabel("Years post-lottery (t)")
+        ax.set_ylabel(f"Mean: {base} (pp)")
+        ax.set_title(f"Event-time (raw means): {base}\n{variant_name}")
+        ax.legend(fontsize=9)
+        plt.tight_layout()
+
+        out_path = graphs_dir / f"event_time_raw_{variant_name}_{base}.png"
+        plt.savefig(out_path, dpi=150)
+        plt.show()
+        plt.close()
+        print(f"    Saved: {out_path}")
+
+    return raw_data
+
+
+def plot_combined_raw_means_graphs(
+    all_raw_data: dict,
+    output_dir: Path,
+    et_cfg: dict,
+):
+    """
+    Produce one combined raw-means event-time plot per outcome base, overlaying all
+    variants. Winners are solid lines; losers are dashed lines. Each variant gets its
+    own color from the green palette used elsewhere.
+
+    Parameters
+    ----------
+    all_raw_data : {variant_name: {base: {"periods", "means_w", "means_l"}}}
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    # Filter to combined_variants if specified
+    combined_variants = et_cfg.get("combined_variants")  # None = all
+    if combined_variants is not None:
+        all_raw_data = {k: v for k, v in all_raw_data.items() if k in combined_variants}
+
+    all_bases = set()
+    for base_dict in all_raw_data.values():
+        all_bases.update(base_dict.keys())
+    if not all_bases:
+        print("  [combined_raw_means] No raw-means data to plot.")
+        return
+
+    graphs_dir = output_dir / "graphs"
+    graphs_dir.mkdir(parents=True, exist_ok=True)
+
+    variant_names = list(all_raw_data.keys())
+    n_variants = max(len(variant_names), 1)
+    green_palette = plt.cm.Greens(np.linspace(0.85, 0.25, n_variants))
+    markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
+
+    print(f"\n  [combined_raw_means] Plotting for bases: {sorted(all_bases)}")
+
+    for base in sorted(all_bases):
+        sns.set_style("whitegrid")
+        fig, ax = plt.subplots(figsize=(6, 4))
+
+        plotted_any = False
+        for i, vname in enumerate(variant_names):
+            bd = all_raw_data[vname].get(base)
+            if bd is None or len(bd["periods"]) < 2:
+                continue
+
+            periods  = np.array(bd["periods"])
+            means_w  = np.array(bd["means_w"]) * 100
+            means_l  = np.array(bd["means_l"]) * 100
+            color    = green_palette[i]
+            marker   = markers[i % len(markers)]
+
+            ax.plot(periods, means_w, f"{marker}-", color=color, linewidth=1.4,
+                    markersize=6, alpha=0.9, label=f"{vname} — winners")
+            ax.plot(periods, means_l, f"{marker}--", color=color, linewidth=1.4,
+                    markersize=6, alpha=0.6, label=f"{vname} — losers")
+            plotted_any = True
+
+        if not plotted_any:
+            plt.close()
+            continue
+
+        ax.axvline(-0.5, color="gray", linewidth=0.8, linestyle=":", alpha=0.7)
+        all_periods = sorted({t for d in all_raw_data.values()
+                              if base in d for t in d[base]["periods"]})
+        ax.set_xticks(all_periods)
+        ax.set_xlabel("Years post-lottery (t)")
+        ax.set_ylabel(f"Mean: {base} (pp)")
+        ax.set_title(f"Event-time raw means (all variants): {base}")
+        ax.legend(fontsize=7, framealpha=0.85)
+        plt.tight_layout()
+
+        out_path = graphs_dir / f"event_time_raw_combined_{base}.png"
         plt.savefig(out_path, dpi=150)
         plt.show()
         plt.close()
@@ -1565,18 +1881,27 @@ def process_variant(variant: dict, output_dir: Path):
         run_match_quality_check(name, CFG.get("run_tag", icfg.RUN_TAG), output_dir, parquet_path)
 
     # 10. Event-time coefficient graphs
+    et_data = {}
+    raw_data = {}
     if EVENT_TIME_CFG.get("enabled", False):
         et_variants = EVENT_TIME_CFG.get("variants")  # None = all variants
         if et_variants is None or name in et_variants:
             print(f"\n  Running event-time graphs...")
-            run_event_time_graphs(
+            et_data = run_event_time_graphs(
                 df_app, name, output_dir,
                 et_cfg=EVENT_TIME_CFG,
                 include_interaction=INCLUDE_WINNER_ADE_INTERACTION,
-            )
+            ) or {}
+            # Raw means plots (winners vs. losers, no regression)
+            if EVENT_TIME_CFG.get("raw_means", False):
+                print(f"\n  Running event-time raw means graphs...")
+                raw_data = run_event_time_raw_means(
+                    df_app, name, output_dir,
+                    et_cfg=EVENT_TIME_CFG,
+                ) or {}
 
     print(f"\n  Done with {name} ({time.time()-t_start:.1f}s total)")
-    return results, het_results
+    return results, het_results, et_data, raw_data
 
 
 def main():
@@ -1590,18 +1915,36 @@ def main():
 
     all_variant_results = {}
     all_het_results = {}
+    all_et_data = {}   # {variant_name: {base: {"periods": [...], "coefs": [...], "ses": [...]}}}
+    all_raw_data = {}  # {variant_name: {base: {"periods": [...], "means_w": [...], "means_l": [...]}}}
     for variant in VARIANTS:
         out = process_variant(variant, output_dir)
         if out is not None:
-            results, het = out
+            results, het, et_data, raw_data = out
             all_variant_results[variant["name"]] = results
             if het is not None:
                 res_list, col_labels = het
                 all_het_results[variant["name"]] = (res_list, col_labels)
+            if et_data:
+                all_et_data[variant["name"]] = et_data
+            if raw_data:
+                all_raw_data[variant["name"]] = raw_data
 
     print(f"\n{'='*60}")
     print("Building paper tables...")
     build_paper_tables(all_variant_results, all_het_results, output_dir)
+
+    # Combined event-time plots (one per outcome base, all variants overlaid)
+    if EVENT_TIME_CFG.get("enabled", False) and all_et_data:
+        print(f"\n{'='*60}")
+        print("Building combined event-time graphs...")
+        plot_combined_event_time_graphs(all_et_data, output_dir, EVENT_TIME_CFG)
+
+    # Combined raw-means event-time plots
+    if EVENT_TIME_CFG.get("enabled", False) and EVENT_TIME_CFG.get("raw_means", False) and all_raw_data:
+        print(f"\n{'='*60}")
+        print("Building combined event-time raw means graphs...")
+        plot_combined_raw_means_graphs(all_raw_data, output_dir, EVENT_TIME_CFG)
 
     print(f"\n{'='*60}")
     print(f"All variants complete. Total time: {time.time()-t0:.1f}s")

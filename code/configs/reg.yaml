@@ -23,7 +23,7 @@ variants:
   # - name: "strict"
   #   parquet_key: "MERGE_FILT_STRICT_PARQUET"
   - name: "us_educ"
-    parquet_key: "MERGE_FILT_US_EDUC_PARQUET"
+    parquet_key: "MERGE_FILT_US_EDUC_BASELINE_PARQUET"
   - name: "us_educ_prefilt"
     parquet_key: "MERGE_FILT_US_EDUC_PREFILT_PARQUET"
   - name: "us_educ_opt"
@@ -77,15 +77,18 @@ outcomes:
     - name: same_firm_new_position_conditional1
       source_outcome: same_firm_new_position1
       subset_var: still_at_firm1
-      subset_value: 1
+      subset_value: 0.5
+      subset_op: ">="
     - name: same_firm_new_position_conditional2
       source_outcome: same_firm_new_position2
       subset_var: still_at_firm2
-      subset_value: 1
+      subset_value: 0.5
+      subset_op: ">="
     - name: same_firm_new_position_conditional3
       source_outcome: same_firm_new_position3
       subset_var: still_at_firm3
-      subset_value: 1
+      subset_value: 0.5
+      subset_op: ">="
   # LOCATION BASELINE: combined position + education (in_us + in_home_country + non_us_non_home + loc_null = 1)
   location:
     - in_us1
@@ -95,6 +98,13 @@ outcomes:
     - in_home_country2
     - non_us_non_home1
     - non_us_non_home2
+  # PROFILE LOCATION: static indicator from LinkedIn profile's user_country field
+  # (profile_in_us + profile_in_home_country + profile_non_us + profile_loc_null ≈ 1)
+  profile_location:
+    - profile_in_us
+    - profile_in_home_country
+    - profile_non_us
+    - profile_loc_null
   # EDUCATION: exhaustive (new_educ + continuing_educ + no_educations = 1)
   education:
     - new_educ1           # active education started after lottery (snapshot at t)
@@ -108,12 +118,12 @@ outcomes:
   # # If winner predicts updatediff/updatediff_activity, there is differential profile updating.
   # # If winner predicts null_enddate_stayer (negatively), losers are more stuck via imputation.
   # diagnostic:
-  #   - updatediff          # months from pre-lottery ref to Revelio's profile refresh date
-  #   - updatediff_activity # months from pre-lottery ref to most recent position/educ startdate (better proxy)
-  #   - frac_null_enddate1  # fraction of yr+1 active positions with null enddate
-  #   - frac_null_enddate2
-  #   - null_enddate_stayer1 # at orig. firm in yr+1 ONLY due to null-enddate imputation
-  #   - null_enddate_stayer2
+    - updatediff          # months from pre-lottery ref to Revelio's profile refresh date
+    - updatediff_activity # months from pre-lottery ref to most recent position/educ startdate (better proxy)
+    - frac_null_enddate1  # fraction of yr+1 active positions with null enddate
+    - frac_null_enddate2
+    - null_enddate_stayer1 # at orig. firm in yr+1 ONLY due to null-enddate imputation
+    - null_enddate_stayer2
 
 # Balance table comparing pre-lottery covariates by winner status
 balance_table: false
@@ -127,7 +137,7 @@ in_us_het_effects: true
 
 # Non-updating bias diagnostics: split sample by profile recency and compare treatment effects
 # on mobility outcomes. See run_profile_recency_subsample() in reg_new.py.
-run_updating_diagnostics: false
+run_updating_diagnostics: true
 
 # Ex-post match quality check: compare FOIA characteristics (institution, field, ed level,
 # job title) to linked Revelio profile data, producing weighted match rates per variant.
@@ -150,9 +160,18 @@ use_pyfixest: true
 # Event-time coefficient graphs: plot winner coef ± 95% CI at each time horizon.
 event_time_graphs:
   enabled: true
-  # Base outcome names; suffixes 1/2/3 are appended to find per-period columns.
+  # Base outcome names; suffixes -2/-1/0/1/2/3 are tried (missing periods skipped).
   outcome_bases:
     - in_us
     - still_at_firm
-  # Which variants to plot (must match a name in `variants`). null = all variants.
+    - new_educ
+    - updatediff
+  # Which variants to run event-time graphs for (must match a name in `variants`). null = all variants.
   variants: null
+  # Which variants to include in the combined (multi-variant overlay) plots. null = all variants.
+  combined_variants:
+    - us_educ        # baseline
+    - us_educ_opt    # one-to-one (optimal dedup)
+    - strict_med     # Q50
+  # If true, also produce raw-means plots (winners vs. losers) alongside coefficient plots.
+  raw_means: true
