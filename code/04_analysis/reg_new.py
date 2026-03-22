@@ -230,6 +230,20 @@ def load_and_clean(parquet_path: str) -> pd.DataFrame:
     # Outcome variables come directly from the merged parquet (built in indiv_merge.py).
 
     # --- Profile location indicators (static, from user_location/user_country) ---
+    # user_country was omitted from rev_indiv parquets built before the fix in rev_users_clean.py.
+    # Fall back to joining it from wrds_users if missing.
+    if "user_country" not in df.columns and "user_id" in df.columns:
+        run_tag = CFG.get("run_tag", icfg.RUN_TAG)
+        wrds_users_path = os.path.join(root, "data", "int", f"wrds_users_{run_tag}.parquet")
+        if os.path.exists(wrds_users_path):
+            print(f"  user_country missing from parquet — joining from {wrds_users_path}")
+            wu = pd.read_parquet(wrds_users_path, columns=["user_id", "user_country"])
+            # collapse to user level (user_country is user-level but rows may repeat per education entry)
+            wu = wu.groupby("user_id", as_index=False)["user_country"].first()
+            df = df.merge(wu, on="user_id", how="left")
+        else:
+            print(f"  [WARN] user_country missing and wrds_users not found at {wrds_users_path}")
+
     if "user_country" in df.columns:
         us_country_codes = {"US", "USA", "United States"}
         df["profile_in_us"] = df["user_country"].isin(us_country_codes).astype(int)
@@ -1274,17 +1288,18 @@ def run_in_us_het_table(
     df_app: pd.DataFrame,
     variant_name: str,
     output_dir: Path,
+    outcome: str = "in_us2",
 ):
     """
-    Combined heterogeneity table for in_us2: graddiff=0/1/2/3 subgroups followed by
-    norep/highrep employer-reputation subgroups, all in a single table.
+    Combined heterogeneity table for an in_us outcome: graddiff=0/1/2/3 subgroups
+    followed by norep/highrep employer-reputation subgroups, all in a single table.
     """
-    if "in_us2" not in df_app.columns:
-        return
+    if outcome not in df_app.columns:
+        return None, None
 
     outcome_spec = {
-        "name": "in_us2",
-        "source_outcome": "in_us2",
+        "name": outcome,
+        "source_outcome": outcome,
         "subset_var": None,
         "subset_value": None,
     }
@@ -1311,7 +1326,7 @@ def run_in_us_het_table(
     if not any(r is not None for r in res_list):
         return None, None
 
-    title = f"Het effects (in_us2) — graddiff + rep — {variant_name}"
+    title = f"Het effects ({outcome}) — graddiff + rep — {variant_name}"
     latex = make_regression_table(
         res_list, col_labels,
         row_vars=["winner", "ade"],
@@ -1320,7 +1335,7 @@ def run_in_us_het_table(
     )
     save_table(
         latex,
-        output_dir / "tables" / f"het_{variant_name}_in_us2_combined.tex",
+        output_dir / "tables" / f"het_{variant_name}_{outcome}_combined.tex",
         verbose=False,
     )
     return res_list, col_labels
@@ -1508,6 +1523,178 @@ def run_event_time_graphs(
         print(f"    Saved: {out_path}")
 
     return et_data
+
+
+def run_in_us_event_time_het_graphs(
+    df_app: pd.DataFrame,
+    variant_name: str,
+    output_dir: Path,
+    include_interaction: bool = True,
+):
+    """
+    Produce two heterogeneity event-time graphs for the in_us outcome:
+
+      Graph 1 — by years-since-graduation: graddiff=0, 1, 2, 3 overlaid on one plot.
+      Graph 2 — by employer reputation: no_rep vs. high_rep overlaid on one plot.
+
+    Each line shows the winner coefficient ± 95% CI at t=-1,0,1,2,3 (missing
+    periods are skipped). Periods with fewer than 2 valid estimates are dropped.
+
+    Saves PNGs to:
+      {output_dir}/graphs/event_time_het_{variant_name}_in_us_graddiff.png
+      {output_dir}/graphs/event_time_het_{variant_name}_in_us_rep.png
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    spec = PRIMARY_FE_SPEC
+    graphs_dir = output_dir / "graphs"
+    graphs_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n  [in_us_het_event_time] variant={variant_name}  spec={spec}")
+
+    # -----------------------------------------------------------------------
+    # Helper: run event-time regressions for in_us on a given subsample df
+    # -----------------------------------------------------------------------
+    def _collect_et(df_sub: pd.DataFrame) -> dict | None:
+        """Return {"periods", "coefs", "ses"} or None if < 2 valid periods."""
+        periods, coefs, ses = [], [], []
+        for t in [-1, 0, 1, 2, 3]:
+            col = f"in_us{t}"
+            if col not in df_sub.columns or col not in df_app.columns:
+                continue
+            # Only keep rows where the column is non-null in this subset
+            df_t = df_sub.dropna(subset=[col])
+            if df_t.empty:
+                continue
+            outcome_spec = {"name": col, "source_outcome": col,
+                            "subset_var": None, "subset_value": None}
+            res = run_regression(df_t, outcome_spec, spec,
+                                 include_interaction=include_interaction)
+            if res is None or "winner" not in res.params.index:
+                continue
+            periods.append(t)
+            coefs.append(float(res.params["winner"]))
+            ses.append(float(res.std_errors["winner"]))
+            print(f"      in_us{t}: winner={coefs[-1]:+.4f}  SE={ses[-1]:.4f}  N={res.nobs:,}")
+        if len(periods) < 2:
+            return None
+        return {"periods": periods, "coefs": coefs, "ses": ses}
+
+    # -----------------------------------------------------------------------
+    # Graph 1: graddiff = 0 / 1 / 2 / 3
+    # -----------------------------------------------------------------------
+    if "graddiff_agg" not in df_app.columns:
+        print("    [SKIP] graddiff_agg not in data — skipping graddiff het graph")
+    else:
+        graddiff_groups = {
+            "graddiff=0": df_app[df_app["graddiff_agg"].round() == 0],
+            "graddiff=1": df_app[df_app["graddiff_agg"].round() == 1],
+            "graddiff=2": df_app[df_app["graddiff_agg"].round() == 2],
+            "graddiff=3": df_app[df_app["graddiff_agg"].round() == 3],
+        }
+        # Sequential blue palette — dark→light for graddiff 0→3
+        gd_colors = plt.cm.Blues(np.linspace(0.85, 0.35, 4))
+        gd_markers = ["o", "s", "^", "D"]
+        # Horizontal offsets so the 4 groups don't overlap (centred around 0)
+        n_gd = len(graddiff_groups)
+        gd_offsets = np.linspace(-0.15, 0.15, n_gd)
+
+        sns.set_style("whitegrid")
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        plotted_any = False
+
+        for i, (label, df_sub) in enumerate(graddiff_groups.items()):
+            print(f"    [graddiff het] {label}  N={len(df_sub):,}")
+            et = _collect_et(df_sub)
+            if et is None:
+                print(f"      [SKIP] {label}: < 2 valid periods")
+                continue
+            periods_arr = np.array(et["periods"]) + gd_offsets[i]
+            coefs_arr   = np.array(et["coefs"]) * 100
+            ci95        = 1.96 * np.array(et["ses"]) * 100
+            color       = gd_colors[i]
+
+            ax.vlines(periods_arr, coefs_arr - ci95, coefs_arr + ci95,
+                      linewidth=8, alpha=0.25, color=color)
+            ax.plot(periods_arr, coefs_arr, f"{gd_markers[i]}-",
+                    linewidth=1.4, markersize=12, color=color,
+                    label=label, zorder=3)
+            plotted_any = True
+
+        if plotted_any:
+            ax.axhline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.7)
+            all_periods = sorted({t for t in [-1, 0, 1, 2, 3]
+                                  if f"in_us{t}" in df_app.columns})
+            # Keep integer tick labels even though points are horizontally offset
+            ax.set_xticks(all_periods)
+            ax.set_xticklabels([str(t) for t in all_periods])
+            ax.set_xlabel("Years post-lottery (t)")
+            ax.set_ylabel("Effect of Win on US Presence (pp)")
+            ax.legend(fontsize=9, framealpha=0.85)
+            plt.tight_layout()
+            out_path = graphs_dir / f"event_time_het_{variant_name}_in_us_graddiff.png"
+            plt.savefig(out_path, dpi=150)
+            plt.show()
+            print(f"    Saved: {out_path}")
+        else:
+            print("    [SKIP] graddiff het graph: no groups had sufficient data")
+        plt.close()
+
+    # -----------------------------------------------------------------------
+    # Graph 2: no_rep vs. high_rep
+    # -----------------------------------------------------------------------
+    rep_groups = {}
+    if "no_rep_emp_ind" in df_app.columns:
+        rep_groups["no\\_rep"] = df_app[df_app["no_rep_emp_ind"] == 1]
+    if "high_rep_emp_ind" in df_app.columns:
+        rep_groups["high\\_rep"] = df_app[df_app["high_rep_emp_ind"] == 1]
+
+    if not rep_groups:
+        print("    [SKIP] neither no_rep_emp_ind nor high_rep_emp_ind in data — skipping rep het graph")
+    else:
+        rep_colors  = sns.color_palette("deep", n_colors=2)
+        rep_markers = ["o", "s"]
+
+        sns.set_style("whitegrid")
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        plotted_any = False
+
+        for i, (label, df_sub) in enumerate(rep_groups.items()):
+            display_label = label.replace("\\", "")  # strip LaTeX escapes for console
+            print(f"    [rep het] {display_label}  N={len(df_sub):,}")
+            et = _collect_et(df_sub)
+            if et is None:
+                print(f"      [SKIP] {display_label}: < 2 valid periods")
+                continue
+            periods_arr = np.array(et["periods"])
+            coefs_arr   = np.array(et["coefs"]) * 100
+            ci95        = 1.96 * np.array(et["ses"]) * 100
+            color       = rep_colors[i]
+
+            ax.vlines(periods_arr, coefs_arr - ci95, coefs_arr + ci95,
+                      linewidth=8, alpha=0.25, color=color)
+            ax.plot(periods_arr, coefs_arr, f"{rep_markers[i]}-",
+                    linewidth=1.4, markersize=12, color=color,
+                    label=display_label, zorder=3)
+            plotted_any = True
+
+        if plotted_any:
+            ax.axhline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.7)
+            all_periods = sorted({t for t in [-1, 0, 1, 2, 3]
+                                  if f"in_us{t}" in df_app.columns})
+            ax.set_xticks(all_periods)
+            ax.set_xlabel("Years post-lottery (t)")
+            ax.set_ylabel("Effect of Win on US Presence (pp)")
+            ax.legend(fontsize=9, framealpha=0.85)
+            plt.tight_layout()
+            out_path = graphs_dir / f"event_time_het_{variant_name}_in_us_rep.png"
+            plt.savefig(out_path, dpi=150)
+            plt.show()
+            print(f"    Saved: {out_path}")
+        else:
+            print("    [SKIP] rep het graph: no groups had sufficient data")
+        plt.close()
 
 
 def plot_combined_event_time_graphs(
@@ -1863,11 +2050,13 @@ def process_variant(variant: dict, output_dir: Path):
         print(f"\n  Running heterogeneous effects...")
         run_het_effects(df_app, name, output_dir)
 
-    # 7b. In-US heterogeneity table (graddiff=0/1/2/3 + norep/highrep, in_us2 only)
+    # 7b. In-US heterogeneity table (graddiff=0/1/2/3 + norep/highrep, in_us1 and in_us2)
     het_results = None
     if IN_US_HET_EFFECTS:
+        print(f"\n  Running in_us1 heterogeneity table...")
+        run_in_us_het_table(df_app, name, output_dir, outcome="in_us1")
         print(f"\n  Running in_us2 heterogeneity table...")
-        het_results = run_in_us_het_table(df_app, name, output_dir)
+        het_results = run_in_us_het_table(df_app, name, output_dir, outcome="in_us2")
 
     # 8. Non-updating bias diagnostics
     if RUN_UPDATING_DIAGNOSTICS:
@@ -1899,6 +2088,14 @@ def process_variant(variant: dict, output_dir: Path):
                     df_app, name, output_dir,
                     et_cfg=EVENT_TIME_CFG,
                 ) or {}
+
+            # Heterogeneity event-time graphs for in_us (graddiff + rep)
+            if IN_US_HET_EFFECTS:
+                print(f"\n  Running in_us event-time heterogeneity graphs...")
+                run_in_us_event_time_het_graphs(
+                    df_app, name, output_dir,
+                    include_interaction=INCLUDE_WINNER_ADE_INTERACTION,
+                )
 
     print(f"\n  Done with {name} ({time.time()-t_start:.1f}s total)")
     return results, het_results, et_data, raw_data
