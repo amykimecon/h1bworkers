@@ -15,6 +15,12 @@ from typing import Iterable
 import duckdb as ddb
 import pandas as pd
 import pyarrow.parquet as pq
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import *  # noqa: F401,F403
@@ -36,6 +42,32 @@ def _quote_ident(name: str) -> str:
 def _get_columns(con: ddb.DuckDBPyConnection, view: str) -> list[str]:
     rows = con.execute(f"PRAGMA table_info('{view}')").fetchall()
     return [r[1] for r in rows]
+
+
+def _group_value_expr(col: str) -> str:
+    ident = _quote_ident(col)
+    if col.lower().endswith("_zip_code"):
+        trimmed = f"trim(CAST({ident} AS VARCHAR))"
+        normalized = (
+            "CASE "
+            f"WHEN {ident} IS NULL THEN NULL "
+            f"WHEN {trimmed} = '' THEN NULL "
+            f"WHEN regexp_full_match({trimmed}, '^[0-9]+\\.0+$') THEN split_part({trimmed}, '.', 1) "
+            f"ELSE {trimmed} "
+            "END"
+        )
+        # Excel-style numeric ZIP exports (for example 10154.0) should not split
+        # otherwise identical people from text ZIP values such as 10154.
+        # Some exports also drop a leading zero (for example 02142 -> 2142),
+        # which should be normalized back to a 5-digit ZIP.
+        return (
+            "CASE "
+            f"WHEN {normalized} IS NULL THEN NULL "
+            f"WHEN regexp_full_match({normalized}, '^[0-9]{{4}}$') THEN lpad({normalized}, 5, '0') "
+            f"ELSE {normalized} "
+            "END"
+        )
+    return ident
 
 
 class UnionFind:
@@ -68,7 +100,7 @@ def _build_group_key_expr(group_cols: Iterable[str]) -> str:
     cols = list(group_cols)
     if not cols:
         return "md5('')"
-    packed = ", ".join(f"{_quote_ident(col)} := {_quote_ident(col)}" for col in cols)
+    packed = ", ".join(f"{_quote_ident(col)} := {_group_value_expr(col)}" for col in cols)
     return f"md5(to_json(struct_pack({packed})))"
 
 
