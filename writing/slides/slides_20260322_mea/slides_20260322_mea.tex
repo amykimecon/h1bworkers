@@ -92,38 +92,34 @@
         
         \vspace{3mm}
         \item Investigating robustness and heterogeneity: why are effects small?
-        \begin{enumerate}
-            \item \textbf{Measurement Error:} Estimated effects 3-4x larger in higher-confidence linked samples, but still small
-            \item \textbf{Student visa:} Effects largest for workers near student work authorization expiration, but still small
-        \end{enumerate}
+        \begin{itemize}
+            \item I investigate various channels: measurement error \& OPT fallback seem to matter, but don't fully account for small effects
+        \end{itemize}
     \end{enumerate} \vspace{2mm}
-    \only<4>{\textbf{Empirical Puzzle:} How are lottery losers managing to stay?}
+    \only<2>{\textbf{Empirical Puzzle:} How are lottery losers managing to stay?}
 \end{frame}
 
-\begin{frame}
-    \frametitle{Literature Review}
-    \begin{itemize}
-        \item \textbf{Effects of H-1B Visa}
-        \begin{itemize}
-            \item Aggregate and firm-level impacts on native employment and wages \textcolor{gray}{\footnotesize [Kerr et al. 2015; Peri et al. 2015a; Doran et al. 2022; Mahajan et al. 2024]}, innovation and productivity \textcolor{gray}{\footnotesize [Kerr and Lincoln 2010; Peri et al. 2015b; Dimmock et al. 2022; Mayda et al. 2023]}, and employer monopsony power \textcolor{gray}{\footnotesize [Kim and Pei 2022]}
-            \item Global effects on offshoring \textcolor{gray}{\footnotesize [Glennon 2024]}, origin countries \textcolor{gray}{\footnotesize [Khanna and Morales 2023]}, and third-party countries \textcolor{gray}{\footnotesize [Brinatti and Guo 2024]} 
-            \item \textbf{This paper:} first individual-level evidence
-        \end{itemize}
-        \vspace{4mm}
-        \item \textbf{International Students and U.S. Labor Markets}
-        \begin{itemize}
-            \item 
-            \item Offshoring, Indian IT industry, immigration to third countries \textcolor{gray}{\footnotesize [Glennon 2024; Khanna and Morales 2023; Brinatti and Guo 2024]}
-            \item Brain drain and return migration \textcolor{gray}{\footnotesize [Amanzadeh et al.\ 2024; Adda et al.\ 2022]}
-            \item \textbf{This paper:} quantifies effect of H-1B cap on individual workers globally
-        \end{itemize}
-        \vspace{4mm}
-        \item \textbf{Probabilistic Record Linkage} \textcolor{gray}{\footnotesize [Fellegi and Sunter 1969; Bailey et al.\ 2020; Enamorado et al.\ 2019]}
-        \begin{itemize}
-            \item \textbf{This paper:} new method for deidentified immigration records
-        \end{itemize}
-    \end{itemize}
-\end{frame}
+% \begin{frame}
+%     \frametitle{Literature Review}
+%     \begin{itemize}
+%         \item \textbf{Effects of H-1B Visa}
+%         \begin{itemize}
+%             \item Aggregate and firm-level impacts on native employment and wages \textcolor{gray}{\footnotesize [Kerr et al. 2015; Peri et al. 2015a; Doran et al. 2022; Mahajan et al. 2024]}, innovation and productivity \textcolor{gray}{\footnotesize [Kerr and Lincoln 2010; Peri et al. 2015b; Dimmock et al. 2022; Mayda et al. 2023]}, and employer monopsony power \textcolor{gray}{\footnotesize [Kim and Pei 2022]}
+%             \item Global effects on offshoring \textcolor{gray}{\footnotesize [Glennon 2024]}, origin countries \textcolor{gray}{\footnotesize [Khanna and Morales 2023]}, and third-party countries \textcolor{gray}{\footnotesize [Brinatti and Guo 2024]} 
+%             \item \textbf{This paper:} first individual-level evidence
+%         \end{itemize}
+%         \item \textbf{International Students and U.S. Labor Markets}
+%         \begin{itemize}
+%             \item Offshoring, Indian IT industry, immigration to third countries \textcolor{gray}{\footnotesize [Glennon 2024; Khanna and Morales 2023; Brinatti and Guo 2024]}
+%             \item Brain drain and return migration \textcolor{gray}{\footnotesize [Amanzadeh et al.\ 2024; Adda et al.\ 2022]}
+%             \item \textbf{This paper:} quantifies effect of H-1B cap on individual workers globally
+%         \end{itemize}
+%         \item \textbf{Probabilistic Record Linkage} \textcolor{gray}{\footnotesize [Fellegi and Sunter 1969; Bailey et al.\ 2020; Enamorado et al.\ 2019]}
+%         \begin{itemize}
+%             \item \textbf{This paper:} new method for deidentified immigration records
+%         \end{itemize}
+%     \end{itemize}
+% \end{frame}
 
 
 %%% TABLE OF CONTENTS
@@ -281,19 +277,19 @@
 \begin{frame}
     \frametitle{Sample Variants}
     \begin{itemize}
-        \item \textbf{Baseline:} keep unrestricted sample, collapse at application level (N = 70,580)
-        \vspace{3mm}
+        \item \textbf{Baseline:} keep unrestricted sample, collapse at application level, drop singleton firms (FEs not identified) (N = 70,580)
+        \vspace{2mm}
         \item \textbf{One-to-one} \textcolor{maincolor}{(preferred):} optimal bipartite matching (N = 64,781)
         \begin{itemize}
             \item Each applicant assigned to at most one Revelio candidate (and vice versa) within a lottery year
         \end{itemize}
-        \vspace{3mm}
+        \vspace{2mm}
         \item \textbf{Strict (Q25 / Q50 / Q75):} score threshold samples
         \begin{itemize}
             \item Restrict to applicants whose best match score exceeds the 25th, 50th, or 75th percentile
             \item Higher confidence matches; trade off sample size for precision
         \end{itemize}
-        \vspace{3mm}
+        \vspace{2mm}
         \item \textbf{Rare Country:} exclude high-multiplicity countries (N = 10,440)
         \begin{itemize}
             \item Drop applicants from Southern Asia, East Asia, UK, Canada, Australia
@@ -339,8 +335,8 @@
 \begin{frame}
     \frametitle{Outcome Variables}
     \begin{itemize}
-        \item \textbf{Location:} In U.S., in home country, in non-U.S. non-home country
-        \item \textbf{Employment:} still at same firm, new position conditional on same firm (proxy for promotion)
+        \item \textbf{Location:} In U.S., in home country, in non-U.S. non-home country \vspace{4mm}
+        \item \textbf{Employment:} still at same firm, new position conditional on same firm (proxy for promotion) \vspace{4mm}
         \item \textbf{Education:} new education (possible channel for staying in U.S.)
     \end{itemize}
 \end{frame}
