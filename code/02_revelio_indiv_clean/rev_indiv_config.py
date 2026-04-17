@@ -145,6 +145,7 @@ COMPANY_MERGE_SAMPLE_PARQUET = PATHS["company_merge_sample_parquet"]
 FOIA_INDIV_PARQUET = PATHS["foia_indiv_parquet"]
 FOIA_RAW_MATCH_PARQUET = PATHS["foia_raw_match_parquet"]
 REV_INDIV_PARQUET = PATHS["rev_indiv_parquet"]
+REV_USER_NATIONALITY_PARQUET = PATHS.get("rev_user_nationality_parquet", "")
 
 # Legacy WRDS shard format (used as fallback by some scripts)
 _legacy_shard_count = int(CFG.get("legacy_wrds_user_merge_shard_count", 10))

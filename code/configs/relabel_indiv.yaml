@@ -1,0 +1,95 @@
+run_tag: "feb2026"
+
+build:
+  overwrite: true
+
+  # Cohort window shown in plots / DiD: graduation year relative to relabel year.
+  event_window: 5
+
+  # Evaluate outcomes at these fixed horizons after graduation.
+  # The default refactor uses the 3-years-post-graduation definition.
+  outcome_horizons: [3]
+
+  # If a target year is beyond the latest observed Revelio position year, cap the
+  # evaluation year to the latest available year but mark the target year as
+  # unobserved so downstream plots / regressions can exclude it.
+  cap_to_latest_available_year: true
+
+  # Graduation-year window: include individuals who graduated within
+  # ±sample_gradyear_window years of the relabel year when building treated/control
+  # samples from the stage-04 match-ready education universe.
+  sample_gradyear_window: 5
+
+  # Deprecated on the default stage-04/stage-05 path; retained only for backward
+  # compatibility with older sample builders.
+  field_match_patterns:
+    - "%econom%"
+
+  # Restrict the stage-04 education sample to CIP codes whose digit-normalized value
+  # starts with one of these prefixes. "4506" = CIP 45.06xx.
+  sample_cip_prefixes:
+    - "4506"
+
+  # Sample variants to run. `stage04_all` uses the full stage-04 CIP-filtered universe.
+  # `foia_linked_person_baseline` further restricts to Revelio users that appear in the
+  # stage-05 person-level baseline merge output with person_match_rank = 1.
+  sample_variants:
+    - "stage04_all"
+    - "foia_linked_person_baseline"
+
+  # Exclude US nationals from the Revelio individual sample.
+  # Filters on rev_user_nationality.nationality_country (blended name model + institution
+  # country prediction for all Revelio users). NOT match_country in rev_educ_long (which
+  # is the institution's country, not the student's).
+  # Set to false to include everyone (useful for diagnostics).
+  exclude_us_nationals: true
+  exclude_us_country_value: "United States"
+
+  # Minimum position duration (days) to count as an active position in a calendar year.
+  min_pos_duration_days: 1
+
+  # DiD: whether to run the dynamic event-study DiD regression (requires linearmodels).
+  run_did: true
+
+  # DiD regression specification.
+  # Horizon-based outcomes no longer leave a within-entity calendar-year panel, so
+  # the FE DiD runs through the 'simple' cohort_t specification. 'panel' and 'both'
+  # are accepted for backward compatibility and fall back to the same estimator.
+  did_model: "simple"
+
+testing:
+  enabled: false
+  # Sample this many relabeled institutions for the test run.
+  sample_n_institutions: 5
+  random_seed: 42
+
+paths:
+  # --- RELABEL EVENTS (produced by econ_relabels_opt_usage_v2 or loaded from cache) ---
+  relabels_parquet: "{root}/data/int/int_files_nov2025/econ_relabels_v2.parquet"
+
+  # --- NEW PIPELINE INPUTS ---
+  stage04_merge_ready_parquet: "{root}/data/int/f1_indiv_merge/04_rev_user_clean/rev_match_ready_apr2026v1.parquet"
+  stage05_person_baseline_parquet: "{root}/data/int/f1_indiv_merge/05_indiv_merge/f1_merge_person_baseline_apr2026v1.parquet"
+
+  # --- IPEDS → REVELIO INSTITUTION CROSSWALK ---
+  # Maps UNITID ↔ university_raw in Revelio education records.
+  revelio_ipeds_inst_cw_parquet: "{root}/data/int/int_files_feb2026/revelio_ipeds_foia_inst_crosswalk.parquet"
+
+  # --- REVELIO INPUTS ---
+  # rev_user_nationality: top-1 blended nationality (name model + institution country)
+  # for ALL Revelio users. Produced by rev_users_clean.py. Broader than rev_indiv —
+  # not filtered to OPT/H-1B pipeline users. Columns: user_id, nationality_country, nationality_score.
+  rev_user_nationality_parquet: "{root}/data/int/rev_user_nationality_${run_tag}.parquet"
+  rev_user_nationality_parquet_legacy: "{root}/data/int/rev_user_nationality_feb2026.parquet"
+  rev_educ_long_parquet: "{root}/data/int/rev_educ_long_${run_tag}.parquet"
+  rev_educ_long_parquet_legacy: "{root}/data/int/rev_educ_long_mar2026.parquet"
+  rev_pos_parquet: "{root}/data/int/merged_pos_clean_${run_tag}.parquet"
+  rev_pos_parquet_legacy: "{root}/data/int/merged_pos_clean_mar2026.parquet"
+
+  # --- OUTPUTS ---
+  # Individual × year panel (treated + control combined)
+  output_panel_parquet: "{root}/data/int/relabel_indiv_panel_${run_tag}.parquet"
+  # Saved DiD regression results (all variants / outcomes / model specs)
+  output_did_results_parquet: "{root}/data/int/relabel_indiv_did_${run_tag}.parquet"
+  # Directory for figures
+  output_dir: "{root}/output/relabel_indiv/"

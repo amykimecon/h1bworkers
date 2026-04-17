@@ -81,3 +81,7 @@ paths:
   foia_indiv_parquet: "{root}/data/clean/foia_indiv_${run_tag}.parquet"
   foia_raw_match_parquet: "{root}/data/int/foia_raw_match_${run_tag}.parquet"
   rev_indiv_parquet: "{root}/data/clean/rev_indiv_${run_tag}.parquet"
+  # Top-1 blended nationality (name model + institution country) for ALL Revelio users.
+  # Broader than rev_indiv (not filtered to OPT/H-1B pipeline). Used by analyses
+  # that need nationality for the full Revelio population (e.g. relabels_revelio).
+  rev_user_nationality_parquet: "{root}/data/int/rev_user_nationality_${run_tag}.parquet"

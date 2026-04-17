@@ -1,0 +1,126 @@
+run_tag: "apr2026"
+
+build:
+  overwrite: true
+  control_only: true
+  reuse_existing_candidate_parquets: true
+  position_chunk_size: 10000
+  rsid_lookup_limit: 10000
+  education_event_window_years: 5
+  # Year range for never-treated control school education pull (no event window).
+  # Should span treated relabel years ± education_event_window_years.
+  control_year_min: 2010
+  control_year_max: 2024
+  manual_rsid_overrides: {
+    Yale University: 163889, 
+    Southern Methodist University: 114656,
+    Colorado School of Mines: 46090,
+    Texas A & M University-College Station: 119216,
+    Brandeis University: 37797,
+    Brown University: 38023,
+    Columbia University in the City of New York: 46455,
+    Duke University: 50783,
+    New York University: 98025,
+    Princeton University: 104934,
+    University of Chicago: 151446,
+    University of Illinois Urbana-Champaign: 152280,
+    University of Missouri-Columbia: 153611,
+    University of Wisconsin-Madison: 157461,
+    Boston College: 37647,
+    Boston University: 37659,
+    George Washington University: 119947,
+    Miami University: 92943,
+    Northeastern University: 99264,
+    Northwestern University: 99737,
+    Ohio University: 100483,
+    Purdue University: 105168,
+    State University of New York at Buffalo: 116012,
+    University of California-Santa Cruz: 150554,
+    University of San Francisco: 155605,
+    University of Southern California: 155977,
+    University of Wisconsin-Milwaukee: 157484,
+    Vanderbilt University: 159165,
+    Washington University in St Louis: 160755,
+    Fordham University: 61766,
+    Rice University: 106582,
+    SUNY at Albany: 149786,
+    Stanford University: 115959,
+    "New School, The": 120306,
+    The University of Texas at Austin: 121324,
+    University of California-Santa Barbara: 150548,
+    University of Kansas: 152527,
+    University of Nebraska at Omaha: 153768,
+    University of Washington: 288433,
+    Valparaiso University: 159128,
+    Western Illinois University: 161280,
+    North Carolina State University: 98886,
+    University of Michigan: 287129,
+    California State University-Long Beach: 210725,
+    Georgetown University: 63182,
+    Johns Hopkins University: 81142,
+    Catholic University of America (The): 119556,
+    "University of Colorado Denver": 151522,
+    University of Detroit Mercy: 151686,
+    University of Minnesota-Twin Cities: 153559,
+    University of Pennsylvania: 155147,
+    Williams College: 161711,
+    American University: 32322,
+    Claremont Graduate University: 45170,
+    Cornell University: 47013,
+    Eastern Illinois University: 51043,
+    Old Dominion University: 100729,
+    Southern Illinois University-Edwardsville: 114606,
+    University of California-Los Angeles: 150503,
+    University of Houston: 152187,
+    University of Massachusetts-Amherst: 153369,
+    University of Missouri-Kansas City: 153623,
+    University of New Mexico: 121169,
+    CUNY Hunter College: 119683,
+    Central Michigan University: 212502,
+    Georgia State University: 63227,
+    The University of Texas at Dallas: 121353,
+    University of Arizona: 120799,
+    Western Kentucky University: 161290
+  }
+
+analysis:
+  horizons: [1, 3, 5, 10]
+  cap_to_latest_available_year: true
+  regression_reference_event_time: -1
+  # Substring filter applied to degree_raw and field_raw (case-insensitive).
+  # Only education rows where at least one of those fields contains this string
+  # are kept.  Set to null to disable.
+  field_filter: "econ"
+
+wrds:
+  username: null
+  pgpass_path: null
+
+testing:
+  enabled: false
+  sample_n_schools: 3
+  random_seed: 42
+  school_names: []
+
+paths:
+  relabels_parquet: "{root}/data/int/int_files_nov2025/econ_relabels_v2.parquet"
+  ipeds_crosswalk_parquet: "{root}/data/int/int_files_nov2025/ipeds_crosswalk_2021.parquet"
+  ipeds_completions_parquet: "{root}/data/int/int_files_nov2025/ipeds_completions_all.parquet"
+
+  event_schools_parquet: "{root}/data/int/relabel_indiv_model_event_schools_${run_tag}.parquet"
+  rsid_candidates_parquet: "{root}/data/int/relabel_indiv_model_rsid_candidates_${run_tag}.parquet"
+  selected_rsid_parquet: "{root}/data/int/relabel_indiv_model_selected_rsid_${run_tag}.parquet"
+  matched_education_parquet: "{root}/data/int/relabel_indiv_model_education_${run_tag}.parquet"
+  matched_positions_parquet: "{root}/data/int/relabel_indiv_model_positions_${run_tag}.parquet"
+
+  # Never-treated control school outputs (parallel to treated school outputs above).
+  never_treated_schools_parquet: "{root}/data/int/relabel_indiv_model_control_schools_${run_tag}.parquet"
+  never_treated_rsid_candidates_parquet: "{root}/data/int/relabel_indiv_model_control_rsid_candidates_${run_tag}.parquet"
+  never_treated_selected_rsid_parquet: "{root}/data/int/relabel_indiv_model_control_selected_rsid_${run_tag}.parquet"
+  never_treated_education_parquet: "{root}/data/int/relabel_indiv_model_control_education_${run_tag}.parquet"
+  never_treated_positions_parquet: "{root}/data/int/relabel_indiv_model_control_positions_${run_tag}.parquet"
+  analysis_panel_parquet: "{root}/data/int/relabel_indiv_model_analysis_panel_${run_tag}.parquet"
+  analysis_school_event_time_parquet: "{root}/data/int/relabel_indiv_model_school_event_time_${run_tag}.parquet"
+  analysis_event_study_parquet: "{root}/data/int/relabel_indiv_model_analysis_event_study_${run_tag}.parquet"
+  analysis_regression_event_study_parquet: "{root}/data/int/relabel_indiv_model_analysis_regression_event_study_${run_tag}.parquet"
+  analysis_output_dir: "{root}/output/relabel_indiv_model/"

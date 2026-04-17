@@ -10,6 +10,12 @@ import os
 import re
 import subprocess
 import time
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 sys.path.append(os.path.dirname(__file__))
@@ -469,7 +475,9 @@ if role_col not in occ_cw.columns:
         "regenerating occupation crosswalk..."
     )
     create_occ_script = os.path.join(root, "h1bworkers", "code", "10_misc", "create_occ_cw.py")
-    subprocess.run([sys.executable, create_occ_script], check=True)
+    child_env = os.environ.copy()
+    child_env.setdefault("PYTHONUNBUFFERED", "1")
+    subprocess.run([sys.executable, create_occ_script], check=True, env=child_env)
     occ_cw = con.read_csv(f"{root}/data/crosswalks/rev_occ_to_foia_freq.csv")
     if role_col not in occ_cw.columns:
         raise ValueError(
@@ -987,7 +995,7 @@ CREATE OR REPLACE TEMP TABLE inst_match_clean AS
 con.sql(
 """
 CREATE OR REPLACE TEMP TABLE rev_users_with_inst AS
-SELECT user_id, education_number, degree_clean, ed_startdate, ed_enddate,
+SELECT user_id, education_number, degree_clean, field_clean, ed_startdate, ed_enddate,
     a.university_raw, match_country, matchscore, matchtype, hs_share,
 -- trying to get earliest education for each country
     ROW_NUMBER() OVER(PARTITION BY user_id, match_country ORDER BY education_number) AS educ_order,
@@ -1307,7 +1315,7 @@ SELECT * FROM (
         MIN(last_grad_year) OVER(PARTITION BY a.user_id) AS last_grad_year,
         MAX(0.5*inst_score + 0.5*nanat_score) OVER(PARTITION BY a.user_id) AS max_total_score,
         MAX(CASE WHEN country = 'United States' THEN 0 ELSE 0.5*inst_score + 0.5*nanat_score END) OVER(PARTITION BY a.user_id) AS max_total_score_nonus,
-        foia_occ_ind, min_h1b_occ_rank, fields, highest_ed_level
+        foia_occ_ind, min_h1b_occ_rank, fields, highest_ed_level, user_location, user_country
 
     -- taking original revelio user data, collapsing to user level and creating necessary variables
     FROM (
@@ -1344,6 +1352,23 @@ WHERE (max_total_score_nonus < 0.3 OR max_total_score_nonus = total_score) AND (
 # con.sql(f"COPY final_user_merge TO '{root}/data/int/rev_users_clean_jul28.parquet'")
 
 # final_user_merge = con.read_parquet(f'{root}/data/int/rev_users_clean_jul28.parquet')
+
+# Save broad user-level nationality lookup (all users, not OPT-pipeline only).
+# Top-1 blended nationality (name model + institution country) per user.
+# Used by downstream analyses that need nationality for all Revelio users
+# (e.g. relabels_revelio), not just those matched to H-1B employers.
+if not test:
+    print("Saving rev_user_nationality (all users, top-1 blended nationality)...")
+    con.sql(f"""
+        COPY (
+            SELECT user_id, country AS nationality_country,
+                   total_score AS nationality_score
+            FROM user_merge
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY total_score DESC, country ASC) = 1
+        ) TO '{rcfg.REV_USER_NATIONALITY_PARQUET}'
+    """)
+    n_nat = con.sql(f"SELECT COUNT(*) FROM read_parquet('{rcfg.REV_USER_NATIONALITY_PARQUET}')").fetchone()[0]
+    print(f"  Saved {n_nat:,} rows → {rcfg.REV_USER_NATIONALITY_PARQUET}")
 
 ## DUPLICATE PROFILE DEDUP
 # Within (fullname_clean, rcid) groups that have multiple user_ids, keep the one with
