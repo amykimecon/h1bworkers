@@ -1,0 +1,208 @@
+# F1 INDIV MERGE REWRITE
+
+Convert this folder into a self-contained pipeline named `f1_indiv_merge` with stage folders `01`-`05`, a root YAML config, a root runner, and a `progress.md` tracker.
+
+## Root Folder
+- [x] Finalize the `f1_indiv_merge` pipeline root rename.
+- [ ] Create stage folders:
+  - [x] `01_f1_foia_clean`
+  - [x] `02_rev_import`
+  - [x] `03_rev_crosswalks`
+  - [x] `04_rev_user_clean`
+  - [x] `05_indiv_merge`
+- [x] Create `src/` for shared internal helpers/config loading used only inside this pipeline.
+- [x] Create a pipeline-local config loader.
+- [x] Create a root YAML config with sections for:
+  - [x] `run_tag`
+  - [x] `paths`
+  - [x] `build`
+  - [x] `testing`
+  - [x] per-stage settings
+- [x] Create root `run_all.py` to run selected stages in order.
+- [x] Create `progress.md` with one section per stage and status markers.
+- [x] Create `README.md` with:
+  - [x] stage order
+  - [x] expected inputs/outputs
+  - [x] interactive iPython usage
+  - [x] current downstream compatibility notes
+- [x] Preserve interactive usage for each stage: import module, reload, call top-level function.
+
+## 01_f1_foia_clean
+- [x] Copy the relevant FOIA raw import logic from `company_shift_share/deps_foia_clean.py`.
+- [x] Build a local script to read a raw FOIA directory and combine all years into one raw parquet.
+- [x] Preserve year-handling logic from the existing pipeline:
+  - [x] skip duplicate 2009 directory behavior if still needed
+  - [x] preserve early-year relabel logic if still needed
+  - [x] normalize columns consistently across years
+- [x] Add local config entries for:
+  - [x] raw FOIA directory
+  - [x] by-year cache directory
+  - [x] combined raw parquet output
+  - [x] cleaned person-panel output
+  - [x] person-id crosswalk output
+  - [x] temp directory
+- [x] Copy the person-linkage logic from `f1_foia/foia_person_id_linkage.py`.
+- [x] Expose one stage entrypoint that:
+  - [x] builds combined raw FOIA
+  - [x] links people across years
+  - [x] applies employment-spell correction
+  - [x] writes final cleaned FOIA person-panel parquet
+- [x] Define exact output artifacts:
+  - [x] combined raw FOIA parquet
+  - [x] person-id crosswalk parquet
+  - [x] cleaned FOIA person-panel parquet
+- [x] Add smoke checks:
+  - [x] required raw columns exist
+  - [x] `person_id` created
+  - [x] output non-empty
+
+## 02_rev_import
+- [x] Copy the structure of `02_revelio_indiv_clean/wrds_users.py` and `wrds_positions.py`, but redesign around `user_id` targeting instead of `rcid`.
+- [x] Write a preprocessing script that:
+  - [x] pulls distinct FOIA institution strings from cleaned FOIA output
+  - [x] cleans/tokenizes them
+  - [x] removes common stopwords/common institution words
+  - [x] builds a compiled regex string artifact
+  - [x] saves token list and regex artifact
+- [x] Write a shard-planning script that:
+  - [x] defines deterministic `user_id` shards
+  - [x] takes shard count from config
+  - [x] scans WRDS up front for the observed `user_id` range
+  - [x] writes a shard manifest
+- [x] Define the per-shard education filter contract:
+  - [x] `university_country in ('US', NULL-equivalent)`
+  - [x] exclude high school / associate / non-degree records after raw cleanup
+  - [x] keep records with start year after 2000 or end year after 2004 or both null
+- [x] Define the raw-enrichment step:
+  - [x] join `individual_user_education` to `individual_user_education_raw`
+  - [x] apply local copies of regex cleaning logic from `helpers.py`
+  - [x] drop likely high school and non-degree educations
+- [x] Define the matching step:
+  - [x] search `university_raw`
+  - [x] also search `degree_raw` and `field_raw` for misplaced school text
+  - [x] save matched education objects and final unique `user_id` list
+- [x] Define final import outputs even before implementation:
+  - [x] matched-user list parquet/csv
+  - [x] WRDS users parquet
+  - [x] WRDS positions parquet
+- [x] Add temporary compatibility paths in config so downstream code can use legacy/current Revelio user and position artifacts when new outputs do not exist.
+- [x] Implement shard execution against WRDS using range-based `user_id` shards.
+- [x] Implement chunked final WRDS user and position imports for matched `user_id`s.
+
+## 03_rev_crosswalks
+- [x] Create a stage runner that first checks for the external cleaned education artifacts from `revelio-cleaning`.
+- [x] If external cleaned artifacts are missing:
+  - [x] print a clear warning
+  - [x] explain which upstream script/output is missing
+  - [x] exit with error
+- [x] Copy or recreate the school-crosswalk logic locally instead of calling sibling pipeline code.
+- [x] Build and persist exact crosswalk artifacts:
+  - [x] `f1_row_num -> UNITID`
+  - [x] `university_raw -> UNITID`
+  - [x] `field_raw/field_clean -> CIP`
+  - [x] row-level F1 employer row -> rcid candidate lookup
+  - [x] derived `rcid -> normalized employer` mapping if needed downstream
+- [~] Decide and document exact grain for each artifact:
+  - [x] row-level
+  - [x] school-family-level
+  - [x] raw-string-level
+- [x] Preserve support for external school matching through `external_us_school_matching`.
+- [x] Preserve a local fallback for school cleaning and matching where feasible.
+- [x] Add schema checks for downstream use:
+  - [x] school crosswalk has `unitid` and raw school fields
+  - [x] field crosswalk has source field and mapped CIP code
+  - [x] employer crosswalk has row identifiers and rcid candidate fields
+
+## 04_rev_user_clean
+- [x] Copy the relevant cleaning logic from `02_revelio_indiv_clean/rev_users_clean.py` into this folder.
+- [x] Keep this stage self-contained; do not import `rev_users_clean.py` directly.
+- [ ] Create local scripts for:
+  - [x] `name2nat`
+  - [x] `nametrace`
+  - [x] user cleaning / artifact assembly
+- [x] Run name models on WRDS users input.
+- [x] Build candidate nationality scores per user using:
+  - [x] `name2nat` output
+  - [x] `nametrace` output
+  - [x] institution-country evidence
+- [x] Clean education objects locally:
+  - [x] degree cleaning
+  - [x] field cleaning
+  - [x] high-school / non-degree exclusions
+  - [x] country standardization
+- [x] Apply school mappings:
+  - [x] attach `UNITID`
+  - [x] preserve raw school text
+  - [x] preserve cleaned degree and field variables
+- [x] Apply field mapping:
+  - [x] attach CIP code
+  - [x] preserve raw field text
+- [x] Apply employer mapping:
+  - [x] attach mapped employer key / rcid where available
+  - [x] preserve raw company text
+- [x] Produce both output styles:
+  - [x] separate cleaned artifacts:
+    - [x] `rev_users_core`
+    - [x] `rev_educ_clean_long`
+    - [x] `rev_pos_clean_long`
+  - [x] derived exploded match-ready artifact keyed by:
+    - [x] `user_id`
+    - [x] `unitid`
+    - [x] `degree_clean`
+    - [x] `country_candidate`
+    - [x] `cip`
+    - [x] `employer_key`
+- [x] Ensure this stage can read legacy/current Revelio artifacts until `02_rev_import` is finished.
+- [x] Add checks:
+  - [x] nationality outputs non-empty
+  - [x] `unitid` attached where expected
+  - [x] exploded artifact has required merge keys
+
+## 05_indiv_merge
+- [x] Copy the current `f1_indiv_merge.py` logic into this stage and refactor it into the new folder structure.
+- [x] Preserve the current broad candidate-generation shape:
+  - [x] school
+  - [x] country of birth
+  - [x] degree
+  - [x] education timing
+- [x] Use hybrid evidence gating before final ranking:
+  - [x] broad candidates may enter on school/country/degree/timing
+  - [x] final survivors must have employer evidence or field evidence
+- [x] Preserve employer-heavy scoring and person-level aggregation logic.
+- [x] Preserve spell-level outputs:
+  - [x] baseline
+  - [x] mult2
+  - [x] mult4
+  - [x] mult6
+  - [x] strict
+- [x] Preserve person-level outputs:
+  - [x] baseline
+  - [x] strict
+- [x] Move school-resolution and employer-lookup prerequisites into `03_rev_crosswalks` inputs.
+- [x] Refactor config keys so this stage reads only from the new pipeline config.
+- [x] Preserve testing mode behavior:
+  - [x] sampled F1 persons
+  - [x] optional school/country pins
+  - [x] materialized intermediate tables
+  - [x] human-readable spotchecks
+- [x] Add acceptance checks:
+  - [x] output files exist and are non-empty
+  - [x] required columns present
+  - [x] strict outputs satisfy threshold invariants
+  - [x] person-level outputs rank correctly
+- [x] Add regression comparison against the current pipeline on legacy/current inputs.
+
+## Testing and Validation
+- [x] Add one lightweight test module per stage or one shared pipeline test module.
+- [x] Add config-load tests for the new YAML schema.
+- [ ] Add output-contract tests for all persisted artifacts.
+- [x] Add failure-mode tests for missing external artifacts.
+- [ ] Add a root smoke test that runs selected stages in testing mode.
+- [ ] Add a migration check that confirms legacy fallback paths resolve when new `02_rev_import` outputs are absent.
+
+## Defaults and Assumptions
+- [~] Keep downstream compatibility fallbacks in place until stages `03`-`05` migrate to the new `02_rev_import` outputs.
+- [ ] Keep parent-level `helpers.py`, `config.py`, and `external_*` imports allowed.
+- [ ] Do not call code from sibling numbered pipelines.
+- [ ] Keep all tuneable parameters in YAML.
+- [ ] Keep all stages runnable from an interactive iPython terminal.

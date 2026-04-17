@@ -202,8 +202,130 @@ def stem_ind_regex_sql():
     """
     return str_out
 
+# parse a CIP code string like 11.0701 or 110701 to a 4-digit CIP family integer.
+# examples: 11.0701 -> 1107, 04.0201 -> 402.
+def cip_code_to_cip4_sql(col):
+    digits_sql = f"REGEXP_REPLACE(CAST({col} AS VARCHAR), '[^0-9]', '', 'g')"
+    return f"""
+        CASE
+            WHEN {col} IS NULL THEN NULL
+            WHEN LENGTH({digits_sql}) < 4 THEN NULL
+            ELSE TRY_CAST(SUBSTRING({digits_sql}, 1, 4) AS INTEGER)
+        END
+    """
+
+
+# maps Revelio field_clean category name (or field_raw text) → representative 4-digit CIP family integer.
+# used for fallback field matching when no deterministic CIP candidate is available.
+# returns NULL if unresolvable → treated as neutral 0.5 field_score in merge pipeline.
+def field_clean_to_cip4_sql(col):
+    str_out = f"""
+        CASE
+            -- CIP 11.xx: Computer/Information Sciences
+            WHEN lower({col}) ~ '.*(comput|software|information technolog|data science|cyber|machine learning|artificial intelligence|web dev|database|network).*' THEN 1107
+            WHEN {col} IN ('Information Technology') THEN 1107
+            -- CIP 14.xx: Engineering
+            WHEN lower({col}) ~ '.*electrical.*' THEN 1409
+            WHEN lower({col}) ~ '.*mechanical.*' THEN 1419
+            WHEN lower({col}) ~ '.*civil.*' THEN 1408
+            WHEN lower({col}) ~ '.*chemical.*' THEN 1407
+            WHEN lower({col}) ~ '.*aerospace.*' THEN 1402
+            WHEN lower({col}) ~ '.*industrial.*' THEN 1435
+            WHEN lower({col}) ~ '.*biomedical.*' THEN 1405
+            WHEN lower({col}) ~ '.*environmental eng.*' THEN 1414
+            WHEN lower({col}) ~ '.*engineer.*' THEN 1401
+            WHEN {col} IN ('Engineering') THEN 1401
+            -- CIP 26.xx: Biological/Life Sciences
+            WHEN lower({col}) ~ '.*(biolog|life sci|biochem|biomed|genetics|ecology|microbio|molecular|neurosci|genomic).*' THEN 2601
+            WHEN {col} IN ('Biology') THEN 2601
+            -- CIP 27.xx: Mathematics/Statistics
+            WHEN lower({col}) ~ '.*(statistic|actuarial|quantitative).*' THEN 2705
+            WHEN lower({col}) ~ '.*math.*' THEN 2701
+            WHEN {col} IN ('Mathematics') THEN 2701
+            WHEN {col} IN ('Statistics') THEN 2705
+            -- CIP 40.xx: Physical Sciences
+            WHEN lower({col}) ~ '.*(physics|astronom|optics).*' THEN 4008
+            WHEN lower({col}) ~ '.*chemistry.*' THEN 4005
+            WHEN lower({col}) ~ '.*(earth sci|geology|atmospheric).*' THEN 4006
+            WHEN lower({col}) ~ '.*material science.*' THEN 4001
+            WHEN {col} IN ('Chemistry') THEN 4005
+            WHEN {col} IN ('Physics') THEN 4008
+            -- CIP 51.xx: Health Professions
+            WHEN lower({col}) ~ '.*nursing.*' THEN 5138
+            WHEN lower({col}) ~ '.*pharmacy.*' THEN 5120
+            WHEN lower({col}) ~ '.*public health.*' THEN 5122
+            WHEN lower({col}) ~ '.*dentist.*' THEN 5104
+            WHEN lower({col}) ~ '.*(medicine|health|medical|clinical|physician|surgery).*' THEN 5100
+            WHEN {col} IN ('Medicine') THEN 5100
+            WHEN {col} IN ('Nursing') THEN 5138
+            -- CIP 52.xx: Business
+            WHEN lower({col}) ~ '.*marketing.*' THEN 5214
+            WHEN lower({col}) ~ '.*finance.*' THEN 5208
+            WHEN lower({col}) ~ '.*accounting.*' THEN 5203
+            WHEN lower({col}) ~ '.*entrepreneurship.*' THEN 5207
+            WHEN lower({col}) ~ '.*supply chain.*' THEN 5202
+            WHEN lower({col}) ~ '.*human resource.*' THEN 5210
+            WHEN lower({col}) ~ '.*economics.*' THEN 5206
+            WHEN lower({col}) ~ '.*(business|management|mba|commerce).*' THEN 5202
+            WHEN {col} IN ('Business') THEN 5202
+            WHEN {col} IN ('Finance') THEN 5208
+            WHEN {col} IN ('Accounting') THEN 5203
+            WHEN {col} IN ('Marketing') THEN 5214
+            WHEN {col} IN ('Economics') THEN 5206
+            -- CIP 45.xx: Social Sciences
+            WHEN lower({col}) ~ '.*economics.*' THEN 4506
+            WHEN lower({col}) ~ '.*(social sci|psychology|sociology|anthropology|political sci|public policy|international relation).*' THEN 4501
+            -- CIP 13.xx: Education
+            WHEN lower({col}) ~ '.*(education|teaching|pedagogy|curriculum|instruction).*' THEN 1301
+            WHEN {col} IN ('Education') THEN 1301
+            -- CIP 04.xx: Architecture/Planning
+            WHEN lower({col}) ~ '.*(architecture|urban planning|urban design).*' THEN 402
+            WHEN {col} IN ('Architecture') THEN 402
+            -- CIP 22.xx: Legal
+            WHEN lower({col}) ~ '.*(law|legal|juris|attorney).*' THEN 2201
+            WHEN {col} IN ('Law') THEN 2201
+            -- CIP 09.xx: Communications/Media
+            WHEN lower({col}) ~ '.*(communication|media|journalism|public relation|broadcasting).*' THEN 901
+            -- CIP 50.xx: Visual/Performing Arts
+            WHEN lower({col}) ~ '.*(art|music|theater|film|design|animation|photography|fashion|dance|drama).*' THEN 5007
+            -- CIP 54.xx: History
+            WHEN lower({col}) ~ '.*(history|historic).*' THEN 5401
+            ELSE NULL
+        END
+    """
+    return str_out
+
+
+# maps the small categorical Revelio `field` values to representative 4-digit CIP families.
+# unlike field_clean_to_cip4_sql, this is intentionally narrow and only matches exact category labels.
+def field_category_to_cip4_sql(col):
+    str_out = f"""
+        CASE
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'business' THEN 5202
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'engineering' THEN 1401
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'education' THEN 1301
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'marketing' THEN 5214
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'nursing' THEN 5138
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'accounting' THEN 5203
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'finance' THEN 5208
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'law' THEN 2201
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'economics' THEN 4506
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'information technology' THEN 1101
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'medicine' THEN 5112
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'biology' THEN 2601
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'chemistry' THEN 4005
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'mathematics' THEN 2701
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'architecture' THEN 402
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'physics' THEN 4008
+            WHEN lower(trim(CAST({col} AS VARCHAR))) = 'statistics' THEN 2705
+            ELSE NULL
+        END
+    """
+    return str_out
+
+
 # maps Revelio field_clean category name (or field_raw text) → 2-digit CIP family integer.
-# used for F1 merge to compare F1 CIP codes to Revelio field categories (low-weight signal).
+# used for older merge logic that still consumes CIP2 families.
 # returns NULL if unresolvable → treated as neutral 0.5 field_score in merge pipeline.
 def field_clean_to_cip2_sql(col):
     str_out = f"""

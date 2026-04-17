@@ -1,0 +1,273 @@
+run_tag: "apr2026v1"
+
+paths:
+  repo_root: "{root}/h1bworkers/code"
+  pipeline_root: "${paths.repo_root}/f1_indiv_merge"
+  output_root: "{root}/data/int/f1_indiv_merge"
+  legacy_f1_indiv_merge_config: "${paths.repo_root}/configs/f1_indiv_merge.yaml"
+  legacy_f1_foia_parquet: "{root}/data/int/int_files_feb2026/foia_sevp_with_person_id_employment_corrected.parquet"
+  legacy_rev_indiv_parquet: "{root}/data/clean/rev_indiv_mar2026.parquet"
+  legacy_rev_educ_long_parquet: "{root}/data/int/rev_educ_long_mar2026.parquet"
+  legacy_rev_pos_parquet: "{root}/data/int/merged_pos_clean_mar2026.parquet"
+
+build:
+  overwrite: true
+  default_stages: ["05_indiv_merge"]
+  stop_on_deferred_stage: true
+  allow_legacy_fallbacks: true
+  enforce_individual_one_to_one: true
+  multiplicative_score: true
+  w_gradyr: 0.20
+  w_inst: 0.10
+  field_cip2_match_multiplier: 0.70
+  gradyr_score_decay_power: 2.0
+  subregion_boost_alpha: 0.4
+  country_competition_weight: 0.0
+  country_competition_threshold: 0.0
+
+testing:
+  enabled: false
+  sample_n_persons: 100
+  random_seed: 20
+
+stages:
+  "01_f1_foia_clean":
+    enabled: true
+    status: "implemented_local_stage"
+    module_path: "01_f1_foia_clean/stage_main.py"
+    raw_foia_dir: "{root}/data/raw/foia_sevp"
+    by_year_cache_dir: "${paths.output_root}/01_f1_foia_clean/by_year"
+    combined_raw_parquet: "${paths.output_root}/01_f1_foia_clean/foia_raw_combined_${run_tag}.parquet"
+    person_id_crosswalk_parquet: "${paths.output_root}/01_f1_foia_clean/person_id_crosswalk_${run_tag}.parquet"
+    cleaned_person_panel_parquet: "${paths.output_root}/01_f1_foia_clean/foia_person_panel_${run_tag}.parquet"
+    temp_dir: "{root}/.tmp/f1_indiv_merge"
+    required_raw_columns: ["filename", "student_key", "individual_key", "year"]
+    skip_duplicate_year_dirs: ["2009"]
+    early_year_relabels:
+      "2005": "2006"
+      "2006": "2007"
+      "2007": "2008"
+      "2008": "2009"
+    drop_columns: ["birth_date"]
+    linkage_min_year: 2006
+    correction_year: 2015
+
+  "02_rev_import":
+    enabled: true
+    status: "implemented_range_shard_wrds_import"
+    module_path: "02_rev_import/stage_main.py"
+    cleaned_foia_input_parquet: "${stages.01_f1_foia_clean.cleaned_person_panel_parquet}"
+    cleaned_foia_fallback_parquet: "${paths.legacy_f1_foia_parquet}"
+    foia_school_column: "school_name"
+    n_shards: 10000
+    user_id_bounds_source_relation: "revelio.individual_user_education"
+    user_id_min_override: null
+    user_id_max_override: null
+    token_artifact_csv: "${paths.output_root}/02_rev_import/f1_school_tokens_${run_tag}.csv"
+    compiled_regex_txt: "${paths.output_root}/02_rev_import/f1_school_regex_${run_tag}.txt"
+    shard_manifest_parquet: "${paths.output_root}/02_rev_import/shard_manifest_${run_tag}.parquet"
+    matched_education_shard_dir: "${paths.output_root}/02_rev_import/matched_education_shards_${run_tag}"
+    matched_user_shard_dir: "${paths.output_root}/02_rev_import/matched_user_shards_${run_tag}"
+    matched_education_parquet: "${paths.output_root}/02_rev_import/matched_education_${run_tag}.parquet"
+    matched_user_list_parquet: "${paths.output_root}/02_rev_import/matched_user_ids_${run_tag}.parquet"
+    matched_user_list_csv: "${paths.output_root}/02_rev_import/matched_user_ids_${run_tag}.csv"
+    wrds_users_chunk_dir: "${paths.output_root}/02_rev_import/wrds_users_chunks_${run_tag}"
+    wrds_positions_chunk_dir: "${paths.output_root}/02_rev_import/wrds_positions_chunks_${run_tag}"
+    wrds_users_parquet: "${paths.output_root}/02_rev_import/wrds_users_${run_tag}.parquet"
+    wrds_positions_parquet: "${paths.output_root}/02_rev_import/wrds_positions_${run_tag}.parquet"
+    wrds_username: null
+    token_min_len: 3
+    token_top_n: null
+    token_stopwords:
+      - "academy"
+      - "campus"
+      - "center"
+      - "centre"
+      - "college"
+      - "community"
+      - "department"
+      - "graduate"
+      - "high"
+      - "institute"
+      - "school"
+      - "state"
+      - "studies"
+      - "system"
+      - "the"
+      - "univ"
+      - "university"
+    shard_scan_start_year_threshold: 2000
+    shard_scan_end_year_threshold: 2004
+    selected_shard_ids: null
+    max_shards: null
+    row_limit_per_shard: null
+    final_import_chunk_size: 10000
+    final_import_max_users: null
+    testing_selected_shard_ids: [0, 1, 2]
+    testing_max_shards: null
+    testing_row_limit_per_shard: 2000
+    testing_filtered_out_sample_n: 5
+    testing_final_import_chunk_size: 1000
+    testing_final_import_max_users: 5000
+    legacy_rev_indiv_parquet: "${paths.legacy_rev_indiv_parquet}"
+    legacy_rev_educ_long_parquet: "${paths.legacy_rev_educ_long_parquet}"
+    legacy_rev_pos_parquet: "${paths.legacy_rev_pos_parquet}"
+
+  "03_rev_crosswalks":
+    enabled: true
+    status: "implemented_with_external_cleaned_education_guard"
+    module_path: "03_rev_crosswalks/stage_main.py"
+    legacy_config_path: "${paths.legacy_f1_indiv_merge_config}"
+    overwrite: "${build.overwrite}"
+    legacy_f1_inst_unitid_source_parquet: "{root}/data/int/int_files_feb2026/f1_inst_unitid_crosswalk.parquet"
+    legacy_school_resolution_source_parquet: "{root}/data/int/int_files_feb2026/f1_revelio_ipeds_resolution.parquet"
+    legacy_employer_lookup_parquet: "{root}/data/int/f1_opt_employer_lookup_mar2026.parquet"
+    external_cleaned_education_artifact: "{root}/data/int/rev_educ_long_apr2026v1.parquet"
+    external_cleaned_education_fallbacks:
+      - "${paths.legacy_rev_educ_long_parquet}"
+    external_cleaned_education_upstream_output: "rev_educ_long parquet"
+    external_cleaned_education_upstream_hint: "Run the revelio-cleaning education-object pipeline on the stage-02 WRDS users pull, then rerun stage 03."
+    use_raw_wrds_users_for_field_crosswalk: false
+    raw_wrds_users_parquet: "{root}/data/int/f1_indiv_merge/02_rev_import/wrds_users_apr2026v1_with_det_candidates_f1merge.parquet"
+    cip_reference_input_path: "{root}/data/crosswalks/cip/CIPCode2020.csv"
+    ipeds_name_crosswalk_input_parquet: "{root}/data/int/int_files_feb2026/ipeds_name_to_zip_crosswalk.parquet"
+    external_school_artifacts:
+      ipeds_main_institutions: ""
+      revelio_ipeds_edges: ""
+      revelio_ipeds_best: ""
+      ipeds_to_revelio_families: ""
+      f1_ipeds_edges: ""
+      f1_revelio_ipeds_resolution: "{root}/data/int/int_files_feb2026/f1_revelio_ipeds_resolution.parquet"
+      f1_revelio_school_crosswalk: "{root}/data/int/int_files_feb2026/f1_revelio_school_crosswalk.parquet"
+    school_family_crosswalk_parquet: "${paths.output_root}/03_rev_crosswalks/f1_rev_school_crosswalk_${run_tag}.parquet"
+    school_resolution_parquet: "${paths.output_root}/03_rev_crosswalks/f1_rev_school_resolution_${run_tag}.parquet"
+    f1_inst_unitid_crosswalk_parquet: "${paths.output_root}/03_rev_crosswalks/f1_inst_unitid_${run_tag}.parquet"
+    employer_lookup_parquet: "${paths.output_root}/03_rev_crosswalks/row_employer_lookup_${run_tag}.parquet"
+    employer_key_map_parquet: "${paths.output_root}/03_rev_crosswalks/rcid_employer_key_${run_tag}.parquet"
+
+  "04_rev_user_clean":
+    enabled: true
+    status: "implemented_local_stage"
+    module_path: "04_rev_user_clean/stage_main.py"
+    overwrite: "${build.overwrite}"
+    wrds_users_input_parquet: "{root}/data/int/f1_indiv_merge/02_rev_import/wrds_users_apr2026v1_with_det_candidates_f1merge.parquet"
+    wrds_positions_input_parquet: "${stages.02_rev_import.wrds_positions_parquet}"
+    deterministic_triple_map_input_parquet: "{root}/data/della_import/deterministic_candidate_map_apr2026_f1merge_v2.parquet"
+    ref_inst_link_input_parquet: "{root}/data/della_import/ref_inst_catalog_apr2026_f1merge_v2.parquet"
+    openalex_institutions_input_jsonl: "{root}/h1bworkers/code/old/adaptive_fuzzy/.adaptive_fuzzy/openalex_institutions.jsonl"
+    cip_reference_input_path: "{root}/data/crosswalks/cip/CIPCode2020.csv"
+    ipeds_name_crosswalk_input_parquet: "{root}/data/int/int_files_feb2026/ipeds_name_to_zip_crosswalk.parquet"
+    employer_lookup_input_parquet: "${stages.03_rev_crosswalks.employer_lookup_parquet}"
+    employer_key_map_input_parquet: "${stages.03_rev_crosswalks.employer_key_map_parquet}"
+    name2nat_parquet: "${paths.output_root}/04_rev_user_clean/name2nat_${run_tag}.parquet"
+    nametrace_wide_parquet: "${paths.output_root}/04_rev_user_clean/nametrace_wide_${run_tag}.parquet"
+    nametrace_long_parquet: "${paths.output_root}/04_rev_user_clean/nametrace_long_${run_tag}.parquet"
+    rev_users_core_parquet: "${paths.output_root}/04_rev_user_clean/rev_users_core_${run_tag}.parquet"
+    rev_educ_clean_long_parquet: "${paths.output_root}/04_rev_user_clean/rev_educ_clean_long_${run_tag}.parquet"
+    rev_pos_clean_long_parquet: "${paths.output_root}/04_rev_user_clean/rev_pos_clean_long_${run_tag}.parquet"
+    rev_match_ready_parquet: "${paths.output_root}/04_rev_user_clean/rev_match_ready_${run_tag}.parquet"
+    write_candidate_long_artifacts: false
+    candidate_long_top_k: 5
+    rev_educ_inst_candidates_long_parquet: "${paths.output_root}/04_rev_user_clean/rev_educ_inst_candidates_long_${run_tag}.parquet"
+    rev_educ_cip_candidates_long_parquet: "${paths.output_root}/04_rev_user_clean/rev_educ_cip_candidates_long_${run_tag}.parquet"
+    user_degree_filter_enabled: false
+    user_degree_filter_allowed_degree_types:
+      - "masters"
+    user_degree_filter_required_deterministic_cip_prefixes:
+      - "45.06xx"
+    user_degree_filter_include_no_degree: true
+    name2nat_top_n: 20
+    name2nat_batch_size: 2000
+    name2nat_lookup_batch_size: 10000
+    name2nat_fallback_batch_size: 2000
+    name2nat_scoring_chunk_size: 10000
+    name2nat_model_mini_batch_size: 1024
+    name2nat_use_mock: false
+    name2nat_use_names_dataset_lookup: true
+    name2nat_names_dataset_full_first_weight: 0.40
+    name2nat_names_dataset_full_last_weight: 0.60
+    name2nat_names_dataset_cache_size: 200000
+    name2nat_anglo_pressure_cutoff: 0.35
+    name2nat_weight_full_default: 0.55
+    name2nat_weight_last_default: 0.35
+    name2nat_weight_full_anglo_crowded: 0.30
+    name2nat_weight_last_anglo_crowded: 0.60
+    name2nat_weight_first: 0.10
+    nametrace_top_k: 5
+    nametrace_batch_size: 5000
+    nametrace_use_mock: false
+    country_score_weights:
+      name2nat: 0.50
+      institution: 0.35
+      nametrace: 0.15
+      user_country_fallback: 0.25
+    institution_country_degree_weights:
+      High School: 1.00
+      Bachelor: 0.85
+      Associate: 0.60
+      Master: 0.60
+      MBA: 0.60
+      Doctor: 0.55
+      Non-Degree: 0.20
+      Missing: 0.35
+    institution_country_default_weight: 0.40
+    institution_country_exclude_us: true
+    top_country_candidates_per_user: 5
+    min_country_candidate_score: 0.02
+    country_uncertainty_gap: 0.10
+    unitid_soft_gate_jw_threshold: 0.92
+    unitid_soft_gate_token_overlap_threshold: 0.50
+    unitid_soft_gate_min_shared_tokens: 2
+    match_ready_include_null_employer: true
+    match_ready_include_null_unitid: true
+    testing_max_users: 1000
+    legacy_rev_indiv_parquet: "${paths.legacy_rev_indiv_parquet}"
+    legacy_rev_educ_long_parquet: "${paths.legacy_rev_educ_long_parquet}"
+    legacy_rev_pos_parquet: "${paths.legacy_rev_pos_parquet}"
+
+  "05_indiv_merge":
+    enabled: true
+    status: "implemented_local_stage"
+    module_path: "05_indiv_merge/stage_main.py"
+    f1_foia_input_parquet: "${stages.01_f1_foia_clean.cleaned_person_panel_parquet}"
+    f1_foia_fallback_parquet: "${paths.legacy_f1_foia_parquet}"
+    school_family_crosswalk_input_parquet: "${stages.03_rev_crosswalks.school_family_crosswalk_parquet}"
+    school_resolution_input_parquet: "${stages.03_rev_crosswalks.school_resolution_parquet}"
+    f1_inst_unitid_crosswalk_input_parquet: "${stages.03_rev_crosswalks.f1_inst_unitid_crosswalk_parquet}"
+    employer_lookup_input_parquet: "${stages.03_rev_crosswalks.employer_lookup_parquet}"
+    rev_users_core_input_parquet: "${stages.04_rev_user_clean.rev_users_core_parquet}"
+    rev_educ_clean_long_input_parquet: "${stages.04_rev_user_clean.rev_educ_clean_long_parquet}"
+    rev_pos_clean_long_input_parquet: "${stages.04_rev_user_clean.rev_pos_clean_long_parquet}"
+    rev_match_ready_input_parquet: "${stages.04_rev_user_clean.rev_match_ready_parquet}"
+    econ_relabels_input_parquet: "{root}/data/int/int_files_nov2025/econ_relabels_v2.parquet"
+    relabel_sample_cache_parquet: "${paths.output_root}/05_indiv_merge/f1_foia_relabel_sample_${run_tag}.parquet"
+    relabel_sample_force_rebuild: true
+    restrict_to_relabel_programs: false
+    relabel_gradyear_window: 5
+    employment_history_filter_enabled: true
+    employer_match_year_buffer: 2
+    field_candidate_filter_enabled: true
+    relative_score_filter_enabled: true
+    employer_score_relative_buffer: 0.15
+    employer_score_relative_apply_min: 0.35
+    field_score_relative_buffer: 0.20
+    field_score_relative_apply_min: 0.75
+    country_score_relative_buffer: 0.20
+    country_score_relative_apply_min: 0.35
+    legacy_rev_indiv_parquet: "${paths.legacy_rev_indiv_parquet}"
+    legacy_rev_educ_long_parquet: "${paths.legacy_rev_educ_long_parquet}"
+    legacy_rev_pos_parquet: "${paths.legacy_rev_pos_parquet}"
+    baseline_parquet: "${paths.output_root}/05_indiv_merge/f1_merge_baseline_${run_tag}.parquet"
+    mult2_parquet: "${paths.output_root}/05_indiv_merge/f1_merge_mult2_${run_tag}.parquet"
+    mult4_parquet: "${paths.output_root}/05_indiv_merge/f1_merge_mult4_${run_tag}.parquet"
+    mult6_parquet: "${paths.output_root}/05_indiv_merge/f1_merge_mult6_${run_tag}.parquet"
+    strict_parquet: "${paths.output_root}/05_indiv_merge/f1_merge_strict_${run_tag}.parquet"
+    person_agg_parquet: "${paths.output_root}/05_indiv_merge/f1_merge_person_agg_${run_tag}.parquet"
+    person_baseline_parquet: "${paths.output_root}/05_indiv_merge/f1_merge_person_baseline_${run_tag}.parquet"
+    person_strict_parquet: "${paths.output_root}/05_indiv_merge/f1_merge_person_strict_${run_tag}.parquet"
+    person_shard_count:
+    person_shard_id:
+    compare_to_reference_outputs: false
+    reference_spell_baseline_parquet: ""
+    reference_spell_strict_parquet: ""
+    reference_person_baseline_parquet: ""

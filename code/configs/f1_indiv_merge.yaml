@@ -6,34 +6,81 @@ build:
   # School name fuzzy matching threshold (Levenshtein + Jaro-Winkler combined score)
   school_match_threshold: 0.88
 
+  # Collapse raw Revelio university names to cleaned-name families and keep only
+  # the top family plus near-ties within this match-score gap. This prunes weak
+  # school alternatives before candidate generation while preserving all raw
+  # university variants inside the retained family/families.
+  school_ambiguity_score_gap: 0.03
+
+  # Optional upstream school blocking before candidate generation.
+  # off           : keep current school_name-only candidate generation
+  # campus_unique : if campus city/state/zip uniquely resolve an F1 row to one
+  #                 upstream f1_row_num, only keep the Revelio schools attached
+  #                 to that row; otherwise fall back to school_name-only.
+  school_block_mode: off
+
   # Person-level dedup: within a person_id, keep each user_id at most once (matched to
   # their highest-scoring education spell). Set false to revert to m:1 matching.
   person_user_dedup: true
 
-  # country_score reflects confidence of Revelio name-nationality model (not country match
-  # itself, which is enforced by the join condition). Lower threshold than H1B since
-  # the country signal here is from F1 country_of_birth (hard fact) + name model.
-  country_score_cutoff: 0.03
-  no_country_min_total_score: 0.30   # fallback floor when name model confidence is low
+  # Hard join filters: candidates must satisfy ALL of these (replaces old soft scoring
+  # for country/degree/year — those signals are now used to narrow the candidate set).
+  # Country match is enforced by the JOIN condition (as before).
+  # Degree: F1 and Revelio degree levels must match; 'Other'/'Missing'/'Non-Degree' pass through.
+  # Year: |f1_prog_start_year - rev_educ_start_year| <= year_hard_buffer (NULL passes through).
+  year_hard_buffer: 2
 
-  # date_score: penalize if |f1_prog_start_year - rev_educ_start_year| > buffer
-  date_score_year_buffer: 3
-  date_score_null_default: 0.5       # neutral score when either date is missing
+  # Scoring weights — all must sum to 1.0.
+  # When OPT employer data is available, all five signals are used.
+  # When employer data is absent (employer_score = NULL), the employer weight is
+  # dropped and the remaining four signals are renormalized to sum to 1.0.
+  # Employer weight: exponential saturation w_emp_eff = w_emp_max * (1 - exp(-n / emp_n_scale))
+  # At n=emp_n_scale employers, w_emp_eff ≈ 63% of w_emp_max; approaches w_emp_max asymptotically.
+  w_emp_max:   0.95  # asymptotic ceiling for employer weight (as n_employers → ∞)
+  emp_n_scale: 1     # scale param: w_emp_eff reaches ~63% of max at this many employers
+  multiplicative_score: false  # true = weighted geometric mean with employer weight as an exponent;
+                                # false = additive employer/non-employer blend
+  subregion_boost_alpha: 0.4   # matches 03_indiv_merge country score:
+                                # alpha*subregion + (1-alpha)*country_specificity
+  country_competition_weight: 0.0     # optional H-1B-style downweighting when another country
+                                      # has stronger evidence for the same user
+  country_competition_threshold: 0.0  # threshold before competition penalty starts
 
-  # degree_score: 1.0 if F1 and Revelio degree levels match, 0.5 if either unknown
+  # Weights for remaining signals (renormalized to fill (1 - w_emp_eff) of total)
+  w_gradyr: 0.15   # graduation-year proximity weight in stage-05 total_score
+  w_country: 0.35   # name-model confidence in nationality (nanat/nt model blend)
+  w_inst:    0.15   # institution-country evidence weight
+  w_field:   0.10   # 2-digit CIP category match
+  w_date:    0.15   # legacy alias fallback for w_gradyr if w_gradyr is unset
+
+  # Null defaults for degree and date scores (when one side is unknown)
   degree_score_null_default: 0.5
+  date_score_null_default: 0.5
+  gradyr_score_decay_power: 1.0  # exponent applied to the year-proximity score.
+                                  # 1.0 = current linear decay; >1.0 = sharper decay;
+                                  # <1.0 = flatter decay.
 
-  # scoring weights (must sum to 1.0)
-  w_country: 0.55   # dominant: F1 country_of_birth is a hard fact, Revelio nationality is name-inferred
-  w_degree: 0.20    # strong discriminator: Doctor vs Bachelor at same school are different people
-  w_date: 0.15      # program start year proximity (useful when Revelio dates are available)
-  w_field: 0.10     # low weight: CIP→field mapping is coarse, Revelio fields array is imprecise
+  # Employer sequence scoring params
+  emp_fuzzy_threshold: 0.85   # Jaro-Winkler floor for fuzzy name path (lowered from 0.85;
+                               # actual JW score passes through to employer_score rather than
+                               # being treated as binary 0/1)
+  emp_idf_smoothing: 1.0      # Smoothing inside log: idf = 1/log(smoothing + n_users_at_employer)
+
+  # Subset token-overlap matching (third path for employers without a crosswalk rcid)
+  emp_subset_match_threshold: 0.40  # min token IDF overlap score (overlap_idf / min_name_idf)
+                                     # to count as a subset match
+  emp_subset_min_tokens: 2          # min tokens in the shorter normed name to attempt subset match
+  emp_token_min_idf: 0.05           # exclude tokens with global token IDF below this threshold
+                                     # (ultra-common tokens that survive normalization)
+  enforce_individual_one_to_one: true  # true = globally assign each Revelio user to at most
+                                       #        one F1 person and each F1 person to at most one
+                                       #        Revelio user using person-level match scores
 
   # ambiguity threshold: flag match as ambiguous if gap between rank-1 and rank-2
   # weight_norm is <= this value
   ambiguity_weight_gap_cutoff: 0.05
 
-  # bad match guard: reject pairs where all evidence is weak
+  # bad match guard: reject pairs where name-model and total score are both very low
   bad_match_guard_enabled: true
   bad_match_guard_country_score_lt: 0.15
   bad_match_guard_total_score_lt: 0.10
@@ -47,9 +94,32 @@ build:
   # multiplicity cutoffs for sub-samples (keep spells with n_match_filt <= N)
   mult_cutoffs: [2, 4, 6]
 
+  # employer crosswalk fallback: threshold for the selected matcher below
+  employer_match_threshold: 0.7
+  # Representative cleaned-name examples near a stricter ~0.88 cutoff:
+  #   ecobrite services lcc -> ecobrite services
+  #     lev+jw=0.870, jw_only=0.962
+  #   shift space -> shiftspaces
+  #     lev+jw=0.876, jw_only=0.964
+  #   syncreon technology usa -> syncreon technology
+  #     lev+jw=0.882, jw_only=0.965
+  #   deva capital advisory slu -> deva capital advisory
+  #     lev+jw=0.891, jw_only=0.968
+  # Caution: jw_only helps spacing/suffix variants, but it also boosts some bad pairs:
+  #   general hospital -> general hospitality
+  #     lev+jw=0.893, jw_only=0.968
+  #   university of california department of pathology and laboratory medicine
+  #     -> university of pennsylvania department of pathology and laboratory medicine
+  #     lev+jw=0.884, jw_only=0.893
+  employer_match_jw_only: true       # true = Jaro-Winkler only; false = 0.6*Levenshtein + 0.4*JW
+  employer_enable_fuzzy_matching: true  # if false, keep only prebuilt + clean exact employer matches
+
+  # person-level aggregation strict sample threshold
+  strict_person_min_weight_norm: 0.85
+
 testing:
   enabled: true
-  sample_n_persons: 1000   # number of random F1 person_ids to test on
+  sample_n_persons: 100   # number of random F1 person_ids to test on
   random_seed: 42
   test_school: null        # optionally pin to a specific F1 school_name (exact match)
   test_country: null       # optionally pin to a specific country_of_birth (case-insensitive)
@@ -64,18 +134,43 @@ paths:
 
   # Revelio individual (country, nanat scores, fields array, est_yob)
   rev_indiv_parquet: "{root}/data/clean/rev_indiv_${run_tag}.parquet"
-  rev_indiv_parquet_legacy: "{root}/data/clean/rev_indiv.parquet"
+  rev_indiv_parquet_legacy: "{root}/data/clean/rev_indiv_feb2026.parquet"
 
   # Revelio education long (user_id, university_raw, degree_clean, ed_startdate, ed_enddate)
   rev_educ_long_parquet: "{root}/data/int/rev_educ_long_${run_tag}.parquet"
   rev_educ_long_parquet_legacy: "{root}/data/int/rev_educ_long_feb2026.parquet"
 
+  # Revelio positions (for employer Branch B join)
+  rev_pos_parquet: "{root}/data/int/merged_pos_clean_${run_tag}.parquet"
+  rev_pos_parquet_legacy: "{root}/data/int/merged_pos_clean_feb2026.parquet"
+
   # --- CROSSWALK (built by deps_f1_school_crosswalk.py) ---
   f1_rev_school_crosswalk_parquet: "{root}/data/int/f1_rev_school_crosswalk_${run_tag}.parquet"
+  # Rich row-level artifact preserving f1_row_num / UNITID / campus-location-aware school resolution
+  f1_rev_school_resolution_parquet: "{root}/data/int/f1_rev_school_resolution_${run_tag}.parquet"
 
-  # --- OUTPUTS ---
+  # Source files from company_shift_share pipeline used to derive the crosswalk quickly
+  # (avoids running the full fuzzy join; see deps_f1_school_crosswalk.build_school_crosswalk)
+  f1_inst_unitid_crosswalk_parquet: "{root}/data/int/int_files_feb2026/f1_inst_unitid_crosswalk.parquet"
+  revelio_ipeds_foia_inst_crosswalk_parquet: "{root}/data/int/int_files_feb2026/revelio_ipeds_foia_inst_crosswalk.parquet"
+  f1_revelio_ipeds_resolution_parquet: "{root}/data/int/int_files_feb2026/f1_revelio_ipeds_resolution.parquet"
+  f1_revelio_school_crosswalk_parquet: "{root}/data/int/int_files_feb2026/f1_revelio_school_crosswalk.parquet"
+
+  # --- EMPLOYER CROSSWALK (built by deps_f1_employer_crosswalk.py) ---
+  # Row-level staged FOIA employer crosswalk from the external revelio-cleaning pipeline
+  f1_employer_entity_crosswalk_parquet: "{root}/data/int/int_files_feb2026/f1_employer_final_crosswalk.parquet"
+  # Legacy path retained only for compatibility; deps_f1_employer_crosswalk.py no longer uses it.
+  f1_employer_prebuilt_crosswalk_parquet: ""
+  # Final lookup after fast path + fuzzy fallback (output of deps_f1_employer_crosswalk.py)
+  f1_opt_employer_lookup_parquet: "{root}/data/int/f1_opt_employer_lookup_${run_tag}.parquet"
+
+  # --- OUTPUTS (spell-level, unchanged) ---
   f1_merge_baseline_parquet: "{root}/data/int/f1_merge_baseline_${run_tag}.parquet"
   f1_merge_mult2_parquet: "{root}/data/int/f1_merge_mult2_${run_tag}.parquet"
   f1_merge_mult4_parquet: "{root}/data/int/f1_merge_mult4_${run_tag}.parquet"
   f1_merge_mult6_parquet: "{root}/data/int/f1_merge_mult6_${run_tag}.parquet"
   f1_merge_strict_parquet: "{root}/data/int/f1_merge_strict_${run_tag}.parquet"
+
+  # --- OUTPUTS (person-level, new) ---
+  f1_merge_person_baseline_parquet: "{root}/data/int/f1_merge_person_baseline_${run_tag}.parquet"
+  f1_merge_person_strict_parquet: "{root}/data/int/f1_merge_person_strict_${run_tag}.parquet"
