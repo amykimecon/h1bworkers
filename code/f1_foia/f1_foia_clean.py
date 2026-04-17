@@ -9,9 +9,20 @@ import time
 import pyarrow as pa
 import pyarrow.parquet as pq
 import re 
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
+from company_shift_share.config_loader import DEFAULT_CONFIG_PATH, get_cfg_section, load_config
+from external_f1_employer_matching import (
+    build_preferred_rcid_activity,
+    stage_external_f1_crosswalk,
+)
 
 #########################
 ## DECLARING CONSTANTS ##
@@ -735,562 +746,39 @@ def _create_employer_crosswalk(
     testn = None
 ):
     """
-    Create a crosswalk between FOIA employer names and Revelio company RCIDs.
+    Stage the canonical external F1 employer crosswalk into the local workspace.
     """
     if load_cache and cache_path and os.path.exists(cache_path):
         con.sql(
             f"CREATE OR REPLACE TABLE f1_employer_final_crosswalk AS SELECT * FROM read_parquet('{cache_path}')"
         )
         if verbose:
-            loaded_msg = f"✅ Loaded employer final crosswalk from '{cache_path}'"
-            print(loaded_msg)
+            print(f"✅ Loaded staged employer crosswalk from '{cache_path}'")
         return "f1_employer_final_crosswalk"
 
     if verbose:
-        print("🔄 Creating employer name crosswalk tables...")
+        print("🔄 Staging external employer crosswalk...")
 
-    con.sql(
-    f"""
-        CREATE OR REPLACE TABLE f1_employers_raw AS
-        WITH base AS (
-          SELECT DISTINCT
-            employer_name,
-            {_sql_clean_company_name("employer_name")} AS f1_empname_clean,
-            {_sql_normalize("employer_city")} AS f1_city_clean,
-            {_sql_state_name_to_abbr("employer_state")} AS f1_state_clean,
-            {_sql_clean_zip("employer_zip_code")} AS f1_zip_clean
-          FROM allyrs_raw
-          WHERE employer_name IS NOT NULL {f"LIMIT {testn}" if test else ""}
-        )
-        SELECT
-          employer_name,
-          f1_empname_clean,
-          f1_city_clean,
-          f1_state_clean,
-          f1_zip_clean,
-          ROW_NUMBER() OVER(ORDER BY f1_empname_clean, f1_city_clean, f1_state_clean, f1_zip_clean, employer_name) AS f1_emp_row_num
-        FROM base
-    """)
-
-    base_employer_rows = con.sql("SELECT f1_emp_row_num FROM f1_employers_raw ORDER BY f1_emp_row_num").df()
-    raw_employer_cnt = len(base_employer_rows)
-    if verbose:
-        print(f"Employer staging: {raw_employer_cnt:,} unique employer/location combinations.")
-    base_row_nums = base_employer_rows["f1_emp_row_num"].astype(int).tolist()
-
-    # Generate edges based on similarity criteria
-    entity_block_join = ""
-    entity_block_nonnull = ""
-    if ENTITY_NAME_BLOCK_PREFIX_LEN and ENTITY_NAME_BLOCK_PREFIX_LEN > 0:
-        entity_block_join = f"AND substr(a.f1_empname_clean, 1, {ENTITY_NAME_BLOCK_PREFIX_LEN}) = substr(b.f1_empname_clean, 1, {ENTITY_NAME_BLOCK_PREFIX_LEN})"
-        entity_block_nonnull = (
-            f"AND substr(a.f1_empname_clean, 1, {ENTITY_NAME_BLOCK_PREFIX_LEN}) <> '' "
-            f"AND substr(b.f1_empname_clean, 1, {ENTITY_NAME_BLOCK_PREFIX_LEN}) <> ''"
-        )
-    edge_candidates = con.sql(
-    f"""
-        SELECT
-          a.f1_emp_row_num AS row_a,
-          b.f1_emp_row_num AS row_b
-        FROM f1_employers_raw AS a
-        JOIN f1_employers_raw AS b
-          ON a.f1_emp_row_num < b.f1_emp_row_num
-         {entity_block_join}
-         AND a.f1_empname_clean IS NOT NULL
-         AND b.f1_empname_clean IS NOT NULL
-         {entity_block_nonnull}
-    WHERE
-      (
-        a.f1_state_clean = b.f1_state_clean
-        AND a.f1_city_clean = b.f1_city_clean
-        AND a.f1_city_clean NOT IN ({COMMON_CITY_LIST})
-        AND jaro_winkler_similarity(a.f1_empname_clean, b.f1_empname_clean) >= 0.95
-      )
-      OR jaro_winkler_similarity(a.f1_empname_clean, b.f1_empname_clean) >= 0.97
-    """
-    ).df()
-    edge_candidates = edge_candidates.dropna(subset=["row_a", "row_b"])
-    edge_candidates["row_a"] = edge_candidates["row_a"].astype(int)
-    edge_candidates["row_b"] = edge_candidates["row_b"].astype(int)
-
-    parent = {row: row for row in base_row_nums}
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra == rb:
-            return
-        if ra < rb:
-            parent[rb] = ra
-        else:
-            parent[ra] = rb
-
-    for _, edge in edge_candidates.iterrows():
-        union(int(edge["row_a"]), int(edge["row_b"]))
-
-    root_to_entity = {}
-    entity_ids = []
-    for row in base_row_nums:
-        root = find(row)
-        if root not in root_to_entity:
-            root_to_entity[root] = len(root_to_entity) + 1
-        entity_ids.append(root_to_entity[root])
-
-    entity_mapping_df = pd.DataFrame(
-        {
-            "f1_emp_row_num": base_row_nums,
-            "f1_emp_entity_id": entity_ids,
-        }
+    runtime_cfg = load_config(DEFAULT_CONFIG_PATH)
+    external_cfg = get_cfg_section(runtime_cfg, "external_employer_matching")
+    external_output_dir = str(
+        external_cfg.get("revelio_cleaning_output_dir", f"{root}/revelio-cleaning/data/company_matching_f1")
     )
-    con.register("f1_emp_entity_mapping_df", entity_mapping_df)
-    con.sql(
-    """
-        CREATE OR REPLACE TABLE f1_emp_entity_mapping AS
-        SELECT * FROM f1_emp_entity_mapping_df
-    """)
-
-    con.sql(
-    """
-        CREATE OR REPLACE VIEW f1_employers AS
-        SELECT
-          raw.*,
-          mapping.f1_emp_entity_id
-        FROM f1_employers_raw AS raw
-        LEFT JOIN f1_emp_entity_mapping AS mapping USING (f1_emp_row_num)
-    """)
-
-    total_entities = len(set(entity_ids))
-    multi_member_entities = entity_mapping_df.groupby("f1_emp_entity_id").size()
-    multi_member_count = (multi_member_entities > 1).sum()
+    match_source = str(external_cfg.get("match_source", "deterministic")).strip().lower()
+    staged = stage_external_f1_crosswalk(
+        external_output_dir=external_output_dir,
+        match_source=match_source,
+        out_path=str(cache_path) if save_output and cache_path else None,
+        con=con,
+        table_name="f1_employer_final_crosswalk",
+        verbose=verbose,
+    )
     if verbose:
+        matched_total = int(staged["preferred_rcid"].notna().sum())
         print(
-            f"Employer entity clustering produced {total_entities:,} entities from {len(base_row_nums):,} employer names "
-            f"({multi_member_count:,} with multiple location/name variants)."
+            "✅ Staged external employer crosswalk 'f1_employer_final_crosswalk' "
+            f"with {len(staged):,} rows ({matched_total:,} unique preferred RCID rows)."
         )
-
-    con.sql(
-    """
-    CREATE OR REPLACE VIEW f1_employer_entities AS
-    SELECT
-      f1_emp_entity_id,
-      MIN(f1_emp_row_num) AS anchor_f1_emp_row_num,
-      MIN(f1_empname_clean) AS f1_empname_clean,
-      COUNT(*) AS employer_variant_count,
-      array_agg(DISTINCT employer_name) AS employer_aliases,
-      array_agg(DISTINCT f1_city_clean) FILTER (WHERE f1_city_clean IS NOT NULL) AS city_list,
-      array_agg(DISTINCT f1_state_clean) FILTER (WHERE f1_state_clean IS NOT NULL) AS state_list,
-      array_agg(DISTINCT f1_zip_clean) FILTER (WHERE f1_zip_clean IS NOT NULL) AS zip_list
-    FROM f1_employers
-    GROUP BY f1_emp_entity_id
-    """)
-
-    rev_employers = con.sql(
-    f"""
-        SELECT
-          rcid,
-          {_sql_clean_company_name("company")} AS rev_company_clean,
-          {_sql_normalize("hq_city")} AS rev_city_clean,
-          {_sql_state_name_to_abbr("hq_state")} AS rev_state_clean,
-          {_sql_clean_zip("hq_zip_code")} AS rev_zip_clean,
-          UPPER(TRIM(hq_country)) AS rev_country_clean
-        FROM revelio_companies
-        WHERE company IS NOT NULL
-        GROUP BY rcid, company, hq_city, hq_state, hq_zip_code, hq_country
-    """)
-    rev_employers.create_view("rev_employers")
-
-    con.sql(
-    """
-      CREATE OR REPLACE VIEW employer_raw_matches AS
-      WITH raw_match AS (
-        SELECT
-          f1_emp.*,
-          rev_emp.rcid,
-          rev_emp.rev_company_clean,
-          rev_emp.rev_city_clean,
-          rev_emp.rev_state_clean,
-          rev_emp.rev_zip_clean,
-          rev_emp.rev_country_clean,
-          CASE
-            WHEN f1_emp.f1_zip_clean = rev_emp.rev_zip_clean THEN 5
-            WHEN f1_emp.f1_city_clean = rev_emp.rev_city_clean AND f1_emp.f1_state_clean = rev_emp.rev_state_clean THEN 4
-            WHEN f1_emp.f1_state_clean = rev_emp.rev_state_clean THEN 3
-            WHEN rev_emp.rcid IS NOT NULL THEN 1
-            ELSE 0
-          END AS match_rank,
-          MAX(
-            CASE
-              WHEN f1_emp.f1_zip_clean = rev_emp.rev_zip_clean THEN 5
-              WHEN f1_emp.f1_city_clean = rev_emp.rev_city_clean AND f1_emp.f1_state_clean = rev_emp.rev_state_clean THEN 4
-              WHEN f1_emp.f1_state_clean = rev_emp.rev_state_clean THEN 3
-              WHEN rev_emp.rcid IS NOT NULL THEN 1
-              ELSE 0
-            END
-          ) OVER(PARTITION BY f1_emp.f1_emp_row_num) AS max_match_rank
-        FROM f1_employers AS f1_emp
-        LEFT JOIN rev_employers AS rev_emp
-          ON f1_emp.f1_empname_clean = rev_emp.rev_company_clean
-      )
-      SELECT
-        *,
-        COUNT(rcid) OVER(PARTITION BY f1_emp_row_num) AS match_count
-      FROM raw_match
-      WHERE match_rank = max_match_rank
-    """)
-
-    total_employers = con.sql("SELECT COUNT(DISTINCT f1_emp_row_num) AS cnt FROM f1_employers").df().iloc[0, 0]
-    if verbose:
-        print(f"Total FOIA employers: {total_employers:,}")
-
-    employer_good_matches = con.sql("SELECT * FROM employer_raw_matches WHERE match_count = 1")
-    employer_good_matches.create_view("employer_good_matches")
-    employer_direct_cnt = con.sql("SELECT COUNT(DISTINCT f1_emp_row_num) AS cnt FROM employer_good_matches").df().iloc[0, 0]
-    if verbose:
-        print(f"Direct employer matches (unique RCID): {employer_direct_cnt:,}")
-
-    us_country_list = ",".join([f"'{c}'" for c in US_COUNTRY_CODES])
-    employer_rematch_sample_filter = ""
-    if REMATCH_SAMPLE_SIZE is not None:
-        employer_rematch_sample_filter = f"WHERE rn <= {REMATCH_SAMPLE_SIZE}"
-    unmatched_cnt = con.sql("SELECT COUNT(DISTINCT f1_emp_row_num) AS cnt FROM employer_raw_matches WHERE match_count = 0").df().iloc[0, 0]
-    if verbose:
-        sample_note = f" (capped at {REMATCH_SAMPLE_SIZE:,})" if REMATCH_SAMPLE_SIZE is not None else ""
-        print(f"Employers requiring fuzzy rematch: {unmatched_cnt:,}{sample_note}")
-    fuzzy_block_join = ""
-    if FUZZY_NAME_BLOCK_PREFIX_LEN and FUZZY_NAME_BLOCK_PREFIX_LEN > 0:
-        fuzzy_block_join = f"AND substr(f1_rematch.f1_empname_clean, 1, {FUZZY_NAME_BLOCK_PREFIX_LEN}) = substr(rev_employers.rev_company_clean, 1, {FUZZY_NAME_BLOCK_PREFIX_LEN})"
-    con.sql(
-    f"""
-    CREATE OR REPLACE TABLE employer_second_match AS
-      WITH unmatched AS (
-        SELECT f1_emp_row_num
-        FROM employer_raw_matches
-        WHERE match_count = 0
-      ),
-      rematch_samp AS (
-        SELECT f1_emp_row_num
-        FROM (
-          SELECT
-            f1_emp_row_num,
-            ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn
-          FROM unmatched
-        )
-        {employer_rematch_sample_filter}
-      ),
-      f1_rematch AS (
-        SELECT f1_employers.*
-        FROM rematch_samp
-        JOIN f1_employers USING(f1_emp_row_num)
-      ),
-      candidate_scores AS (
-        SELECT
-          f1_rematch.f1_emp_row_num,
-          f1_rematch.employer_name,
-          f1_rematch.f1_empname_clean,
-          f1_rematch.f1_city_clean,
-          f1_rematch.f1_state_clean,
-      f1_rematch.f1_zip_clean,
-      rev_employers.rcid,
-      rev_employers.rev_company_clean,
-      rev_employers.rev_city_clean,
-      rev_employers.rev_state_clean,
-      rev_employers.rev_zip_clean,
-      rev_employers.rev_country_clean,
-      substr(f1_rematch.f1_empname_clean, 1, 1) AS f1_first_char,
-      substr(rev_employers.rev_company_clean, 1, 1) AS rev_first_char,
-      CASE
-        WHEN f1_rematch.f1_zip_clean IS NOT NULL
-             AND rev_employers.rev_zip_clean IS NOT NULL
-             AND f1_rematch.f1_zip_clean = rev_employers.rev_zip_clean
-        THEN TRUE ELSE FALSE END AS is_zip_match,
-      CASE
-        WHEN f1_rematch.f1_city_clean IS NOT NULL
-             AND rev_employers.rev_city_clean IS NOT NULL
-             AND f1_rematch.f1_city_clean = rev_employers.rev_city_clean
-             AND f1_rematch.f1_city_clean NOT IN ({COMMON_CITY_LIST})
-        THEN TRUE ELSE FALSE END AS is_city_match,
-      jaro_winkler_similarity(f1_rematch.f1_empname_clean, rev_employers.rev_company_clean) AS name_jaro_winkler,
-      CASE
-        WHEN f1_rematch.f1_empname_clean IS NULL OR rev_employers.rev_company_clean IS NULL OR LENGTH(rev_employers.rev_company_clean) <= 5 THEN FALSE
-        WHEN POSITION(rev_employers.rev_company_clean IN f1_rematch.f1_empname_clean) > 0 THEN TRUE
-        WHEN POSITION(f1_rematch.f1_empname_clean IN rev_employers.rev_company_clean) > 0 THEN TRUE
-        ELSE FALSE
-      END AS is_subset_match
-    FROM f1_rematch
-    JOIN rev_employers
-      ON f1_rematch.f1_state_clean = rev_employers.rev_state_clean
-      {fuzzy_block_join}
-    WHERE rev_employers.rev_country_clean IN ({us_country_list})
-  ),
-      ranked_candidates AS (
-        SELECT
-          *,
-          ROW_NUMBER() OVER (
-            PARTITION BY f1_emp_row_num
-            ORDER BY
-              is_subset_match DESC,
-              is_zip_match DESC,
-              is_city_match DESC,
-              name_jaro_winkler DESC,
-              rcid
-          ) AS candidate_rank
-        FROM candidate_scores
-        WHERE name_jaro_winkler IS NOT NULL
-      )
-      SELECT *
-      FROM ranked_candidates
-      WHERE candidate_rank = 1
-        AND (
-          (is_subset_match AND rev_company_clean ~ '.*\\s.*' AND name_jaro_winkler >= 0.97)
-          OR ((is_zip_match OR is_city_match) AND name_jaro_winkler >= 0.95) OR
-          (is_subset_match AND (is_city_match OR is_zip_match) AND name_jaro_winkler >= 0.95)
-          OR name_jaro_winkler >= 0.99
-        )
-    """)
-    employer_second_total = con.sql("SELECT COUNT(*) AS cnt FROM employer_second_match").df().iloc[0, 0]
-    employer_second_institutions = con.sql("SELECT COUNT(DISTINCT f1_emp_row_num) AS cnt FROM employer_second_match").df().iloc[0, 0]
-    print(
-        f"Employer fuzzy matches: {employer_second_total} rows covering "
-        f"{employer_second_institutions} employers (threshold={REMATCH_JW_THRESHOLD})"
-    )
-
-    employer_tie_matches = con.sql(
-    f"""
-      WITH tie_candidates AS (
-        SELECT
-          *,
-          CASE
-            WHEN f1_zip_clean IS NOT NULL AND rev_zip_clean IS NOT NULL AND f1_zip_clean = rev_zip_clean THEN TRUE
-            ELSE FALSE
-          END AS is_zip_match,
-          CASE
-            WHEN f1_city_clean IS NOT NULL
-                 AND rev_city_clean IS NOT NULL
-                 AND f1_city_clean = rev_city_clean
-                 AND f1_city_clean NOT IN ({COMMON_CITY_LIST})
-            THEN TRUE
-            ELSE FALSE
-          END AS is_city_match
-        FROM employer_raw_matches
-        WHERE match_count > 1
-      ),
-      ranked_ties AS (
-        SELECT
-          *,
-          ROW_NUMBER() OVER (
-            PARTITION BY f1_emp_row_num
-            ORDER BY
-              is_zip_match DESC,
-              is_city_match DESC,
-              rcid
-          ) AS tie_rank,
-          COUNT(*) OVER (PARTITION BY f1_emp_row_num) AS tie_candidate_count
-        FROM tie_candidates
-      ),
-      aggregated_ties AS (
-        SELECT
-          f1_emp_row_num,
-          array_agg(DISTINCT rcid) AS tie_rcids,
-          array_agg(DISTINCT rev_company_clean) AS tie_company_names
-        FROM ranked_ties
-        GROUP BY f1_emp_row_num
-      )
-      SELECT
-        ranked_ties.f1_emp_row_num,
-        ranked_ties.employer_name,
-        ranked_ties.f1_empname_clean,
-        ranked_ties.rcid,
-        ranked_ties.rev_company_clean,
-        ranked_ties.tie_candidate_count,
-        aggregated_ties.tie_rcids,
-        aggregated_ties.tie_company_names
-      FROM ranked_ties
-      JOIN aggregated_ties USING (f1_emp_row_num)
-      WHERE tie_rank = 1
-    """)
-    employer_tie_matches.create_view("employer_tie_matches")
-    employer_tie_matches_df = employer_tie_matches.df()
-    if verbose:
-        if employer_tie_matches_df.empty:
-            print("Ambiguous employer direct matches: 0 employers with equal top ranks")
-        else:
-            avg_ties = employer_tie_matches_df["tie_candidate_count"].mean()
-            print(
-                f"Ambiguous employer direct matches: {employer_tie_matches_df.shape[0]:,} employers "
-                f"(avg candidates {avg_ties:.2f})"
-            )
-
-    con.sql(
-    """
-    CREATE OR REPLACE TABLE f1_employer_rcid_crosswalk AS
-    SELECT
-      f1_employers.*,
-      match1.rcid AS direct_rcid,
-      match1.rev_company_clean AS direct_company_name,
-      match2.rcid AS fuzzy_rcid,
-      match2.rev_company_clean AS fuzzy_company_name,
-      match3.rcid AS tie_rcid,
-      match3.rev_company_clean AS tie_company_name,
-      match3.tie_candidate_count,
-      match3.tie_rcids,
-      match3.tie_company_names,
-      CASE
-        WHEN match1.matchtype = 'direct' THEN 'direct'
-        WHEN match2.matchtype = 'fuzzy' THEN 'fuzzy'
-        WHEN match3.matchtype = 'tie' THEN 'tie'
-        ELSE 'none'
-      END AS matchtype
-    FROM f1_employers
-    LEFT JOIN (
-      SELECT f1_emp_row_num, rcid, rev_company_clean, 'direct' AS matchtype
-      FROM employer_good_matches
-    ) AS match1 USING (f1_emp_row_num)
-    LEFT JOIN (
-      SELECT f1_emp_row_num, rcid, rev_company_clean, 'fuzzy' AS matchtype
-      FROM employer_second_match
-    ) AS match2 USING (f1_emp_row_num)
-    LEFT JOIN (
-      SELECT f1_emp_row_num, rcid, rev_company_clean, tie_candidate_count, tie_rcids, tie_company_names, 'tie' AS matchtype
-      FROM employer_tie_matches
-    ) AS match3 USING (f1_emp_row_num)
-    """)
-    if verbose:
-        print("✅ Created FOIA employer to Revelio RCID crosswalk table 'f1_employer_rcid_crosswalk'.")
-    con.sql(
-    """
-    CREATE OR REPLACE TABLE f1_employer_entity_crosswalk AS
-    WITH match_union AS (
-      SELECT
-        f1_emp_entity_id,
-        direct_rcid AS rcid,
-        direct_company_name AS company_name,
-        'direct' AS match_source
-      FROM f1_employer_rcid_crosswalk
-      WHERE direct_rcid IS NOT NULL
-      UNION ALL
-      SELECT
-        f1_emp_entity_id,
-        fuzzy_rcid AS rcid,
-        fuzzy_company_name AS company_name,
-        'fuzzy' AS match_source
-      FROM f1_employer_rcid_crosswalk
-      WHERE fuzzy_rcid IS NOT NULL
-      UNION ALL
-      SELECT
-        f1_emp_entity_id,
-        tie_rcid AS rcid,
-        tie_company_name AS company_name,
-        'tie_primary' AS match_source
-      FROM f1_employer_rcid_crosswalk
-      WHERE tie_rcid IS NOT NULL
-      UNION ALL
-      SELECT
-        cw.f1_emp_entity_id,
-        list_element(cw.tie_rcids, idx) AS tie_rcid_candidate,
-        list_element(cw.tie_company_names, idx) AS tie_company_candidate,
-        'tie_pool' AS match_source
-      FROM f1_employer_rcid_crosswalk AS cw,
-      LATERAL UNNEST(range(1, array_length(cw.tie_rcids) + 1)) AS t(idx)
-      WHERE cw.tie_rcids IS NOT NULL
-        AND cw.tie_company_names IS NOT NULL
-        AND array_length(cw.tie_company_names) >= idx
-    ),
-    aggregated AS (
-      SELECT
-        f1_emp_entity_id,
-        array_agg(DISTINCT rcid) AS matched_rcids,
-        array_agg(DISTINCT company_name) FILTER (WHERE company_name IS NOT NULL) AS matched_company_names
-      FROM match_union
-      GROUP BY f1_emp_entity_id
-    ),
-    prioritized AS (
-      SELECT
-        f1_emp_entity_id,
-        rcid,
-        company_name,
-        match_source
-      FROM (
-        SELECT
-          f1_emp_entity_id,
-          rcid,
-          company_name,
-          match_source,
-          CASE
-            WHEN match_source = 'direct' THEN 1
-            WHEN match_source = 'fuzzy' THEN 2
-            ELSE 3
-          END AS source_rank,
-          ROW_NUMBER() OVER (
-            PARTITION BY f1_emp_entity_id
-            ORDER BY source_rank, rcid
-          ) AS rn
-        FROM match_union
-      )
-      WHERE rn = 1
-    ),
-    match_presence AS (
-      SELECT
-        f1_emp_entity_id,
-        MAX(CASE WHEN match_source = 'direct' THEN 1 ELSE 0 END) AS has_direct_match,
-        MAX(CASE WHEN match_source = 'fuzzy' THEN 1 ELSE 0 END) AS has_fuzzy_match,
-        MAX(CASE WHEN match_source LIKE 'tie%' THEN 1 ELSE 0 END) AS has_tie_match
-      FROM match_union
-      GROUP BY f1_emp_entity_id
-    )
-    SELECT
-      entities.*,
-      aggregated.matched_rcids,
-      aggregated.matched_company_names,
-      prioritized.rcid AS preferred_rcid,
-      prioritized.company_name AS preferred_company_name,
-      prioritized.match_source AS preferred_match_source,
-      COALESCE(match_presence.has_direct_match, 0) AS has_direct_match,
-      COALESCE(match_presence.has_fuzzy_match, 0) AS has_fuzzy_match,
-      COALESCE(match_presence.has_tie_match, 0) AS has_tie_match
-    FROM f1_employer_entities AS entities
-    LEFT JOIN aggregated USING (f1_emp_entity_id)
-    LEFT JOIN prioritized USING (f1_emp_entity_id)
-    LEFT JOIN match_presence USING (f1_emp_entity_id)
-    """)
-
-    con.sql(
-    """
-    CREATE OR REPLACE TABLE f1_employer_final_crosswalk AS
-    SELECT
-      base.employer_name,
-      base.f1_emp_row_num,
-      base.f1_emp_entity_id,
-      base.f1_empname_clean,
-      base.f1_city_clean,
-      base.f1_state_clean,
-      base.f1_zip_clean,
-      entity.preferred_rcid,
-      entity.preferred_company_name,
-      entity.preferred_match_source,
-      entity.matched_rcids,
-      entity.matched_company_names,
-      entity.has_direct_match,
-      entity.has_fuzzy_match,
-      entity.has_tie_match
-    FROM f1_employers AS base
-    LEFT JOIN f1_employer_entity_crosswalk AS entity USING (f1_emp_entity_id)
-    """)
-    if verbose:
-        final_total = con.sql("SELECT COUNT(*) AS cnt FROM f1_employer_final_crosswalk").df().iloc[0, 0]
-        matched_total = con.sql("SELECT COUNT(*) AS cnt FROM f1_employer_final_crosswalk WHERE preferred_rcid IS NOT NULL").df().iloc[0, 0]
-        print(
-            "✅ Created final employer crosswalk 'f1_employer_final_crosswalk' "
-            f"with {final_total:,} rows ({matched_total:,} matched to an RCID)."
-        )
-    if save_output and cache_path:
-        con.sql(f"COPY (SELECT * FROM f1_employer_final_crosswalk) TO '{cache_path}' (FORMAT PARQUET)")
-        if verbose:
-            print(f"💾 Saved final employer crosswalk to '{cache_path}'.")
     return "f1_employer_final_crosswalk"
 
 
@@ -1302,76 +790,39 @@ def _compute_preferred_rcid_activity(
     rcid_list_path: str = None,
 ):
     """
-    Merge employer crosswalk back to FOIA records, restrict to rows where the
-    work authorization start year matches the FOIA reporting year, count unique
-    individuals by year and RCID, and retain RCIDs with >=10 unique individuals
-    in at least three distinct years.
+    Recompute preferred RCID activity from the staged final crosswalk and the
+    person-linked employment-corrected F1 file.
     """
-    cols = [row[1] for row in con.sql("PRAGMA table_info('allyrs_raw')").fetchall()]
-    id_col = _first_present(cols, INDIVIDUAL_ID_COLS, "individual identifier column")
-    auth_col = _first_present(cols, AUTH_START_COLS, "authorization start date column")
-    year_col = _first_present(cols, ["year"], "FOIA reporting year column")
+    runtime_cfg = load_config(DEFAULT_CONFIG_PATH)
+    paths = runtime_cfg.get("paths", {})
+    external_cfg = get_cfg_section(runtime_cfg, "external_employer_matching")
+    activity_path = str(paths.get("foia_sevp_with_person_id_employment_corrected"))
+    min_unique_individuals = int(external_cfg.get("preferred_rcid_min_unique_individuals", 1))
+    min_years = int(external_cfg.get("preferred_rcid_min_years", 3))
+    min_max_year_gt = external_cfg.get("preferred_rcid_min_max_year_gt", 2012)
+    if isinstance(min_max_year_gt, str) and min_max_year_gt.strip().lower() in {"", "none", "null"}:
+        min_max_year_gt = None
+    if min_max_year_gt is not None:
+        min_max_year_gt = int(min_max_year_gt)
 
-    con.sql(
-    f"""
-        CREATE OR REPLACE TEMP VIEW foia_with_auth AS
-        SELECT
-          *,
-          {_sql_clean_company_name("employer_name")} AS f1_empname_clean,
-          {_sql_normalize("employer_city")} AS f1_city_clean,
-          {_sql_state_name_to_abbr("employer_state")} AS f1_state_clean,
-          {_sql_clean_zip("employer_zip_code")} AS f1_zip_clean,
-          {_date_parse_sql(auth_col)} AS auth_start
-        FROM allyrs_raw
-        WHERE employer_name IS NOT NULL
-    """)
-
-    con.sql(
-    f"""
-        CREATE OR REPLACE TABLE f1_employer_auth_counts AS
-        SELECT
-          CAST(EXTRACT(YEAR FROM auth_start) AS INTEGER) AS auth_year,
-          preferred_company_name,
-          CAST(fcw.preferred_rcid AS INTEGER) AS preferred_rcid,
-          COUNT(DISTINCT CAST(fo.{id_col} AS VARCHAR)) AS unique_individuals
-        FROM foia_with_auth AS fo
-        JOIN f1_employer_final_crosswalk AS fcw
-          ON fo.f1_empname_clean = fcw.f1_empname_clean
-         AND COALESCE(fo.f1_city_clean, '') = COALESCE(fcw.f1_city_clean, '')
-         AND COALESCE(fo.f1_state_clean, '') = COALESCE(fcw.f1_state_clean, '')
-         AND COALESCE(fo.f1_zip_clean, '') = COALESCE(fcw.f1_zip_clean, '')
-        WHERE auth_start IS NOT NULL
-          AND fcw.preferred_rcid IS NOT NULL
-          AND CAST(EXTRACT(YEAR FROM auth_start) AS INTEGER) = CAST({year_col} AS INTEGER)
-        GROUP BY auth_year, preferred_rcid, preferred_company_name
-    """)
-
-    con.sql(
-    """
-        CREATE OR REPLACE TABLE f1_preferred_rcids_multi_year AS
-        SELECT preferred_rcid
-        FROM f1_employer_auth_counts
-        WHERE unique_individuals >= 10
-        GROUP BY preferred_rcid
-        HAVING COUNT(DISTINCT auth_year) >= 3
-    """)
-
-    if verbose:
-        auth_rows = con.sql("SELECT COUNT(*) AS cnt FROM f1_employer_auth_counts").df().iloc[0, 0]
-        rcid_rows = con.sql("SELECT COUNT(*) AS cnt FROM f1_preferred_rcids_multi_year").df().iloc[0, 0]
-        print(f"✅ Built f1_employer_auth_counts ({auth_rows:,} rows) and f1_preferred_rcids_multi_year ({rcid_rows:,} RCIDs).")
-
-    if save_output:
-        if auth_counts_path:
-            con.sql(f"COPY (SELECT * FROM f1_employer_auth_counts) TO '{auth_counts_path}' (FORMAT PARQUET)")
-            if verbose:
-                print(f"💾 Saved authorization counts to '{auth_counts_path}'.")
-        if rcid_list_path:
-            con.sql(f"COPY (SELECT * FROM f1_preferred_rcids_multi_year) TO '{rcid_list_path}' (FORMAT PARQUET)")
-            if verbose:
-                print(f"💾 Saved preferred RCID list to '{rcid_list_path}'.")
-
-    return "f1_preferred_rcids_multi_year"
+    return build_preferred_rcid_activity(
+        con,
+        activity_parquet_path=activity_path,
+        sql_clean_company_name_expr=_sql_clean_company_name,
+        sql_normalize_expr=_sql_normalize,
+        sql_state_name_to_abbr_expr=_sql_state_name_to_abbr,
+        sql_clean_zip_expr=_sql_clean_zip,
+        date_parse_sql=_date_parse_sql,
+        individual_id_cols=INDIVIDUAL_ID_COLS,
+        auth_start_cols=AUTH_START_COLS,
+        auth_counts_path=auth_counts_path,
+        rcid_list_path=rcid_list_path,
+        save_output=save_output,
+        min_unique_individuals=min_unique_individuals,
+        min_years=min_years,
+        min_max_year_gt=min_max_year_gt,
+        verbose=verbose,
+    )
 
 # SQL helper function for cleaning and normalizing names
 def _sql_normalize(colname):

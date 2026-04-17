@@ -46,10 +46,17 @@ paths:
   revelio_foia_inst_crosswalk: "${int_dir}/revelio_foia_inst_crosswalk.parquet" # OUTPUT (deps_foia_clean): Revelio institution to FOIA inst crosswalk
   revelio_ipeds_foia_inst_crosswalk: "${int_dir}/revelio_ipeds_foia_inst_crosswalk.parquet" # OUTPUT (deps_foia_clean): Three-way institution crosswalk
   revelio_matched_university_raws: "${int_dir}/revelio_matched_university_raws.parquet" # OUTPUT (deps_foia_clean): university_raw values matched to FOIA or IPEDS via three-way crosswalk
+  ipeds_main_institutions: "${int_dir}/ipeds_main_institutions.parquet" # OUTPUT (deps_foia_clean): canonical IPEDS main-unit dimension
+  revelio_ipeds_edges: "${int_dir}/revelio_ipeds_edges.parquet" # OUTPUT (deps_foia_clean): Revelio raw-school -> IPEDS main_unitid edges
+  revelio_ipeds_best: "${int_dir}/revelio_ipeds_best.parquet" # OUTPUT (deps_foia_clean): promoted Revelio raw-school -> IPEDS mappings
+  ipeds_to_revelio_families: "${int_dir}/ipeds_to_revelio_families.parquet" # OUTPUT (deps_foia_clean): IPEDS main_unitid -> Revelio family aggregation
+  f1_ipeds_edges: "${int_dir}/f1_ipeds_edges.parquet" # OUTPUT (deps_foia_clean): F1 site -> IPEDS main_unitid edges
+  f1_revelio_ipeds_resolution: "${int_dir}/f1_revelio_ipeds_resolution.parquet" # OUTPUT (deps_foia_clean): shared-main_unitid F1 site -> Revelio family resolution
+  f1_revelio_school_crosswalk: "${int_dir}/f1_revelio_school_crosswalk.parquet" # OUTPUT (deps_foia_clean): shared-main_unitid F1 school -> Revelio family crosswalk
 
   ## employers
   employer_entity_mapping: "${int_dir}/f1_employer_entity_mapping.parquet"
-  #f1_employer_revelio_rcid_crosswalk: "${int_dir}/f1_employer_revelio_rcid_crosswalk.parquet" # OUTPUT (deps_foia_clean): F1 SEVP employer to Revelio rcid crosswalk
+  f1_employer_revelio_rcid_crosswalk: "${int_dir}/f1_employer_revelio_rcid_crosswalk.parquet" # legacy / unused by the external employer matcher
   employer_crosswalk: "${int_dir}/f1_employer_final_crosswalk.parquet" #"{root}/data/int/int_files_jan2026/f1_employer_final_crosswalk.parquet" #
   employer_auth_counts: "${int_dir}/f1_employer_auth_counts.parquet"
   preferred_rcids: "${int_dir}/f1_preferred_rcids_multi_year.parquet"
@@ -86,6 +93,7 @@ foia_clean:
   build_revelio_ipeds_crosswalk: true 
   build_revelio_foia_crosswalk: true
   build_revelio_three_way_crosswalk: true
+  build_canonical_institution_mappings: true
   load_inst_from_cache: false #toggle: load f1 sevp inst to ipeds unitid cw from cached file if exists (if true, skip recomputation)
   save_inst_to_cache: true #toggle: save f1 sevp inst to ipeds unitid cw to cached file after computation (if false, skip saving)
   load_employer_from_cache: false #toggle: load f1 sevp employer to revelio rcid cw from cached file if exists (if true, skip recomputation)
@@ -204,8 +212,44 @@ employer_crosswalk:
   min_unique_individuals: 10
   min_years: 3
 
+external_employer_matching:
+  revelio_cleaning_output_dir: "{root}/revelio-cleaning/data/company_matching_f1"
+  match_source: "deterministic"
+  preferred_rcid_min_unique_individuals: 1
+  preferred_rcid_min_years: 3
+  preferred_rcid_min_max_year_gt: 2012
+
+external_school_matching:
+  revelio_cleaning_repo_root: "{root}/revelio-cleaning"
+
 ipeds_ma_only:
   min_year: 2002
   min_cip: 10000
   master_only: true
   include_bachelors: false
+
+exposure_event_study:
+  # Which exposure version(s) to run: "opt_hire_rate" | "school_opt_share" | "both"
+  exposure_version: "both"
+  # Year range over which to aggregate the exposure measure (pre-period)
+  exposure_year_min: 2010
+  exposure_year_max: 2015
+  # Number of ntile groups (4 = quartiles)
+  ntiles: 2
+  # Event year (vertical reference line)
+  event_year: 2016
+  # Reference year omitted from regression year dummies (also used for demeaning raw plots)
+  ref_year: 2015
+  # Full data window for plots and regression
+  data_min_t: 2010
+  data_max_t: 2022
+  # Source column used to derive x_bin_any_nonzero
+  x_source_col: "masters_opt_hires_correction_aware"
+  # Outcome columns to analyze (one full pipeline pass per outcome)
+  outcome_cols:
+    - "x_bin_any_nonzero"
+    - "masters_opt_hires_correction_aware"
+    - "log1p_y_cst_lag0"
+    - "log1p_y_new_hires_lag0"
+  # Directory for saving PNG outputs (null = show only, don't save)
+  slides_out_dir: "{root}/h1bworkers/output/slides/slides_20260410"

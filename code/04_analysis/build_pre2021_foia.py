@@ -45,14 +45,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yaml
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 # ---------------------------------------------------------------------------
 # Path setup
 # ---------------------------------------------------------------------------
 _CODE_DIR = Path(__file__).resolve().parent.parent
-_MATCH_DIR = _CODE_DIR / "revelio_h1b_company_matching"
 sys.path.insert(0, str(_CODE_DIR))
-sys.path.insert(0, str(_MATCH_DIR))
 
 from config import root  # noqa: E402
 from company_name_cleaning import normalize_state  # noqa: E402

@@ -12,10 +12,21 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import re 
 from pathlib import Path
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import *
 from company_shift_share.config_loader import DEFAULT_CONFIG_PATH, get_cfg_section, load_config
+from external_f1_employer_matching import (
+    build_preferred_rcid_activity,
+    stage_external_f1_crosswalk,
+)
+from external_us_school_matching import stage_external_us_school_matching_artifacts
 import helpers as help
 
 #########################
@@ -157,6 +168,17 @@ def _relation_exists(con, relation_name: str) -> bool:
             """,
         )
     )
+
+
+def _relation_columns(con, relation_name: str) -> set[str]:
+    relation_escaped = relation_name.replace("'", "''")
+    if not _relation_exists(con, relation_name):
+        return set()
+    return {row[1] for row in con.sql(f"PRAGMA table_info('{relation_escaped}')").fetchall()}
+
+
+def _relation_has_column(con, relation_name: str, column_name: str) -> bool:
+    return column_name in _relation_columns(con, relation_name)
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -1887,7 +1909,10 @@ def _create_f1_inst_view(con):
         WHERE school_name IS NOT NULL
         GROUP BY school_name, campus_city, campus_state, campus_zip_code
         )
-        SELECT *
+        SELECT
+          *,
+          {_sql_f1_inst_site_id_expr("school_name", "f1_instname_clean", "f1_city_clean", "f1_state_clean", "f1_zip_clean")} AS f1_inst_site_id,
+          {_sql_f1_school_id_expr("school_name", "f1_instname_clean")} AS f1_school_id
         FROM cleaned
         WHERE f1_instname_clean <> ''
     """)
@@ -2028,6 +2053,12 @@ def _create_f1_inst_crosswalk(con, verbose=False, cache_path=None, load_cache=Fa
         WHEN match3.UNITID IS NOT NULL THEN match3.UNITID
         ELSE NULL
       END AS UNITID,
+      CASE
+        WHEN match1.UNITID IS NOT NULL THEN match1.UNITID
+        WHEN match2.UNITID IS NOT NULL THEN match2.UNITID
+        WHEN match3.UNITID IS NOT NULL THEN match3.UNITID
+        ELSE NULL
+      END AS main_unitid,
       CASE 
         WHEN match1.ipeds_instname_clean IS NOT NULL THEN match1.ipeds_instname_clean
         WHEN match2.ipeds_instname_clean IS NOT NULL THEN match2.ipeds_instname_clean
@@ -2040,7 +2071,10 @@ def _create_f1_inst_crosswalk(con, verbose=False, cache_path=None, load_cache=Fa
         WHEN match2.matchtype = 'fuzzy' THEN 'fuzzy'
         WHEN match3.matchtype = 'fuzzy_tie' THEN 'fuzzy_tie'
         ELSE 'none'
-      END AS matchtype
+      END AS matchtype,
+      match3.tie_candidate_count,
+      match3.tie_unitids,
+      match3.tie_instnames
     FROM f1_inst
     LEFT JOIN (
       SELECT f1_row_num, right_id AS UNITID, right_name_clean AS ipeds_instname_clean, 'direct' AS matchtype
@@ -2095,7 +2129,9 @@ def _create_revelio_inst_view(con):
     SELECT
       university_raw,
       md5(university_raw) AS rev_key,
+      {_sql_revelio_inst_raw_id_expr("university_raw")} AS revelio_inst_raw_id,
       {_sql_clean_inst_name("university_raw")} AS rev_instname_clean,
+      {_sql_revelio_inst_family_id_expr(_sql_clean_inst_name("university_raw"))} AS revelio_inst_family_id,
       {rev_loc_expr} AS rev_loc_clean
     FROM (
       SELECT DISTINCT university_raw
@@ -2194,7 +2230,9 @@ def _create_revelio_inst_view(con):
         SELECT
           r.university_raw,
           r.rev_key,
+          r.revelio_inst_raw_id,
           r.rev_instname_clean,
+          r.revelio_inst_family_id,
           m.geoname_id AS rev_geoname_id,
           m.city_clean AS rev_city_clean,
           m.state_clean AS rev_state_clean,
@@ -2208,7 +2246,10 @@ def _create_revelio_inst_view(con):
         con.sql("CREATE OR REPLACE VIEW revelio_inst AS SELECT * FROM revelio_inst_geo")
     else:
         con.sql(
-            "CREATE OR REPLACE VIEW revelio_inst AS SELECT university_raw, rev_key, rev_instname_clean, NULL AS rev_geoname_id, NULL AS rev_city_clean, NULL AS rev_state_clean, FALSE AS rev_geo_matched FROM revelio_inst_base"
+            "CREATE OR REPLACE VIEW revelio_inst AS "
+            "SELECT university_raw, rev_key, revelio_inst_raw_id, rev_instname_clean, revelio_inst_family_id, "
+            "NULL AS rev_geoname_id, NULL AS rev_city_clean, NULL AS rev_state_clean, FALSE AS rev_geo_matched "
+            "FROM revelio_inst_base"
         )
 
 def _create_revelio_ipeds_inst_crosswalk(con, verbose=False, cache_path=None, save_output=False):
@@ -2216,6 +2257,7 @@ def _create_revelio_ipeds_inst_crosswalk(con, verbose=False, cache_path=None, sa
         _print_section("Revelio ↔ IPEDS Institution Crosswalk")
 
     _create_revelio_inst_view(con)
+    _create_ipeds_inst_view(con)
 
     match_views = _build_inst_match_views(
         con,
@@ -2260,7 +2302,9 @@ def _create_revelio_ipeds_inst_crosswalk(con, verbose=False, cache_path=None, sa
     SELECT
       rev.university_raw,
       rev.rev_key,
+      rev.revelio_inst_raw_id,
       rev.rev_instname_clean,
+      rev.revelio_inst_family_id,
       rev.rev_city_clean,
       rev.rev_state_clean,
       rev.rev_geo_matched,
@@ -2270,6 +2314,12 @@ def _create_revelio_ipeds_inst_crosswalk(con, verbose=False, cache_path=None, sa
         WHEN match3.UNITID IS NOT NULL THEN match3.UNITID
         ELSE NULL
       END AS UNITID,
+      CASE
+        WHEN match1.UNITID IS NOT NULL THEN match1.UNITID
+        WHEN match2.UNITID IS NOT NULL THEN match2.UNITID
+        WHEN match3.UNITID IS NOT NULL THEN match3.UNITID
+        ELSE NULL
+      END AS main_unitid,
       CASE 
         WHEN match1.ipeds_instname_clean IS NOT NULL THEN match1.ipeds_instname_clean
         WHEN match2.ipeds_instname_clean IS NOT NULL THEN match2.ipeds_instname_clean
@@ -2282,7 +2332,10 @@ def _create_revelio_ipeds_inst_crosswalk(con, verbose=False, cache_path=None, sa
         WHEN match2.matchtype = 'fuzzy' THEN 'fuzzy'
         WHEN match3.matchtype = 'fuzzy_tie' THEN 'fuzzy_tie'
         ELSE 'none'
-      END AS matchtype
+      END AS matchtype,
+      match3.tie_candidate_count,
+      match3.tie_unitids,
+      match3.tie_instnames
     FROM revelio_inst AS rev
     LEFT JOIN (
       SELECT rev_key, right_id AS UNITID, right_name_clean AS ipeds_instname_clean, 'direct' AS matchtype
@@ -2362,7 +2415,9 @@ def _create_revelio_foia_inst_crosswalk(con, verbose=False, cache_path=None, sav
     SELECT
       rev.university_raw,
       rev.rev_key,
+      rev.revelio_inst_raw_id,
       rev.rev_instname_clean,
+      rev.revelio_inst_family_id,
       rev.rev_city_clean,
       rev.rev_state_clean,
       rev.rev_geo_matched,
@@ -2372,6 +2427,18 @@ def _create_revelio_foia_inst_crosswalk(con, verbose=False, cache_path=None, sav
         WHEN match3.f1_row_num IS NOT NULL THEN match3.f1_row_num
         ELSE NULL
       END AS f1_row_num,
+      CASE
+        WHEN match1.f1_row_num IS NOT NULL THEN match1.f1_inst_site_id
+        WHEN match2.f1_row_num IS NOT NULL THEN match2.f1_inst_site_id
+        WHEN match3.f1_row_num IS NOT NULL THEN match3.f1_inst_site_id
+        ELSE NULL
+      END AS f1_inst_site_id,
+      CASE
+        WHEN match1.f1_row_num IS NOT NULL THEN match1.f1_school_id
+        WHEN match2.f1_row_num IS NOT NULL THEN match2.f1_school_id
+        WHEN match3.f1_row_num IS NOT NULL THEN match3.f1_school_id
+        ELSE NULL
+      END AS f1_school_id,
       CASE 
         WHEN match1.f1_instname_clean IS NOT NULL THEN match1.f1_instname_clean
         WHEN match2.f1_instname_clean IS NOT NULL THEN match2.f1_instname_clean
@@ -2384,26 +2451,49 @@ def _create_revelio_foia_inst_crosswalk(con, verbose=False, cache_path=None, sav
         WHEN match2.matchtype = 'fuzzy' THEN 'fuzzy'
         WHEN match3.matchtype = 'fuzzy_tie' THEN 'fuzzy_tie'
         ELSE 'none'
-      END AS matchtype
+      END AS matchtype,
+      match3.tie_candidate_count,
+      match3.tie_f1_row_nums,
+      match3.tie_f1_instnames
     FROM revelio_inst AS rev
     LEFT JOIN (
-      SELECT rev_key, right_id AS f1_row_num, right_name_clean AS f1_instname_clean, 'direct' AS matchtype
+      SELECT
+        rev_key,
+        right_id AS f1_row_num,
+        r.f1_inst_site_id,
+        r.f1_school_id,
+        right_name_clean AS f1_instname_clean,
+        'direct' AS matchtype
       FROM rev_foia_good_matches
+      LEFT JOIN f1_inst AS r
+        ON rev_foia_good_matches.right_id = r.f1_row_num
     ) AS match1 USING (rev_key)
     LEFT JOIN (
-      SELECT rev_key, right_id AS f1_row_num, right_name_clean AS f1_instname_clean, 'fuzzy' AS matchtype
+      SELECT
+        rev_key,
+        right_id AS f1_row_num,
+        r.f1_inst_site_id,
+        r.f1_school_id,
+        right_name_clean AS f1_instname_clean,
+        'fuzzy' AS matchtype
       FROM rev_foia_good_second_matches
+      LEFT JOIN f1_inst AS r
+        ON rev_foia_good_second_matches.right_id = r.f1_row_num
     ) AS match2 USING (rev_key)
     LEFT JOIN (
       SELECT
         rev_key,
         right_id AS f1_row_num,
+        r.f1_inst_site_id,
+        r.f1_school_id,
         right_name_clean AS f1_instname_clean,
         tie_candidate_count,
         tie_right_ids AS tie_f1_row_nums,
         tie_right_names AS tie_f1_instnames,
         tie_matchtype AS matchtype
       FROM rev_foia_tie_matches
+      LEFT JOIN f1_inst AS r
+        ON rev_foia_tie_matches.right_id = r.f1_row_num
     ) AS match3 USING (rev_key)
     """)
 
@@ -2602,658 +2692,642 @@ def _create_three_way_inst_crosswalk(
         print("✅ Created three-way institution crosswalk table 'revelio_ipeds_foia_inst_crosswalk'.")
     return "revelio_ipeds_foia_inst_crosswalk"
 
+
+def _save_relation_parquet(con, relation_name: str, cache_path: str | None, verbose: bool = False, label: str | None = None):
+    if not cache_path:
+        return
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    con.sql(f"COPY (SELECT * FROM {relation_name}) TO '{cache_path}' (FORMAT PARQUET)")
+    if verbose:
+        rel_label = label or relation_name
+        print(f"💾 Saved {rel_label} to '{cache_path}'.")
+
+
+def _create_f1_ipeds_source_view(con):
+    site_id_expr = (
+        "f1_inst_site_id"
+        if _relation_has_column(con, "f1_inst_unitid_crosswalk", "f1_inst_site_id")
+        else _sql_f1_inst_site_id_expr("school_name", "f1_instname_clean", "f1_city_clean", "f1_state_clean", "f1_zip_clean")
+    )
+    school_id_expr = (
+        "f1_school_id"
+        if _relation_has_column(con, "f1_inst_unitid_crosswalk", "f1_school_id")
+        else _sql_f1_school_id_expr("school_name", "f1_instname_clean")
+    )
+    main_unitid_expr = "main_unitid" if _relation_has_column(con, "f1_inst_unitid_crosswalk", "main_unitid") else "UNITID"
+    tie_candidate_count_expr = (
+        "tie_candidate_count" if _relation_has_column(con, "f1_inst_unitid_crosswalk", "tie_candidate_count") else "NULL::BIGINT"
+    )
+    tie_unitids_expr = "tie_unitids" if _relation_has_column(con, "f1_inst_unitid_crosswalk", "tie_unitids") else "NULL"
+    tie_instnames_expr = "tie_instnames" if _relation_has_column(con, "f1_inst_unitid_crosswalk", "tie_instnames") else "NULL"
+    con.sql(
+        f"""
+        CREATE OR REPLACE VIEW f1_ipeds_source AS
+        SELECT
+          {site_id_expr} AS f1_inst_site_id,
+          {school_id_expr} AS f1_school_id,
+          school_name,
+          f1_row_num,
+          f1_instname_clean,
+          f1_city_clean,
+          f1_state_clean,
+          f1_zip_clean,
+          CAST({main_unitid_expr} AS BIGINT) AS main_unitid,
+          ipeds_instname_clean,
+          matchtype,
+          {tie_candidate_count_expr} AS tie_candidate_count,
+          {tie_unitids_expr} AS tie_unitids,
+          {tie_instnames_expr} AS tie_instnames
+        FROM f1_inst_unitid_crosswalk
+        """
+    )
+
+
+def _create_revelio_ipeds_source_view(con):
+    raw_id_expr = (
+        "r.revelio_inst_raw_id"
+        if _relation_has_column(con, "revelio_ipeds_inst_crosswalk", "revelio_inst_raw_id")
+        else _sql_revelio_inst_raw_id_expr("r.university_raw")
+    )
+    family_id_expr = (
+        "r.revelio_inst_family_id"
+        if _relation_has_column(con, "revelio_ipeds_inst_crosswalk", "revelio_inst_family_id")
+        else _sql_revelio_inst_family_id_expr("r.rev_instname_clean")
+    )
+    main_unitid_expr = "r.main_unitid" if _relation_has_column(con, "revelio_ipeds_inst_crosswalk", "main_unitid") else "r.UNITID"
+    tie_candidate_count_expr = (
+        "r.tie_candidate_count" if _relation_has_column(con, "revelio_ipeds_inst_crosswalk", "tie_candidate_count") else "NULL::BIGINT"
+    )
+    tie_unitids_expr = "r.tie_unitids" if _relation_has_column(con, "revelio_ipeds_inst_crosswalk", "tie_unitids") else "NULL"
+    tie_instnames_expr = "r.tie_instnames" if _relation_has_column(con, "revelio_ipeds_inst_crosswalk", "tie_instnames") else "NULL"
+    users_join = ""
+    users_select = "NULL::BIGINT AS n_revelio_users"
+    if _relation_exists(con, "revelio_institutions"):
+        users_join = "LEFT JOIN revelio_institutions AS ri ON r.university_raw = ri.university_raw"
+        users_select = "TRY_CAST(ri.n AS BIGINT) AS n_revelio_users"
+    con.sql(
+        f"""
+        CREATE OR REPLACE VIEW revelio_ipeds_source AS
+        SELECT
+          {raw_id_expr} AS revelio_inst_raw_id,
+          {family_id_expr} AS revelio_inst_family_id,
+          r.university_raw,
+          r.rev_key,
+          r.rev_instname_clean,
+          r.rev_city_clean,
+          r.rev_state_clean,
+          COALESCE(r.rev_geo_matched, FALSE) AS rev_geo_matched,
+          CAST({main_unitid_expr} AS BIGINT) AS main_unitid,
+          r.ipeds_instname_clean,
+          r.matchtype,
+          {tie_candidate_count_expr} AS tie_candidate_count,
+          {tie_unitids_expr} AS tie_unitids,
+          {tie_instnames_expr} AS tie_instnames,
+          {users_select}
+        FROM revelio_ipeds_inst_crosswalk AS r
+        {users_join}
+        """
+    )
+
+
+def _create_ipeds_main_institutions(con, verbose=False, cache_path=None, save_output=False):
+    source_priority_expr = """
+        CASE source
+            WHEN 'IPEDSINSTNM' THEN 1
+            WHEN 'INSTNM' THEN 2
+            WHEN 'PEPSSCHNAME' THEN 3
+            WHEN 'PEPSLOCNAME' THEN 4
+            ELSE 5
+        END
+    """
+    con.sql(
+        f"""
+        CREATE OR REPLACE TABLE ipeds_main_institutions AS
+        WITH base AS (
+          SELECT
+            TRY_CAST(UNITID AS BIGINT) AS main_unitid,
+            instname,
+            instname_raw,
+            source,
+            COALESCE(ALIAS, FALSE) AS alias_ind,
+            {_sql_clean_inst_name("instname")} AS ipeds_instname_clean,
+            {_sql_normalize("CITY")} AS ipeds_city_clean,
+            {_sql_state_name_to_abbr("STABBR")} AS ipeds_state_clean,
+            {_sql_clean_zip("ZIP")} AS ipeds_zip_clean
+          FROM ipeds_crosswalk
+          WHERE UNITID IS NOT NULL
+            AND TRY_CAST(UNITID AS BIGINT) IS NOT NULL
+            AND instname IS NOT NULL
+        ),
+        ranked AS (
+          SELECT
+            *,
+            ROW_NUMBER() OVER (
+              PARTITION BY main_unitid
+              ORDER BY
+                alias_ind ASC,
+                {source_priority_expr},
+                LENGTH(instname) DESC,
+                instname ASC
+            ) AS canonical_rank
+          FROM base
+        )
+        SELECT
+          main_unitid,
+          MAX(CASE WHEN canonical_rank = 1 THEN instname END) AS ipeds_name,
+          MAX(CASE WHEN canonical_rank = 1 THEN ipeds_instname_clean END) AS ipeds_instname_clean,
+          MAX(CASE WHEN canonical_rank = 1 THEN ipeds_city_clean END) AS ipeds_city_clean,
+          MAX(CASE WHEN canonical_rank = 1 THEN ipeds_state_clean END) AS ipeds_state_clean,
+          MAX(CASE WHEN canonical_rank = 1 THEN ipeds_zip_clean END) AS ipeds_zip_clean,
+          MAX(CASE WHEN canonical_rank = 1 THEN source END) AS ipeds_name_source,
+          ARRAY_AGG(DISTINCT instname) FILTER (WHERE instname IS NOT NULL) AS ipeds_name_variants,
+          ARRAY_AGG(DISTINCT instname_raw) FILTER (WHERE instname_raw IS NOT NULL) AS ipeds_name_raw_variants,
+          ARRAY_AGG(DISTINCT instname) FILTER (WHERE alias_ind AND instname IS NOT NULL) AS ipeds_alias_names,
+          ARRAY_AGG(DISTINCT ipeds_city_clean) FILTER (WHERE ipeds_city_clean IS NOT NULL AND ipeds_city_clean <> '') AS ipeds_city_values,
+          ARRAY_AGG(DISTINCT ipeds_state_clean) FILTER (WHERE ipeds_state_clean IS NOT NULL AND ipeds_state_clean <> '') AS ipeds_state_values,
+          ARRAY_AGG(DISTINCT ipeds_zip_clean) FILTER (WHERE ipeds_zip_clean IS NOT NULL AND ipeds_zip_clean <> '') AS ipeds_zip_values,
+          COUNT(DISTINCT instname) AS n_ipeds_name_variants
+        FROM ranked
+        GROUP BY main_unitid
+        """
+    )
+    if save_output:
+        _save_relation_parquet(con, "ipeds_main_institutions", cache_path, verbose=verbose, label="IPEDS main institutions")
+    if verbose:
+        print("✅ Created IPEDS main-institution dimension 'ipeds_main_institutions'.")
+    return "ipeds_main_institutions"
+
+
+def _create_f1_ipeds_edges(con, verbose=False, cache_path=None, save_output=False):
+    _create_f1_ipeds_source_view(con)
+    con.sql(
+        f"""
+        CREATE OR REPLACE TABLE f1_ipeds_edges AS
+        SELECT
+          f1_inst_site_id,
+          f1_school_id,
+          school_name,
+          f1_row_num,
+          f1_instname_clean,
+          f1_city_clean,
+          f1_state_clean,
+          f1_zip_clean,
+          main_unitid,
+          ipeds_instname_clean,
+          matchtype,
+          {_sql_match_group_expr("matchtype")} AS match_group,
+          {_sql_auto_promote_expr("matchtype")} AS auto_promote_ind,
+          {_sql_confidence_tier_expr("matchtype")} AS confidence_tier,
+          {_sql_match_score_expr("matchtype")} AS source_match_score,
+          tie_candidate_count,
+          tie_unitids,
+          tie_instnames
+        FROM f1_ipeds_source
+        """
+    )
+    con.sql(
+        """
+        CREATE OR REPLACE VIEW f1_ipeds_best AS
+        SELECT *
+        FROM f1_ipeds_edges
+        WHERE auto_promote_ind
+          AND main_unitid IS NOT NULL
+        """
+    )
+    if save_output:
+        _save_relation_parquet(con, "f1_ipeds_edges", cache_path, verbose=verbose, label="F1 ↔ IPEDS edge table")
+    if verbose:
+        print("✅ Created canonical F1 ↔ IPEDS edge table 'f1_ipeds_edges'.")
+    return "f1_ipeds_edges"
+
+
+def _create_revelio_ipeds_edges(con, verbose=False, cache_path=None, save_output=False):
+    _create_revelio_ipeds_source_view(con)
+    con.sql(
+        f"""
+        CREATE OR REPLACE TABLE revelio_ipeds_edges AS
+        SELECT
+          revelio_inst_raw_id,
+          revelio_inst_family_id,
+          university_raw,
+          rev_key,
+          rev_instname_clean,
+          rev_city_clean,
+          rev_state_clean,
+          rev_geo_matched,
+          main_unitid,
+          ipeds_instname_clean,
+          matchtype,
+          {_sql_match_group_expr("matchtype")} AS match_group,
+          {_sql_auto_promote_expr("matchtype")} AS auto_promote_ind,
+          {_sql_confidence_tier_expr("matchtype")} AS confidence_tier,
+          {_sql_match_score_expr("matchtype")} AS source_match_score,
+          tie_candidate_count,
+          tie_unitids,
+          tie_instnames,
+          n_revelio_users
+        FROM revelio_ipeds_source
+        """
+    )
+    if save_output:
+        _save_relation_parquet(con, "revelio_ipeds_edges", cache_path, verbose=verbose, label="Revelio ↔ IPEDS edge table")
+    if verbose:
+        print("✅ Created canonical Revelio ↔ IPEDS edge table 'revelio_ipeds_edges'.")
+    return "revelio_ipeds_edges"
+
+
+def _create_revelio_ipeds_best(con, verbose=False, cache_path=None, save_output=False):
+    con.sql(
+        """
+        CREATE OR REPLACE TABLE revelio_ipeds_best AS
+        SELECT
+          e.revelio_inst_raw_id,
+          e.revelio_inst_family_id,
+          e.university_raw,
+          e.rev_key,
+          e.rev_instname_clean,
+          e.rev_city_clean,
+          e.rev_state_clean,
+          e.rev_geo_matched,
+          e.main_unitid,
+          i.ipeds_name,
+          i.ipeds_instname_clean,
+          e.matchtype,
+          'revelio_ipeds_pairwise' AS matchsource,
+          CASE
+            WHEN e.matchtype = 'direct_tie' OR COALESCE(e.tie_candidate_count, 0) > 1 THEN TRUE
+            ELSE FALSE
+          END AS ambiguous_ind,
+          e.match_group,
+          e.confidence_tier,
+          e.source_match_score,
+          e.tie_candidate_count,
+          e.tie_unitids,
+          e.tie_instnames,
+          e.n_revelio_users
+        FROM revelio_ipeds_edges AS e
+        LEFT JOIN ipeds_main_institutions AS i
+          ON e.main_unitid = i.main_unitid
+        WHERE e.auto_promote_ind
+          AND e.main_unitid IS NOT NULL
+        """
+    )
+    if save_output:
+        _save_relation_parquet(con, "revelio_ipeds_best", cache_path, verbose=verbose, label="best Revelio ↔ IPEDS mappings")
+    if verbose:
+        print("✅ Created promoted Revelio ↔ IPEDS table 'revelio_ipeds_best'.")
+    return "revelio_ipeds_best"
+
+
+def _create_ipeds_to_revelio_families(con, verbose=False, cache_path=None, save_output=False):
+    con.sql(
+        """
+        CREATE OR REPLACE TABLE ipeds_to_revelio_families AS
+        WITH ranked AS (
+          SELECT
+            *,
+            ROW_NUMBER() OVER (
+              PARTITION BY main_unitid, revelio_inst_family_id
+              ORDER BY
+                COALESCE(n_revelio_users, 0) DESC,
+                match_group DESC,
+                university_raw ASC
+            ) AS family_raw_rank
+          FROM revelio_ipeds_best
+        ),
+        families AS (
+          SELECT
+            main_unitid,
+            revelio_inst_family_id,
+            MIN(rev_instname_clean) AS rev_instname_clean,
+            MAX(CASE WHEN family_raw_rank = 1 THEN revelio_inst_raw_id END) AS representative_revelio_inst_raw_id,
+            MAX(CASE WHEN family_raw_rank = 1 THEN university_raw END) AS representative_university_raw,
+            COUNT(DISTINCT revelio_inst_raw_id) AS n_revelio_inst_raw_variants,
+            CASE
+              WHEN COUNT(n_revelio_users) > 0 THEN SUM(COALESCE(n_revelio_users, 0))
+              ELSE COUNT(DISTINCT revelio_inst_raw_id)
+            END AS n_revelio_institution_records,
+            MAX(source_match_score) AS revelio_family_match_score,
+            MAX(match_group) AS revelio_family_match_group,
+            CASE MAX(match_group)
+              WHEN 4 THEN 'direct'
+              WHEN 3 THEN 'direct_tie'
+              WHEN 2 THEN 'fuzzy'
+              ELSE 'none'
+            END AS revelio_family_matchtype,
+            CASE WHEN MAX(CASE WHEN ambiguous_ind THEN 1 ELSE 0 END) = 1 THEN TRUE ELSE FALSE END AS ambiguous_ind,
+            ARRAY_AGG(DISTINCT university_raw) FILTER (WHERE university_raw IS NOT NULL) AS university_raw_variants
+          FROM ranked
+          GROUP BY main_unitid, revelio_inst_family_id
+        )
+        SELECT
+          f.*,
+          i.ipeds_name,
+          i.ipeds_instname_clean,
+          i.ipeds_city_clean,
+          i.ipeds_state_clean,
+          i.ipeds_zip_clean
+        FROM families AS f
+        LEFT JOIN ipeds_main_institutions AS i
+          ON f.main_unitid = i.main_unitid
+        """
+    )
+    if save_output:
+        _save_relation_parquet(con, "ipeds_to_revelio_families", cache_path, verbose=verbose, label="IPEDS → Revelio families")
+    if verbose:
+        print("✅ Created IPEDS → Revelio family mapping 'ipeds_to_revelio_families'.")
+    return "ipeds_to_revelio_families"
+
+
+def _create_f1_revelio_ipeds_resolution(con, verbose=False, cache_path=None, save_output=False):
+    con.sql(
+        """
+        CREATE OR REPLACE TABLE f1_revelio_ipeds_resolution AS
+        WITH resolved AS (
+          SELECT
+            f.f1_inst_site_id,
+            f.f1_school_id,
+            f.school_name AS f1_school_name,
+            f.f1_row_num,
+            f.f1_instname_clean,
+            f.f1_city_clean,
+            f.f1_state_clean,
+            f.f1_zip_clean,
+            f.main_unitid,
+            f.main_unitid AS UNITID,
+            i.ipeds_name,
+            r.revelio_inst_family_id,
+            r.representative_revelio_inst_raw_id AS revelio_inst_raw_id,
+            r.representative_university_raw AS rev_university_raw,
+            r.rev_instname_clean,
+            LEAST(f.source_match_score, r.revelio_family_match_score) AS school_match_score,
+            r.revelio_family_matchtype AS rev_matchtype,
+            r.revelio_family_match_group AS match_group,
+            'shared_main_unitid' AS rev_match_source,
+            f.matchtype AS f1_matchtype,
+            f.confidence_tier AS f1_confidence_tier,
+            r.n_revelio_inst_raw_variants,
+            r.n_revelio_institution_records
+          FROM f1_ipeds_best AS f
+          JOIN ipeds_to_revelio_families AS r
+            ON f.main_unitid = r.main_unitid
+          LEFT JOIN ipeds_main_institutions AS i
+            ON f.main_unitid = i.main_unitid
+        )
+        SELECT
+          *,
+          CASE WHEN COUNT(*) OVER (PARTITION BY f1_inst_site_id) > 1 THEN TRUE ELSE FALSE END AS site_match_ambiguous_ind
+        FROM resolved
+        """
+    )
+    if save_output:
+        _save_relation_parquet(
+            con,
+            "f1_revelio_ipeds_resolution",
+            cache_path,
+            verbose=verbose,
+            label="F1 ↔ Revelio shared-IPEDS resolution",
+        )
+    if verbose:
+        print("✅ Created F1 ↔ Revelio resolution table 'f1_revelio_ipeds_resolution'.")
+    return "f1_revelio_ipeds_resolution"
+
+
+def _create_f1_revelio_school_crosswalk(con, verbose=False, cache_path=None, save_output=False):
+    con.sql(
+        """
+        CREATE OR REPLACE TABLE f1_revelio_school_crosswalk AS
+        WITH family_agg AS (
+          SELECT
+            f1_school_id,
+            MAX(f1_school_name) AS f1_school_name,
+            MAX(f1_instname_clean) AS f1_instname_clean,
+            revelio_inst_family_id,
+            MAX(rev_instname_clean) AS rev_instname_clean,
+            COUNT(DISTINCT f1_inst_site_id) AS supporting_site_count,
+            COUNT(DISTINCT main_unitid) AS supporting_main_unitid_count,
+            MAX(n_revelio_inst_raw_variants) AS n_revelio_inst_raw_variants,
+            MAX(n_revelio_institution_records) AS n_revelio_institution_records,
+            MAX(school_match_score) AS match_score
+          FROM f1_revelio_ipeds_resolution
+          GROUP BY f1_school_id, revelio_inst_family_id
+        ),
+        raw_support AS (
+          SELECT
+            f1_school_id,
+            revelio_inst_family_id,
+            revelio_inst_raw_id,
+            rev_university_raw,
+            COUNT(DISTINCT f1_inst_site_id) AS raw_supporting_site_count,
+            MAX(n_revelio_institution_records) AS raw_n_revelio_institution_records
+          FROM f1_revelio_ipeds_resolution
+          GROUP BY f1_school_id, revelio_inst_family_id, revelio_inst_raw_id, rev_university_raw
+        ),
+        representatives AS (
+          SELECT
+            *,
+            ROW_NUMBER() OVER (
+              PARTITION BY f1_school_id, revelio_inst_family_id
+              ORDER BY
+                raw_supporting_site_count DESC,
+                raw_n_revelio_institution_records DESC,
+                rev_university_raw
+            ) AS raw_rank
+          FROM raw_support
+        ),
+        school_counts AS (
+          SELECT
+            f1_school_id,
+            COUNT(DISTINCT f1_inst_site_id) AS n_f1_sites
+          FROM f1_revelio_ipeds_resolution
+          GROUP BY f1_school_id
+        ),
+        ranked AS (
+          SELECT
+            fa.*,
+            sc.n_f1_sites,
+            MAX(fa.match_score) OVER (PARTITION BY fa.f1_school_id) AS top_match_score,
+            ROW_NUMBER() OVER (
+              PARTITION BY fa.f1_school_id
+              ORDER BY
+                fa.match_score DESC,
+                fa.supporting_site_count DESC,
+                fa.n_revelio_institution_records DESC,
+                fa.rev_instname_clean
+            ) AS school_match_rank,
+            COUNT(*) OVER (PARTITION BY fa.f1_school_id) AS family_count
+          FROM family_agg AS fa
+          LEFT JOIN school_counts AS sc USING (f1_school_id)
+        )
+        SELECT
+          r.f1_school_id,
+          r.f1_school_name,
+          r.f1_instname_clean,
+          rep.revelio_inst_raw_id,
+          r.revelio_inst_family_id,
+          rep.rev_university_raw,
+          r.rev_instname_clean,
+          r.n_f1_sites,
+          r.supporting_site_count,
+          r.supporting_main_unitid_count,
+          r.n_revelio_inst_raw_variants,
+          r.n_revelio_institution_records,
+          r.match_score,
+          r.match_score AS lev_sim,
+          r.match_score AS jw_sim,
+          CASE WHEN r.family_count > 1 THEN 1 ELSE 0 END AS match_ambiguous_ind,
+          r.school_match_rank,
+          r.top_match_score - r.match_score AS match_score_gap_from_top
+        FROM ranked AS r
+        LEFT JOIN representatives AS rep
+          ON r.f1_school_id = rep.f1_school_id
+         AND r.revelio_inst_family_id = rep.revelio_inst_family_id
+         AND rep.raw_rank = 1
+        ORDER BY r.f1_school_name, r.school_match_rank, r.rev_instname_clean
+        """
+    )
+    if save_output:
+        _save_relation_parquet(
+            con,
+            "f1_revelio_school_crosswalk",
+            cache_path,
+            verbose=verbose,
+            label="F1 ↔ Revelio school-family crosswalk",
+        )
+    if verbose:
+        print("✅ Created F1 ↔ Revelio school crosswalk 'f1_revelio_school_crosswalk'.")
+    return "f1_revelio_school_crosswalk"
+
+
+def _create_canonical_us_inst_mappings(
+    con,
+    *,
+    verbose=False,
+    ipeds_main_path=None,
+    revelio_ipeds_edges_path=None,
+    revelio_ipeds_best_path=None,
+    ipeds_to_revelio_families_path=None,
+    f1_ipeds_edges_path=None,
+    f1_revelio_ipeds_resolution_path=None,
+    f1_revelio_school_crosswalk_path=None,
+    save_output=False,
+):
+    _create_ipeds_main_institutions(con, verbose=verbose, cache_path=ipeds_main_path, save_output=save_output)
+    _create_f1_ipeds_edges(con, verbose=verbose, cache_path=f1_ipeds_edges_path, save_output=save_output)
+    _create_revelio_ipeds_edges(con, verbose=verbose, cache_path=revelio_ipeds_edges_path, save_output=save_output)
+    _create_revelio_ipeds_best(con, verbose=verbose, cache_path=revelio_ipeds_best_path, save_output=save_output)
+    _create_ipeds_to_revelio_families(con, verbose=verbose, cache_path=ipeds_to_revelio_families_path, save_output=save_output)
+    _create_f1_revelio_ipeds_resolution(
+        con,
+        verbose=verbose,
+        cache_path=f1_revelio_ipeds_resolution_path,
+        save_output=save_output,
+    )
+    _create_f1_revelio_school_crosswalk(
+        con,
+        verbose=verbose,
+        cache_path=f1_revelio_school_crosswalk_path,
+        save_output=save_output,
+    )
+
+    if verbose:
+        n_f1_sites = int(_scalar(con, "SELECT COUNT(*) FROM f1_ipeds_edges WHERE auto_promote_ind AND main_unitid IS NOT NULL"))
+        n_rev_raw = int(_scalar(con, "SELECT COUNT(*) FROM revelio_ipeds_best"))
+        n_res = int(_scalar(con, "SELECT COUNT(*) FROM f1_revelio_ipeds_resolution"))
+        n_school = int(_scalar(con, "SELECT COUNT(*) FROM f1_revelio_school_crosswalk"))
+        print(f"Canonical promoted F1 sites: {n_f1_sites:,}")
+        print(f"Canonical promoted Revelio raw schools: {n_rev_raw:,}")
+        print(f"Canonical F1 ↔ Revelio site-family rows: {n_res:,}")
+        print(f"Canonical F1 ↔ Revelio school-family rows: {n_school:,}")
+    return "f1_revelio_school_crosswalk"
+
+
+def _stage_external_us_school_mappings(
+    con,
+    *,
+    verbose=False,
+    revelio_cleaning_repo_root: str | None = None,
+    ipeds_main_institutions_path: str,
+    revelio_ipeds_edges_path: str,
+    revelio_ipeds_best_path: str,
+    ipeds_to_revelio_families_path: str,
+    f1_ipeds_edges_path: str,
+    f1_revelio_ipeds_resolution_path: str,
+    f1_revelio_school_crosswalk_path: str,
+):
+    artifact_paths = stage_external_us_school_matching_artifacts(
+        artifact_paths={
+            "ipeds_main_institutions": ipeds_main_institutions_path,
+            "revelio_ipeds_edges": revelio_ipeds_edges_path,
+            "revelio_ipeds_best": revelio_ipeds_best_path,
+            "ipeds_to_revelio_families": ipeds_to_revelio_families_path,
+            "f1_ipeds_edges": f1_ipeds_edges_path,
+            "f1_revelio_ipeds_resolution": f1_revelio_ipeds_resolution_path,
+            "f1_revelio_school_crosswalk": f1_revelio_school_crosswalk_path,
+        },
+        revelio_cleaning_repo_root=revelio_cleaning_repo_root,
+        verbose=verbose,
+    )
+
+    for table_name, parquet_path in artifact_paths.items():
+        con.sql(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_parquet('{str(parquet_path)}')")
+
+    if verbose:
+        _print_subsection("External US school matching summary")
+        print(f"IPEDS main institutions: {int(_scalar(con, 'SELECT COUNT(*) FROM ipeds_main_institutions')):,}")
+        print(f"F1/IPEDS edges: {int(_scalar(con, 'SELECT COUNT(*) FROM f1_ipeds_edges')):,}")
+        print(f"Promoted Revelio/IPEDS rows: {int(_scalar(con, 'SELECT COUNT(*) FROM revelio_ipeds_best')):,}")
+        print(
+            f"F1/Revelio school crosswalk rows: "
+            f"{int(_scalar(con, 'SELECT COUNT(*) FROM f1_revelio_school_crosswalk')):,}"
+        )
+    return "f1_revelio_school_crosswalk"
+
+
 def _create_employer_crosswalk(
     con,
     verbose=False,
     cache_path=None,
     entity_cache_path=None,
+    rcid_crosswalk_path=None,
     load_cache=False,
     save_output=False,
     test = False,
     testn = None
 ):
     """
-    Create a crosswalk between FOIA employer names and Revelio company RCIDs.
+    Stage the canonical external F1 employer crosswalk into the local workspace.
     """
     if load_cache and cache_path and os.path.exists(cache_path):
         con.sql(
             f"CREATE OR REPLACE TABLE f1_employer_final_crosswalk AS SELECT * FROM read_parquet('{cache_path}')"
         )
         if verbose:
-            loaded_msg = f"✅ Loaded employer final crosswalk from '{cache_path}'"
-            print(loaded_msg)
+            print(f"✅ Loaded staged employer crosswalk from '{cache_path}'")
         return "f1_employer_final_crosswalk"
 
     if verbose:
         _print_section("Employer Crosswalk")
-
-    con.sql(
-    f"""
-        CREATE OR REPLACE TABLE f1_employers_raw AS
-        WITH base AS (
-          SELECT DISTINCT
-            employer_name,
-            {_sql_clean_company_name("employer_name")} AS f1_empname_clean,
-            {_sql_normalize("employer_city")} AS f1_city_clean,
-            {_sql_state_name_to_abbr("employer_state")} AS f1_state_clean,
-            {_sql_clean_zip("employer_zip_code")} AS f1_zip_clean
-          FROM allyrs_raw
-          WHERE employer_name IS NOT NULL ORDER BY employer_name {f"LIMIT {testn}" if test else ""}
-        )
-        SELECT
-          employer_name,
-          f1_empname_clean,
-          f1_city_clean,
-          f1_state_clean,
-          f1_zip_clean,
-          ROW_NUMBER() OVER(ORDER BY f1_empname_clean, f1_city_clean, f1_state_clean, f1_zip_clean, employer_name) AS f1_emp_row_num
-        FROM base
-    """)
-
-    base_row_nums = [int(row[0]) for row in con.sql("SELECT f1_emp_row_num FROM f1_employers_raw ORDER BY f1_emp_row_num").fetchall()]
-    raw_employer_cnt = len(base_row_nums)
-    if verbose:
-        print(f"Employer staging: {raw_employer_cnt:,} unique employer/location combinations.")
-
-    # Generate edges based on similarity criteria
-    entity_block_join = ""
-    entity_block_nonnull = ""
-    if ENTITY_NAME_BLOCK_PREFIX_LEN and ENTITY_NAME_BLOCK_PREFIX_LEN > 0:
-        entity_block_join = f"AND substr(a.f1_empname_clean, 1, {ENTITY_NAME_BLOCK_PREFIX_LEN}) = substr(b.f1_empname_clean, 1, {ENTITY_NAME_BLOCK_PREFIX_LEN})"
-        entity_block_nonnull = (
-            f"AND substr(a.f1_empname_clean, 1, {ENTITY_NAME_BLOCK_PREFIX_LEN}) <> '' "
-            f"AND substr(b.f1_empname_clean, 1, {ENTITY_NAME_BLOCK_PREFIX_LEN}) <> ''"
-        )
-    edge_candidates = con.sql(
-    f"""
-        SELECT
-          a.f1_emp_row_num AS row_a,
-          b.f1_emp_row_num AS row_b
-        FROM f1_employers_raw AS a
-        JOIN f1_employers_raw AS b
-          ON a.f1_emp_row_num < b.f1_emp_row_num
-         {entity_block_join}
-         AND a.f1_empname_clean IS NOT NULL
-         AND b.f1_empname_clean IS NOT NULL
-         {entity_block_nonnull}
-    WHERE
-      (
-        a.f1_state_clean = b.f1_state_clean
-        AND a.f1_city_clean = b.f1_city_clean
-        AND a.f1_city_clean NOT IN ({COMMON_CITY_LIST})
-        AND jaro_winkler_similarity(a.f1_empname_clean, b.f1_empname_clean) >= 0.95
-      )
-      OR jaro_winkler_similarity(a.f1_empname_clean, b.f1_empname_clean) >= 0.97
-    """
-    ).fetchall()
-
-    parent = {row: row for row in base_row_nums}
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra == rb:
-            return
-        if ra < rb:
-            parent[rb] = ra
-        else:
-            parent[ra] = rb
-
-    for row_a, row_b in edge_candidates:
-        if row_a is None or row_b is None:
-            continue
-        union(int(row_a), int(row_b))
-
-    root_to_entity = {}
-    entity_ids = []
-    for row in base_row_nums:
-        root = find(row)
-        if root not in root_to_entity:
-            root_to_entity[root] = len(root_to_entity) + 1
-        entity_ids.append(root_to_entity[root])
-
-    entity_mapping_df = pd.DataFrame(
-        {
-            "f1_emp_row_num": base_row_nums,
-            "f1_emp_entity_id": entity_ids,
-        }
+    runtime_cfg = load_config(DEFAULT_CONFIG_PATH)
+    external_cfg = get_cfg_section(runtime_cfg, "external_employer_matching")
+    external_output_dir = str(
+        external_cfg.get("revelio_cleaning_output_dir", f"{root}/revelio-cleaning/data/company_matching_f1")
     )
-    con.register("f1_emp_entity_mapping_df", entity_mapping_df)
-    con.sql(
-    """
-        CREATE OR REPLACE TABLE f1_emp_entity_mapping AS
-        SELECT * FROM f1_emp_entity_mapping_df
-    """)
-
-    con.sql(
-    """
-        CREATE OR REPLACE VIEW f1_employers AS
-        SELECT
-          raw.*,
-          mapping.f1_emp_entity_id
-        FROM f1_employers_raw AS raw
-        LEFT JOIN f1_emp_entity_mapping AS mapping USING (f1_emp_row_num)
-    """)
-
-    total_entities = len(set(entity_ids))
-    multi_member_entities = entity_mapping_df.groupby("f1_emp_entity_id").size()
-    multi_member_count = (multi_member_entities > 1).sum()
+    match_source = str(external_cfg.get("match_source", "deterministic")).strip().lower()
+    staged = stage_external_f1_crosswalk(
+        external_output_dir=external_output_dir,
+        match_source=match_source,
+        out_path=str(cache_path) if save_output and cache_path else None,
+        con=con,
+        table_name="f1_employer_final_crosswalk",
+        verbose=verbose,
+    )
     if verbose:
+        matched_total = int(staged["preferred_rcid"].notna().sum())
         print(
-            f"Employer entity clustering produced {total_entities:,} entities from {len(base_row_nums):,} employer names "
-            f"({multi_member_count:,} with multiple location/name variants)."
+            "✅ Staged external employer crosswalk 'f1_employer_final_crosswalk' "
+            f"with {len(staged):,} rows ({matched_total:,} unique preferred RCID rows)."
         )
-
-    con.sql(
-    """
-    CREATE OR REPLACE VIEW f1_employer_entities AS
-    SELECT
-      f1_emp_entity_id,
-      MIN(f1_emp_row_num) AS anchor_f1_emp_row_num,
-      MIN(f1_empname_clean) AS f1_empname_clean,
-      COUNT(*) AS employer_variant_count,
-      array_agg(DISTINCT employer_name) AS employer_aliases,
-      array_agg(DISTINCT f1_city_clean) FILTER (WHERE f1_city_clean IS NOT NULL) AS city_list,
-      array_agg(DISTINCT f1_state_clean) FILTER (WHERE f1_state_clean IS NOT NULL) AS state_list,
-      array_agg(DISTINCT f1_zip_clean) FILTER (WHERE f1_zip_clean IS NOT NULL) AS zip_list
-    FROM f1_employers
-    GROUP BY f1_emp_entity_id
-    """)
-
-    rev_employers = con.sql(
-    f"""
-        SELECT
-          rcid,
-          {_sql_clean_company_name("company")} AS rev_company_clean,
-          {_sql_normalize("hq_city")} AS rev_city_clean,
-          {_sql_state_name_to_abbr("hq_state")} AS rev_state_clean,
-          {_sql_clean_zip("hq_zip_code")} AS rev_zip_clean,
-          UPPER(TRIM(hq_country)) AS rev_country_clean
-        FROM revelio_companies
-        WHERE company IS NOT NULL
-        GROUP BY rcid, company, hq_city, hq_state, hq_zip_code, hq_country
-    """)
-    rev_employers.create_view("rev_employers")
-
-    con.sql(
-    """
-      CREATE OR REPLACE VIEW employer_raw_matches AS
-      WITH raw_match AS (
-        SELECT
-          f1_emp.*,
-          rev_emp.rcid,
-          rev_emp.rev_company_clean,
-          rev_emp.rev_city_clean,
-          rev_emp.rev_state_clean,
-          rev_emp.rev_zip_clean,
-          rev_emp.rev_country_clean,
-          CASE
-            WHEN f1_emp.f1_zip_clean = rev_emp.rev_zip_clean THEN 5
-            WHEN f1_emp.f1_city_clean = rev_emp.rev_city_clean AND f1_emp.f1_state_clean = rev_emp.rev_state_clean THEN 4
-            WHEN f1_emp.f1_state_clean = rev_emp.rev_state_clean THEN 3
-            WHEN rev_emp.rcid IS NOT NULL THEN 1
-            ELSE 0
-          END AS match_rank,
-          MAX(
-            CASE
-              WHEN f1_emp.f1_zip_clean = rev_emp.rev_zip_clean THEN 5
-              WHEN f1_emp.f1_city_clean = rev_emp.rev_city_clean AND f1_emp.f1_state_clean = rev_emp.rev_state_clean THEN 4
-              WHEN f1_emp.f1_state_clean = rev_emp.rev_state_clean THEN 3
-              WHEN rev_emp.rcid IS NOT NULL THEN 1
-              ELSE 0
-            END
-          ) OVER(PARTITION BY f1_emp.f1_emp_row_num) AS max_match_rank
-        FROM f1_employers AS f1_emp
-        LEFT JOIN rev_employers AS rev_emp
-          ON f1_emp.f1_empname_clean = rev_emp.rev_company_clean
-      )
-      SELECT
-        *,
-        COUNT(rcid) OVER(PARTITION BY f1_emp_entity_id) AS match_count
-      FROM raw_match
-      WHERE match_rank = max_match_rank
-    """)
-
-    _print_subsection("Employer match summary")
-    total_employers = con.sql("SELECT COUNT(DISTINCT f1_emp_entity_id) AS cnt FROM f1_employers").df().iloc[0, 0]
-    if verbose:
-        print(f"Total FOIA entities: {total_employers:,}")
-
-    employer_good_matches = con.sql("SELECT * FROM employer_raw_matches WHERE match_count = 1")
-    employer_good_matches.create_view("employer_good_matches")
-    employer_direct_cnt = con.sql("SELECT COUNT(DISTINCT f1_emp_entity_id) AS cnt FROM employer_good_matches").df().iloc[0, 0]
-    if verbose:
-        print(f"Direct entity matches (unique RCID): {employer_direct_cnt:,}")
-
-    us_country_list = ",".join([f"'{c}'" for c in US_COUNTRY_CODES])
-    employer_rematch_sample_filter = ""
-    if REMATCH_SAMPLE_SIZE is not None:
-        employer_rematch_sample_filter = f"WHERE rn <= {REMATCH_SAMPLE_SIZE}"
-    unmatched_cnt = con.sql("SELECT COUNT(DISTINCT f1_emp_row_num) AS cnt FROM employer_raw_matches WHERE match_count = 0").df().iloc[0, 0]
-    if verbose:
-        sample_note = f" (capped at {REMATCH_SAMPLE_SIZE:,})" if REMATCH_SAMPLE_SIZE is not None else ""
-        print(f"Employers requiring fuzzy rematch: {unmatched_cnt:,}{sample_note}")
-    fuzzy_block_join = ""
-    fuzzy_prefix_expr = "FALSE"
-    if FUZZY_NAME_BLOCK_PREFIX_LEN and FUZZY_NAME_BLOCK_PREFIX_LEN > 0:
-        fuzzy_prefix_expr = (
-            f"substr(f1_rematch.f1_empname_clean, 1, {FUZZY_NAME_BLOCK_PREFIX_LEN}) = "
-            f"substr(rev_employers.rev_company_clean, 1, {FUZZY_NAME_BLOCK_PREFIX_LEN})"
-        )
-    token_stopwords = ", ".join([f"'{w}'" for w in CITY_STOPWORDS])
-    con.sql(
-    f"""
-    CREATE OR REPLACE TABLE employer_second_match_full AS
-      WITH unmatched AS (
-        SELECT f1_emp_row_num
-        FROM employer_raw_matches
-        WHERE match_count = 0
-      ),
-      rematch_samp AS (
-        SELECT f1_emp_row_num
-        FROM (
-          SELECT
-            f1_emp_row_num,
-            ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn
-          FROM unmatched
-        )
-        {employer_rematch_sample_filter}
-      ),
-      f1_rematch AS (
-        SELECT f1_employers.*
-        FROM rematch_samp
-        JOIN f1_employers USING(f1_emp_row_num)
-      ),
-      f1_tokens AS (
-        SELECT
-          f1_emp_row_num,
-          token
-        FROM f1_rematch,
-        UNNEST(str_split(f1_empname_clean, ' ')) AS t(token)
-        WHERE token IS NOT NULL
-          AND LENGTH(token) >= 3
-          AND token NOT IN ({token_stopwords})
-      ),
-      rev_tokens AS (
-        SELECT
-          rcid,
-          token
-        FROM rev_employers,
-        UNNEST(str_split(rev_company_clean, ' ')) AS t(token)
-        WHERE token IS NOT NULL
-          AND LENGTH(token) >= 3
-          AND token NOT IN ({token_stopwords})
-      ),
-      rev_token_freq AS (
-        SELECT token, COUNT(*) AS cnt
-        FROM rev_tokens
-        GROUP BY token
-        ORDER BY cnt DESC
-        LIMIT 1000
-      ),
-      token_block_pairs AS (
-        SELECT DISTINCT
-          f.f1_emp_row_num,
-          r.rcid
-        FROM f1_tokens AS f
-        JOIN rev_tokens AS r USING (token)
-        WHERE f.token NOT IN (SELECT token FROM rev_token_freq)
-      ),
-      candidate_scores AS (
-        SELECT
-          f1_rematch.f1_emp_row_num,
-          f1_rematch.f1_emp_entity_id,
-          f1_rematch.employer_name,
-          f1_rematch.f1_empname_clean,
-          f1_rematch.f1_city_clean,
-          f1_rematch.f1_state_clean,
-      f1_rematch.f1_zip_clean,
-      rev_employers.rcid,
-      rev_employers.rev_company_clean,
-      rev_employers.rev_city_clean,
-      rev_employers.rev_state_clean,
-      rev_employers.rev_zip_clean,
-      rev_employers.rev_country_clean,
-      substr(f1_rematch.f1_empname_clean, 1, 1) AS f1_first_char,
-      substr(rev_employers.rev_company_clean, 1, 1) AS rev_first_char,
-      CASE
-        WHEN f1_rematch.f1_zip_clean IS NOT NULL
-             AND rev_employers.rev_zip_clean IS NOT NULL
-             AND f1_rematch.f1_zip_clean = rev_employers.rev_zip_clean
-        THEN TRUE ELSE FALSE END AS is_zip_match,
-      CASE
-        WHEN f1_rematch.f1_city_clean IS NOT NULL
-             AND rev_employers.rev_city_clean IS NOT NULL
-             AND f1_rematch.f1_city_clean = rev_employers.rev_city_clean
-             AND f1_rematch.f1_city_clean NOT IN ({COMMON_CITY_LIST})
-        THEN TRUE ELSE FALSE END AS is_city_match,
-      jaro_winkler_similarity(f1_rematch.f1_empname_clean, rev_employers.rev_company_clean) AS name_jaro_winkler,
-      CASE
-        WHEN f1_rematch.f1_empname_clean IS NULL OR rev_employers.rev_company_clean IS NULL OR LENGTH(rev_employers.rev_company_clean) <= 5 THEN FALSE
-        WHEN POSITION(rev_employers.rev_company_clean IN f1_rematch.f1_empname_clean) > 0 THEN TRUE
-        WHEN POSITION(f1_rematch.f1_empname_clean IN rev_employers.rev_company_clean) > 0 THEN TRUE
-        ELSE FALSE
-      END AS is_subset_match
-    FROM f1_rematch
-    JOIN rev_employers
-      ON (
-        rev_employers.rev_state_clean IS NULL
-        OR TRIM(rev_employers.rev_state_clean) = ''
-        OR f1_rematch.f1_state_clean = rev_employers.rev_state_clean
-      )
-    LEFT JOIN token_block_pairs AS tb
-      ON tb.f1_emp_row_num = f1_rematch.f1_emp_row_num
-     AND tb.rcid = rev_employers.rcid
-    WHERE rev_employers.rev_country_clean IN ({us_country_list})
-      AND ({fuzzy_prefix_expr} OR tb.rcid IS NOT NULL)
-    ),
-      ranked_candidates AS (
-        SELECT
-          *,
-          ROW_NUMBER() OVER (
-            PARTITION BY f1_emp_entity_id
-            ORDER BY
-              is_subset_match DESC,
-              is_zip_match DESC,
-              is_city_match DESC,
-              name_jaro_winkler DESC,
-              rcid
-          ) AS candidate_rank
-        FROM candidate_scores
-        WHERE name_jaro_winkler IS NOT NULL
-      )
-      SELECT *
-      FROM ranked_candidates
-    """)
-    
-    con.sql(f"""CREATE OR REPLACE TABLE employer_second_match AS SELECT *, COUNT(DISTINCT rcid) OVER(PARTITION BY f1_emp_entity_id) AS count FROM employer_second_match_full WHERE 
-          (is_subset_match AND rev_company_clean ~ '.*\\s.*' AND name_jaro_winkler >= 0.97)
-          OR ((is_zip_match OR is_city_match OR rev_city_clean IS NULL) AND name_jaro_winkler >= 0.95) OR
-          (is_subset_match AND (is_city_match OR is_zip_match) AND name_jaro_winkler >= 0.95)
-          OR name_jaro_winkler >= 0.99""")
-    
-    con.sql("CREATE OR REPLACE VIEW employer_good_second_matches AS SELECT * FROM employer_second_match WHERE count = 1")
-    
-    employer_second_total = con.sql("SELECT COUNT(DISTINCT f1_emp_entity_id) AS cnt FROM employer_second_match").df().iloc[0, 0]
-    print(
-        f"Employer fuzzy matches: {employer_second_total} rows ({employer_second_total / total_employers * 100:.2f}% of entities)"
-    )
-
-    con.sql(
-    f"""
-      CREATE OR REPLACE VIEW employer_tie_matches AS
-      WITH direct_tie_candidates AS (
-        SELECT
-          *,
-          CASE
-            WHEN f1_zip_clean IS NOT NULL AND rev_zip_clean IS NOT NULL AND f1_zip_clean = rev_zip_clean THEN TRUE
-            ELSE FALSE
-          END AS is_zip_match,
-          CASE
-            WHEN f1_city_clean IS NOT NULL
-                 AND rev_city_clean IS NOT NULL
-                 AND f1_city_clean = rev_city_clean
-                 AND f1_city_clean NOT IN ({COMMON_CITY_LIST})
-            THEN TRUE
-            ELSE FALSE
-          END AS is_city_match
-        FROM employer_raw_matches
-        WHERE match_count > 1
-      ),
-      ranked_direct_ties AS (
-        SELECT
-          *,
-          ROW_NUMBER() OVER (
-            PARTITION BY f1_emp_row_num
-            ORDER BY
-              is_zip_match DESC,
-              is_city_match DESC,
-              rcid
-          ) AS tie_rank,
-          COUNT(*) OVER (PARTITION BY f1_emp_row_num) AS tie_candidate_count
-        FROM direct_tie_candidates
-      ),
-      aggregated_direct_ties AS (
-        SELECT
-          f1_emp_row_num,
-          array_agg(DISTINCT rcid) AS tie_rcids,
-          array_agg(DISTINCT rev_company_clean) AS tie_company_names
-        FROM ranked_direct_ties
-        GROUP BY f1_emp_row_num
-      ),
-      fuzzy_tie_ranked AS (
-        SELECT
-          *,
-          ROW_NUMBER() OVER (
-            PARTITION BY f1_emp_entity_id
-            ORDER BY candidate_rank, rcid
-          ) AS tie_rank,
-          COUNT(*) OVER (PARTITION BY f1_emp_entity_id) AS tie_candidate_count
-        FROM employer_second_match
-        WHERE count > 1
-      ),
-      fuzzy_tie_aggregated AS (
-        SELECT
-          f1_emp_entity_id,
-          array_agg(DISTINCT rcid) AS tie_rcids,
-          array_agg(DISTINCT rev_company_clean) AS tie_company_names
-        FROM employer_second_match
-        WHERE count > 1
-        GROUP BY f1_emp_entity_id
-      )
-      SELECT
-        rd.f1_emp_row_num,
-        rd.employer_name,
-        rd.f1_empname_clean,
-        rd.rcid,
-        rd.rev_company_clean,
-        rd.tie_candidate_count,
-        ad.tie_rcids,
-        ad.tie_company_names,
-        'direct_tie' AS tie_matchtype
-      FROM ranked_direct_ties AS rd
-      JOIN aggregated_direct_ties AS ad USING (f1_emp_row_num)
-      WHERE rd.tie_rank = 1
-      UNION ALL
-      SELECT
-        fe.f1_emp_row_num,
-        fe.employer_name,
-        fe.f1_empname_clean,
-        fr.rcid,
-        fr.rev_company_clean,
-        fr.tie_candidate_count,
-        fa.tie_rcids,
-        fa.tie_company_names,
-        'fuzzy_tie' AS tie_matchtype
-      FROM fuzzy_tie_ranked AS fr
-      JOIN fuzzy_tie_aggregated AS fa USING (f1_emp_entity_id)
-      JOIN f1_employers AS fe USING (f1_emp_entity_id)
-      WHERE fr.tie_rank = 1
-    """)
-    if verbose:
-        tie_count = int(_scalar(con, "SELECT COUNT(*) AS cnt FROM employer_tie_matches"))
-        if tie_count == 0:
-            print("Ambiguous employer matches: 0 employers with equal top ranks")
-        else:
-            avg_ties = float(_scalar(con, "SELECT AVG(tie_candidate_count) AS avg_cnt FROM employer_tie_matches"))
-            print(
-                f"Ambiguous employer matches (direct + fuzzy): {tie_count:,} employers "
-                f"(avg candidates {avg_ties:.2f})"
-            )
-
-    con.sql(
-    """
-    CREATE OR REPLACE TABLE f1_employer_rcid_crosswalk AS
-    SELECT
-      f1_employers.*,
-      match1.rcid AS direct_rcid,
-      match1.rev_company_clean AS direct_company_name,
-      match2.rcid AS fuzzy_rcid,
-      match2.rev_company_clean AS fuzzy_company_name,
-      match3.rcid AS tie_rcid,
-      match3.rev_company_clean AS tie_company_name,
-      match3.tie_matchtype,
-      match3.tie_candidate_count,
-      match3.tie_rcids,
-      match3.tie_company_names,
-      CASE
-        WHEN match1.matchtype = 'direct' THEN 'direct'
-        WHEN match2.matchtype = 'fuzzy' THEN 'fuzzy'
-        WHEN match3.matchtype = 'direct_tie' THEN 'direct_tie'
-        WHEN match3.matchtype = 'fuzzy_tie' THEN 'fuzzy_tie'
-        ELSE 'none'
-      END AS matchtype
-    FROM f1_employers
-    LEFT JOIN (
-      SELECT f1_emp_row_num, rcid, rev_company_clean, 'direct' AS matchtype
-      FROM employer_good_matches
-    ) AS match1 USING (f1_emp_row_num)
-    LEFT JOIN (
-      SELECT f1_emp_row_num, rcid, rev_company_clean, 'fuzzy' AS matchtype
-      FROM employer_good_second_matches
-    ) AS match2 USING (f1_emp_row_num)
-    LEFT JOIN (
-      SELECT f1_emp_row_num, rcid, rev_company_clean, tie_matchtype, tie_candidate_count, tie_rcids, tie_company_names, tie_matchtype AS matchtype
-      FROM employer_tie_matches
-    ) AS match3 USING (f1_emp_row_num)
-    """)
-    if verbose:
-        print("✅ Created FOIA employer to Revelio RCID crosswalk table 'f1_employer_rcid_crosswalk'.")
-    con.sql(
-    """
-    CREATE OR REPLACE TABLE f1_employer_entity_crosswalk AS
-    WITH match_union AS (
-      SELECT
-        f1_emp_entity_id,
-        direct_rcid AS rcid,
-        direct_company_name AS company_name,
-        'direct' AS match_source
-      FROM f1_employer_rcid_crosswalk
-      WHERE direct_rcid IS NOT NULL
-      UNION ALL
-      SELECT
-        f1_emp_entity_id,
-        fuzzy_rcid AS rcid,
-        fuzzy_company_name AS company_name,
-        'fuzzy' AS match_source
-      FROM f1_employer_rcid_crosswalk
-      WHERE fuzzy_rcid IS NOT NULL
-      UNION ALL
-      SELECT
-        f1_emp_entity_id,
-        tie_rcid AS rcid,
-        tie_company_name AS company_name,
-        'tie_primary' AS match_source
-      FROM f1_employer_rcid_crosswalk
-      WHERE tie_rcid IS NOT NULL
-      UNION ALL
-      SELECT
-        cw.f1_emp_entity_id,
-        list_element(cw.tie_rcids, idx) AS tie_rcid_candidate,
-        list_element(cw.tie_company_names, idx) AS tie_company_candidate,
-        'tie_pool' AS match_source
-      FROM f1_employer_rcid_crosswalk AS cw,
-      LATERAL UNNEST(range(1, array_length(cw.tie_rcids) + 1)) AS t(idx)
-      WHERE cw.tie_rcids IS NOT NULL
-        AND cw.tie_company_names IS NOT NULL
-        AND array_length(cw.tie_company_names) >= idx
-    ),
-    aggregated AS (
-      SELECT
-        f1_emp_entity_id,
-        array_agg(DISTINCT rcid) AS matched_rcids,
-        array_agg(DISTINCT company_name) FILTER (WHERE company_name IS NOT NULL) AS matched_company_names
-      FROM match_union
-      GROUP BY f1_emp_entity_id
-    ),
-    prioritized AS (
-      SELECT
-        f1_emp_entity_id,
-        rcid,
-        company_name,
-        match_source
-      FROM (
-        SELECT
-          f1_emp_entity_id,
-          rcid,
-          company_name,
-          match_source,
-          CASE
-            WHEN match_source = 'direct' THEN 1
-            WHEN match_source = 'fuzzy' THEN 2
-            ELSE 3
-          END AS source_rank,
-          ROW_NUMBER() OVER (
-            PARTITION BY f1_emp_entity_id
-            ORDER BY source_rank, rcid
-          ) AS rn
-        FROM match_union
-      )
-      WHERE rn = 1
-    ),
-    match_presence AS (
-      SELECT
-        f1_emp_entity_id,
-        MAX(CASE WHEN match_source = 'direct' THEN 1 ELSE 0 END) AS has_direct_match,
-        MAX(CASE WHEN match_source = 'fuzzy' THEN 1 ELSE 0 END) AS has_fuzzy_match,
-        MAX(CASE WHEN match_source LIKE 'tie%' THEN 1 ELSE 0 END) AS has_tie_match
-      FROM match_union
-      GROUP BY f1_emp_entity_id
-    )
-    SELECT
-      entities.*,
-      aggregated.matched_rcids,
-      aggregated.matched_company_names,
-      prioritized.rcid AS preferred_rcid,
-      prioritized.company_name AS preferred_company_name,
-      prioritized.match_source AS preferred_match_source,
-      COALESCE(match_presence.has_direct_match, 0) AS has_direct_match,
-      COALESCE(match_presence.has_fuzzy_match, 0) AS has_fuzzy_match,
-      COALESCE(match_presence.has_tie_match, 0) AS has_tie_match
-    FROM f1_employer_entities AS entities
-    LEFT JOIN aggregated USING (f1_emp_entity_id)
-    LEFT JOIN prioritized USING (f1_emp_entity_id)
-    LEFT JOIN match_presence USING (f1_emp_entity_id)
-    """)
-
-    con.sql(
-    """
-    CREATE OR REPLACE TABLE f1_employer_final_crosswalk AS
-    SELECT
-      base.employer_name,
-      base.f1_emp_row_num,
-      base.f1_emp_entity_id,
-      base.f1_empname_clean,
-      base.f1_city_clean,
-      base.f1_state_clean,
-      base.f1_zip_clean,
-      entity.preferred_rcid,
-      entity.preferred_company_name,
-      entity.preferred_match_source,
-      entity.matched_rcids,
-      entity.matched_company_names,
-      entity.has_direct_match,
-      entity.has_fuzzy_match,
-      entity.has_tie_match
-    FROM f1_employers AS base
-    LEFT JOIN f1_employer_entity_crosswalk AS entity USING (f1_emp_entity_id)
-    """)
-    if verbose:
-        final_total = con.sql("SELECT COUNT(*) AS cnt FROM f1_employer_final_crosswalk").df().iloc[0, 0]
-        matched_total = con.sql("SELECT COUNT(*) AS cnt FROM f1_employer_final_crosswalk WHERE preferred_rcid IS NOT NULL").df().iloc[0, 0]
-        print(
-            "✅ Created final employer crosswalk 'f1_employer_final_crosswalk' "
-            f"with {final_total:,} rows ({matched_total:,} matched to an RCID)."
-        )
-    if save_output and cache_path:
-        con.sql(f"COPY (SELECT * FROM f1_employer_final_crosswalk) TO '{cache_path}' (FORMAT PARQUET)")
-        if verbose:
-            print(f"💾 Saved final employer crosswalk to '{cache_path}'.")
     return "f1_employer_final_crosswalk"
 
 
@@ -3265,78 +3339,42 @@ def _compute_preferred_rcid_activity(
     rcid_list_path: str = None,
 ):
     """
-    Merge employer crosswalk back to FOIA records, restrict to rows where the
-    work authorization start year matches the FOIA reporting year, count unique
-    individuals by year and RCID, and retain RCIDs with >=1 unique individuals
-    in at least three distinct years, including at least one observation after 2012.
+    Recompute preferred RCID activity from the staged final crosswalk and the
+    person-linked employment-corrected F1 file.
     """
-    cols = [row[1] for row in con.sql("PRAGMA table_info('allyrs_raw')").fetchall()]
-    id_col = _first_present(cols, INDIVIDUAL_ID_COLS, "individual identifier column")
-    auth_col = _first_present(cols, AUTH_START_COLS, "authorization start date column")
-    year_col = _first_present(cols, ["year"], "FOIA reporting year column")
-
-    con.sql(
-    f"""
-        CREATE OR REPLACE TEMP VIEW foia_with_auth AS
-        SELECT
-          *,
-          {_sql_clean_company_name("employer_name")} AS f1_empname_clean,
-          {_sql_normalize("employer_city")} AS f1_city_clean,
-          {_sql_state_name_to_abbr("employer_state")} AS f1_state_clean,
-          {_sql_clean_zip("employer_zip_code")} AS f1_zip_clean,
-          {_date_parse_sql(auth_col)} AS auth_start
-        FROM allyrs_raw
-        WHERE employer_name IS NOT NULL
-    """)
-
-    con.sql(
-    f"""
-        CREATE OR REPLACE TABLE f1_employer_auth_counts AS
-        SELECT
-          CAST(EXTRACT(YEAR FROM auth_start) AS INTEGER) AS auth_year,
-          preferred_company_name,
-          CAST(fcw.preferred_rcid AS INTEGER) AS preferred_rcid,
-          COUNT(DISTINCT CAST(fo.{id_col} AS VARCHAR)) AS unique_individuals
-        FROM foia_with_auth AS fo
-        JOIN f1_employer_final_crosswalk AS fcw
-          ON fo.f1_empname_clean = fcw.f1_empname_clean
-         AND COALESCE(fo.f1_city_clean, '') = COALESCE(fcw.f1_city_clean, '')
-         AND COALESCE(fo.f1_state_clean, '') = COALESCE(fcw.f1_state_clean, '')
-         AND COALESCE(fo.f1_zip_clean, '') = COALESCE(fcw.f1_zip_clean, '')
-        WHERE auth_start IS NOT NULL
-          AND fcw.preferred_rcid IS NOT NULL
-          AND CAST(EXTRACT(YEAR FROM auth_start) AS INTEGER) = CAST({year_col} AS INTEGER)
-        GROUP BY auth_year, preferred_rcid, preferred_company_name
-    """)
-
-    con.sql(
-    """
-        CREATE OR REPLACE TABLE f1_preferred_rcids_multi_year AS
-        SELECT preferred_rcid
-        FROM f1_employer_auth_counts
-        WHERE unique_individuals >= 1
-        GROUP BY preferred_rcid
-        HAVING COUNT(DISTINCT auth_year) >= 3
-           AND MAX(auth_year) > 2012
-    """)
+    runtime_cfg = load_config(DEFAULT_CONFIG_PATH)
+    paths = runtime_cfg.get("paths", {})
+    external_cfg = get_cfg_section(runtime_cfg, "external_employer_matching")
+    activity_path = str(paths.get("foia_sevp_with_person_id_employment_corrected"))
+    min_unique_individuals = int(external_cfg.get("preferred_rcid_min_unique_individuals", 1))
+    min_years = int(external_cfg.get("preferred_rcid_min_years", 3))
+    min_max_year_gt = external_cfg.get("preferred_rcid_min_max_year_gt", 2012)
+    if isinstance(min_max_year_gt, str) and min_max_year_gt.strip().lower() in {"", "none", "null"}:
+        min_max_year_gt = None
+    if min_max_year_gt is not None:
+        min_max_year_gt = int(min_max_year_gt)
 
     if verbose:
-        auth_rows = int(_scalar(con, "SELECT COUNT(*) AS cnt FROM f1_employer_auth_counts"))
-        rcid_rows = int(_scalar(con, "SELECT COUNT(*) AS cnt FROM f1_preferred_rcids_multi_year"))
         _print_section("Preferred RCID Activity")
-        print(f"✅ Built f1_employer_auth_counts ({auth_rows:,} rows) and f1_preferred_rcids_multi_year ({rcid_rows:,} RCIDs).")
-
-    if save_output:
-        if auth_counts_path:
-            con.sql(f"COPY (SELECT * FROM f1_employer_auth_counts) TO '{auth_counts_path}' (FORMAT PARQUET)")
-            if verbose:
-                print(f"💾 Saved authorization counts to '{auth_counts_path}'.")
-        if rcid_list_path:
-            con.sql(f"COPY (SELECT * FROM f1_preferred_rcids_multi_year) TO '{rcid_list_path}' (FORMAT PARQUET)")
-            if verbose:
-                print(f"💾 Saved preferred RCID list to '{rcid_list_path}'.")
-
-    return "f1_preferred_rcids_multi_year"
+    result = build_preferred_rcid_activity(
+        con,
+        activity_parquet_path=activity_path,
+        sql_clean_company_name_expr=_sql_clean_company_name,
+        sql_normalize_expr=_sql_normalize,
+        sql_state_name_to_abbr_expr=_sql_state_name_to_abbr,
+        sql_clean_zip_expr=_sql_clean_zip,
+        date_parse_sql=_date_parse_sql,
+        individual_id_cols=INDIVIDUAL_ID_COLS,
+        auth_start_cols=AUTH_START_COLS,
+        auth_counts_path=auth_counts_path,
+        rcid_list_path=rcid_list_path,
+        save_output=save_output,
+        min_unique_individuals=min_unique_individuals,
+        min_years=min_years,
+        min_max_year_gt=min_max_year_gt,
+        verbose=verbose,
+    )
+    return result
 
 # SQL helper function for cleaning and normalizing names
 def _sql_normalize(colname):
@@ -3353,12 +3391,117 @@ def _sql_normalize(colname):
         ))
     """
 
+
+def _sql_raw_name_norm_v1(colname):
+    return f"""
+        CASE
+            WHEN {colname} IS NULL THEN NULL
+            ELSE TRIM(
+                REGEXP_REPLACE(
+                    strip_accents(lower(TRIM(CAST({colname} AS VARCHAR)))),
+                    '\\s+',
+                    ' ',
+                    'g'
+                )
+            )
+        END
+    """
+
+
 # SQL helper function for cleaning institution names
 def _sql_clean_inst_name(instnamecol):
     substituted = _sql_apply_substitutions(instnamecol, INST_NAME_SUBSTITUTIONS)
     return _sql_normalize(
         f"REGEXP_REPLACE({substituted}, '(?i)\\b(at|campus|inc|the|\\(.*\\))\\b', ' ', 'g')"
     )
+
+
+def _sql_revelio_inst_raw_id_expr(university_raw_col: str) -> str:
+    raw_norm = _sql_raw_name_norm_v1(university_raw_col)
+    return f"""
+        CASE
+            WHEN {university_raw_col} IS NULL THEN NULL
+            ELSE 'revraw_v1_' || sha1(COALESCE({raw_norm}, ''))
+        END
+    """
+
+
+def _sql_revelio_inst_family_id_expr(rev_instname_clean_col: str) -> str:
+    return f"""
+        CASE
+            WHEN {rev_instname_clean_col} IS NULL THEN NULL
+            ELSE 'revfam_v1_' || sha1(COALESCE({rev_instname_clean_col}, ''))
+        END
+    """
+
+
+def _sql_f1_inst_site_id_expr(
+    school_name_col: str,
+    f1_instname_clean_col: str,
+    f1_city_clean_col: str,
+    f1_state_clean_col: str,
+    f1_zip_clean_col: str,
+) -> str:
+    hash_input = (
+        f"COALESCE({f1_instname_clean_col}, '') || '|' || "
+        f"COALESCE({f1_city_clean_col}, '') || '|' || "
+        f"COALESCE({f1_state_clean_col}, '') || '|' || "
+        f"COALESCE({f1_zip_clean_col}, '')"
+    )
+    return f"""
+        CASE
+            WHEN {school_name_col} IS NULL THEN NULL
+            ELSE 'f1site_v1_' || sha1({hash_input})
+        END
+    """
+
+
+def _sql_f1_school_id_expr(school_name_col: str, f1_instname_clean_col: str) -> str:
+    return f"""
+        CASE
+            WHEN {school_name_col} IS NULL THEN NULL
+            ELSE 'f1school_v1_' || sha1(COALESCE({f1_instname_clean_col}, ''))
+        END
+    """
+
+
+def _sql_match_group_expr(matchtype_col: str) -> str:
+    return f"""
+        CASE
+            WHEN {matchtype_col} = 'direct' THEN 4
+            WHEN {matchtype_col} = 'direct_tie' THEN 3
+            WHEN {matchtype_col} = 'fuzzy' THEN 2
+            WHEN {matchtype_col} = 'fuzzy_tie' THEN 1
+            ELSE 0
+        END
+    """
+
+
+def _sql_auto_promote_expr(matchtype_col: str) -> str:
+    return f"CASE WHEN {matchtype_col} IN ('direct', 'direct_tie', 'fuzzy') THEN TRUE ELSE FALSE END"
+
+
+def _sql_confidence_tier_expr(matchtype_col: str) -> str:
+    return f"""
+        CASE
+            WHEN {matchtype_col} = 'direct' THEN 'high'
+            WHEN {matchtype_col} IN ('direct_tie', 'fuzzy') THEN 'medium'
+            WHEN {matchtype_col} = 'fuzzy_tie' THEN 'candidate'
+            ELSE 'unresolved'
+        END
+    """
+
+
+def _sql_match_score_expr(matchtype_col: str) -> str:
+    return f"""
+        CASE
+            WHEN {matchtype_col} = 'direct' THEN 1.00
+            WHEN {matchtype_col} = 'direct_tie' THEN 0.98
+            WHEN {matchtype_col} = 'fuzzy' THEN 0.95
+            WHEN {matchtype_col} = 'fuzzy_tie' THEN 0.90
+            ELSE 0.00
+        END
+    """
 
 def _sql_clean_company_name(companycol):
     """
@@ -3428,12 +3571,24 @@ def run_all_fxns(cfg):
     revelio_foia_cw_path = paths.get("revelio_foia_inst_crosswalk")
     revelio_three_way_cw_path = paths.get("revelio_ipeds_foia_inst_crosswalk")
     revelio_matched_university_path = paths.get("revelio_matched_university_raws")
+    ipeds_main_institutions_path = paths.get("ipeds_main_institutions")
+    revelio_ipeds_edges_path = paths.get("revelio_ipeds_edges")
+    revelio_ipeds_best_path = paths.get("revelio_ipeds_best")
+    ipeds_to_revelio_families_path = paths.get("ipeds_to_revelio_families")
+    f1_ipeds_edges_path = paths.get("f1_ipeds_edges")
+    f1_revelio_ipeds_resolution_path = paths.get("f1_revelio_ipeds_resolution")
+    f1_revelio_school_crosswalk_path = paths.get("f1_revelio_school_crosswalk")
     
     # employer output paths
     employer_crosswalk_path = paths.get("employer_crosswalk")
     employer_entity_mapping_path = paths.get("employer_entity_mapping")
+    employer_rcid_crosswalk_path = paths.get("f1_employer_revelio_rcid_crosswalk")
     employer_auth_counts_path = paths.get("employer_auth_counts")
     preferred_rcids_path = paths.get("preferred_rcids")
+    external_employer_cfg = get_cfg_section(cfg, "external_employer_matching")
+    external_employer_output_dir = external_employer_cfg.get("revelio_cleaning_output_dir")
+    external_school_cfg = get_cfg_section(cfg, "external_school_matching")
+    external_school_repo_root = external_school_cfg.get("revelio_cleaning_repo_root")
 
     missing = [
         name
@@ -3447,9 +3602,9 @@ def run_all_fxns(cfg):
             ("paths.ipeds_cw", ipeds_zip_path),
             ("paths.employer_crosswalk", employer_crosswalk_path),
             ("paths.wrds_users", wrds_users_path),
-            ("paths.employer_entity_mapping", employer_entity_mapping_path),
             ("paths.employer_auth_counts", employer_auth_counts_path),
             ("paths.preferred_rcids", preferred_rcids_path),
+            ("external_employer_matching.revelio_cleaning_output_dir", external_employer_output_dir),
         ]
         if not value
     ]
@@ -3488,6 +3643,7 @@ def run_all_fxns(cfg):
     build_revelio_ipeds = bool(foia_cfg.get("build_revelio_ipeds_crosswalk", False))
     build_revelio_foia = bool(foia_cfg.get("build_revelio_foia_crosswalk", False))
     build_revelio_three_way = bool(foia_cfg.get("build_revelio_three_way_crosswalk", False))
+    build_canonical_inst_mappings = bool(foia_cfg.get("build_canonical_institution_mappings", True))
 
     inst_subs = foia_cfg.get("f1_inst_substitutions", {}) or {}
     if not isinstance(inst_subs, dict):
@@ -3534,7 +3690,7 @@ def run_all_fxns(cfg):
         stage_times=stage_times,
         con=con,
         verbose=verbose,
-        cache_path= None, #str(f1_inst_crosswalk_path) if f1_inst_crosswalk_path else None,
+        cache_path=str(f1_inst_crosswalk_path) if f1_inst_crosswalk_path else None,
         load_cache=bool(foia_cfg.get("load_inst_from_cache", False)),
         save_output=(not test) and bool(foia_cfg.get("save_inst_to_cache", False)),
     )
@@ -3596,6 +3752,35 @@ def run_all_fxns(cfg):
             save_output=(not test) and bool(revelio_three_way_cw_path or revelio_matched_university_path),
         )
 
+    if build_canonical_inst_mappings:
+        if not build_revelio_ipeds and not _relation_exists(con, "revelio_ipeds_inst_crosswalk"):
+            _run_timed_stage(
+                "Revelio ↔ IPEDS crosswalk",
+                _create_revelio_ipeds_inst_crosswalk,
+                show_timing=verbose,
+                stage_times=stage_times,
+                con=con,
+                verbose=verbose,
+                cache_path=str(revelio_ipeds_cw_path) if revelio_ipeds_cw_path else None,
+                save_output=(not test) and bool(revelio_ipeds_cw_path),
+            )
+        _run_timed_stage(
+            "Canonical US institution mappings",
+            _stage_external_us_school_mappings,
+            show_timing=verbose,
+            stage_times=stage_times,
+            con=con,
+            verbose=verbose,
+            revelio_cleaning_repo_root=str(external_school_repo_root) if external_school_repo_root else None,
+            ipeds_main_institutions_path=str(ipeds_main_institutions_path) if ipeds_main_institutions_path else None,
+            revelio_ipeds_edges_path=str(revelio_ipeds_edges_path) if revelio_ipeds_edges_path else None,
+            revelio_ipeds_best_path=str(revelio_ipeds_best_path) if revelio_ipeds_best_path else None,
+            ipeds_to_revelio_families_path=str(ipeds_to_revelio_families_path) if ipeds_to_revelio_families_path else None,
+            f1_ipeds_edges_path=str(f1_ipeds_edges_path) if f1_ipeds_edges_path else None,
+            f1_revelio_ipeds_resolution_path=str(f1_revelio_ipeds_resolution_path) if f1_revelio_ipeds_resolution_path else None,
+            f1_revelio_school_crosswalk_path=str(f1_revelio_school_crosswalk_path) if f1_revelio_school_crosswalk_path else None,
+        )
+
     
     _run_timed_stage( "Employer crosswalk",   
       _create_employer_crosswalk,
@@ -3605,6 +3790,9 @@ def run_all_fxns(cfg):
         verbose=verbose,
         cache_path=str(employer_crosswalk_path),
         entity_cache_path=str(employer_entity_mapping_path),
+        rcid_crosswalk_path=(
+            str(employer_rcid_crosswalk_path) if employer_rcid_crosswalk_path else None
+        ),
         load_cache=bool(foia_cfg.get("load_employer_from_cache", False)),
         save_output=bool(foia_cfg.get("save_employer_to_cache", False)),
     )
@@ -3632,6 +3820,19 @@ def run_all_fxns(cfg):
 #########
 # MAIN  #
 #########
+def run(config_path=None):
+    """iPython-friendly entry point. Loads config and runs full pipeline.
+
+    Usage (from iPython):
+        import importlib
+        import company_shift_share.deps_foia_clean as m
+        importlib.reload(m)
+        m.run()
+    """
+    cfg = load_config(config_path or DEFAULT_CONFIG_PATH)
+    run_all_fxns(cfg)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run FOIA clean pipeline (config-driven).")
     parser.add_argument(
@@ -3641,12 +3842,11 @@ def main() -> None:
         help=f"Path to config YAML (default: {DEFAULT_CONFIG_PATH}).",
     )
     parser.add_argument("--test", action="store_true", help="Use test mode for FOIA import.")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()  # ignore iPython/Jupyter argv
 
     cfg = load_config(args.config)
     run_all_fxns(cfg)
-    
 
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

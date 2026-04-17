@@ -46,9 +46,15 @@ import duckdb
 import pandas as pd
 import yaml
 from rapidfuzz import fuzz, process
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 # ---------------------------------------------------------------------------
-# Path setup — make company_name_cleaning importable
+# Path setup
 # ---------------------------------------------------------------------------
 if "__file__" in globals():
     _THIS_DIR = Path(__file__).resolve().parent
@@ -56,8 +62,6 @@ else:
     _THIS_DIR = Path.cwd() / "04_analysis"
 
 _CODE_DIR = _THIS_DIR.parent
-_MATCH_DIR = _CODE_DIR / "revelio_h1b_company_matching"
-sys.path.insert(0, str(_MATCH_DIR))
 sys.path.insert(0, str(_CODE_DIR))
 
 from company_name_cleaning import clean_company_name, normalize_state  # noqa: E402
