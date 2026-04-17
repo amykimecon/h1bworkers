@@ -3,6 +3,13 @@ import pandas as pd
 import numpy as np
 import fiscalyear
 import seaborn as sns
+import sys
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 ## HELPERS
 # get fiscal year from date (pandas)

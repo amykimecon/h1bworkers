@@ -10,6 +10,13 @@ from splink import DuckDBAPI, Linker, SettingsCreator, block_on
 from splink.blocking_analysis import count_comparisons_from_blocking_rule
 from splink.blocking_rule_library import CustomRule
 import splink.comparison_library as cl
+import sys
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
 code = "/Users/amykim/Documents/GitHub/h1bworkers/code"

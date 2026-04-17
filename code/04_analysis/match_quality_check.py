@@ -29,6 +29,13 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib
+
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import yaml

@@ -26,6 +26,12 @@ Run interactively in iPython after importing indiv_merge to reuse its DuckDB con
 import time
 import sys
 import os
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 # ── reuse the module-level connection and registered tables from indiv_merge ──
 sys.path.insert(0, os.path.dirname(__file__))

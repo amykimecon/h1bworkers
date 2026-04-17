@@ -8,6 +8,12 @@ import sys
 
 import numpy as np
 import pandas as pd
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 try:
     from company_shift_share.config_loader import DEFAULT_CONFIG_PATH, get_cfg_section, load_config

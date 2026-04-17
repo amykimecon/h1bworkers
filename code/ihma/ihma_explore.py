@@ -10,6 +10,13 @@ import statsmodels.api as sm
 from linearmodels.iv import IV2SLS
 
 from ihma_clean import IHMACleanTables, prepare_clean_data
+import sys
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 Y_COLS = [f"y_it{i}" for i in range(1, 9)]
 Y_POSTGRAD_COLS = [f"y_it_pg{i}" for i in range(1, len(Y_COLS) + 1)]

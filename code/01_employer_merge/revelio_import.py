@@ -7,6 +7,14 @@ import wrds
 import pandas as pd
 import duckdb
 import time
+import sys
+
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 root = "/Users/amykim/Princeton Dropbox/Amy Kim/h1bworkers"
 code = "/Users/amykim/Documents/GitHub/h1bworkers/code"
 

@@ -12,9 +12,11 @@ import time
 import warnings
 from pathlib import Path
 
-# Ensure stdout is line-buffered so nohup logs update in real time (no-op in IPython)
+# Ensure progress logs flush immediately (no-op in IPython).
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
 
 import matplotlib
 try:

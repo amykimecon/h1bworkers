@@ -21,6 +21,13 @@ from adaptive_fuzzy.cli import (
     collect_initial_labels,
     interactive_training,
 )
+import sys
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 
 def load_names(input_path: Path, column: str, limit: Optional[int]) -> list[str]:

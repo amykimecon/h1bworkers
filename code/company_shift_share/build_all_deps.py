@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 from company_shift_share.config_loader import DEFAULT_CONFIG_PATH
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 
 def _run(script: Path, config_path: Path) -> None:
     cmd = [sys.executable, str(script), "--config", str(config_path)]
     print(f"Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
+    child_env = os.environ.copy()
+    child_env.setdefault("PYTHONUNBUFFERED", "1")
+    subprocess.run(cmd, check=True, env=child_env)
 
 
 def main() -> None:
@@ -54,7 +63,9 @@ def main() -> None:
                 "--include-bachelors",
             ]
             print(f"Running: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True)
+            child_env = os.environ.copy()
+            child_env.setdefault("PYTHONUNBUFFERED", "1")
+            subprocess.run(cmd, check=True, env=child_env)
     if not args.skip_revelio:
         _run(base_dir / "revelio_school_to_employer.py", config_path)
 

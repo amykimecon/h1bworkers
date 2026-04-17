@@ -3,7 +3,7 @@
 #$ -l m_mem_free=24G
 echo "starting job at `date`"
 source ~/virtualenv/bin/activate
+export PYTHONUNBUFFERED=1
 python3 rev_positions.py &> rev_positions.out
 echo "ending job at `date`"
-
 

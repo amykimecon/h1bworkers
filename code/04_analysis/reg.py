@@ -13,6 +13,12 @@ from statsmodels.iolib.summary2 import summary_col
 import seaborn as sns
 from linearmodels.panel import compare
 import os
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 if "__file__" in globals():
     _THIS_DIR = os.path.dirname(os.path.abspath(__file__))

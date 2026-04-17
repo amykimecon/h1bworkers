@@ -9,6 +9,12 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import root, wrds_out  # noqa: E402
@@ -110,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
     if args.config:
         cfg_path = str(Path(args.config).expanduser().resolve())
         env["REV_INDIV_CONFIG"] = cfg_path

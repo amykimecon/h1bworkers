@@ -11,6 +11,12 @@ import traceback
 from pathlib import Path
 
 import pyarrow.parquet as pq
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 if "__file__" in globals():
     _THIS_DIR = Path(__file__).resolve().parent

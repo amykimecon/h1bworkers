@@ -24,6 +24,13 @@ import time
 from pathlib import Path
 
 import matplotlib
+
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 try:
     from IPython import get_ipython as _get_ipython
     _IN_IPYTHON = _get_ipython() is not None

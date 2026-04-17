@@ -35,6 +35,13 @@ import numpy as np
 import pandas as pd
 import yaml
 import matplotlib
+
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 # Only force the non-interactive Agg backend when not running inside IPython
 # (e.g. a plain batch job).  In IPython the inline backend is already active
 # and forcing Agg would suppress all inline plot display.

@@ -46,6 +46,12 @@ import duckdb
 import pandas as pd
 import requests
 import yaml
+# Ensure progress logs flush immediately.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 # ---------------------------------------------------------------------------
 # Resolve root & code dir (mirrors pattern in firm_outcomes.py)

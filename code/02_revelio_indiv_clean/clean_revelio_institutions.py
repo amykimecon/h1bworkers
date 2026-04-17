@@ -21,9 +21,9 @@ run_tag = rcfg.RUN_TAG
 t_script0 = time.time()
 # Ensure logs stream to nohup output without long buffering delays.
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
 if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
 print(f"Using config: {rcfg.ACTIVE_CONFIG_PATH}", flush=True)
 
 
