@@ -15,3 +15,25 @@ code/10_misc/resources/best-model.pt
 *.tmp
 *.out
 code/old/adaptive_fuzzy/.adaptive_fuzzy/*
+
+# Local tooling state
+code/.claude/
+code/.codex
+code/.vscode/
+writing/.claude/
+
+# Generated caches and logs
+.pytest_cache/
+__pycache__/
+code/logs/
+code/output/
+output/
+code/f1_indiv_merge/logs/
+code/f1_indiv_merge/tmp_*.py
+
+# Top-level LaTeX scratch files
+writing/_main.aux
+writing/_main.fdb_latexmk
+writing/_main.fls
+writing/_main.log
+writing/texput.log
