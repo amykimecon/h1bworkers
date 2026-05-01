@@ -16,6 +16,7 @@ import duckdb as ddb
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+from matplotlib.colors import to_rgba
 # Ensure progress logs flush immediately.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True, write_through=True)
@@ -44,6 +45,7 @@ except ModuleNotFoundError:
 
 # Keep baseline paths/config from original module.
 IPEDS_PATH = base.IPEDS_PATH
+BASE_FONT_SIZE = base.BASE_FONT_SIZE
 RELABEL_YEAR_MIN = base.RELABEL_YEAR_MIN
 RELABEL_YEAR_MAX = base.RELABEL_YEAR_MAX
 RELABEL_SPECS = base.RELABEL_SPECS
@@ -77,8 +79,12 @@ PHD_GUARD_SHARE   = 0.5 # guard fires if PhD source drop AND target rise >= 50% 
 EVENT_TIME_CONTROL_MODE = "never_treated_econ"
 DID_EVENT_TIME_MIN = -5
 DID_EVENT_TIME_MAX = 4
-DID_REFERENCE_EVENT_TIME = -1
+DID_REFERENCE_EVENT_TIME = -2
 DID_CONTROL_FILE_TAG = "never_treated_econ"
+DID_EVENT_LINE_X = -0.5
+DID_PLOT_FONT_SIZE = BASE_FONT_SIZE + 2
+DID_PLOT_MARKER_SIZE = 12
+DID_ERRORBAR_ALPHA = 0.45
 
 
 def _source_filter(spec: dict) -> tuple[str, str]:
@@ -761,12 +767,46 @@ def _find_did_interaction_param(
     for candidate in candidates:
         if candidate in params.index:
             return candidate
+
+    normalized_event_t = int(event_t)
+    event_token_variants = {
+        str(normalized_event_t),
+        f"{normalized_event_t}",
+        f"{float(event_t)}",
+        f"{event_t:.1f}",
+        f"{normalized_event_t:.0f}",
+        f"{event_t:.0f}",
+    }
+
+    for token in event_token_variants:
+        prefix = f"[T.{token}]"
+        bare = f"[{token}]"
+        for name in map(str, params.index):
+            if "treated" not in str(name):
+                continue
+            if term in str(name) and (prefix in str(name) or bare in str(name)):
+                return str(name)
+
+    for name in map(str, params.index):
+        if "treated" not in name:
+            continue
+        if f"{normalized_event_t}" not in name and f"{float(event_t)}" not in name and f"{event_t:.1f}" not in name:
+            continue
+        if f"[T.{event_t}]" in name or f"[{event_t}]" in name:
+            return name
+        if f"[T.{float(event_t)}]" in name or f"[{float(event_t)}]" in name:
+            return name
     return None
 
 
 def compute_never_treated_econ_did_panel(
     con: ddb.DuckDBPyConnection,
     relabel_df: pd.DataFrame,
+    *,
+    foia_person_panel_path: str | None = None,
+    stage05_person_baseline_path: str | None = None,
+    ipeds_cost_panel_path: str | None = None,
+    ipeds_tuition_col: str = "tuition7",
 ) -> pd.DataFrame:
     """
     Build a school-by-grad-year panel for treated institutions and matched
@@ -785,6 +825,12 @@ def compute_never_treated_econ_did_panel(
     con.sql(f"CREATE OR REPLACE TEMP VIEW foia_raw AS SELECT * FROM read_parquet('{base.FOIA_PATH}')")
     con.sql(f"CREATE OR REPLACE TEMP VIEW f1_inst_cw AS SELECT * FROM read_parquet('{base.F1_INST_CW_PATH}')")
     con.sql(f"CREATE OR REPLACE TEMP VIEW ipeds_raw AS SELECT * FROM read_parquet('{IPEDS_PATH}')")
+    base._prepare_external_support_views(
+        con,
+        foia_person_panel_path=foia_person_panel_path,
+        stage05_person_baseline_path=stage05_person_baseline_path,
+        ipeds_cost_panel_path=ipeds_cost_panel_path,
+    )
 
     matched_pairs = _match_treated_to_untreated_cohorts(con=con, relabel_df=relabel_df)
     if matched_pairs.empty:
@@ -811,12 +857,39 @@ def compute_never_treated_econ_did_panel(
     cw_unitid_col = str(schema["cw_unitid_col"])
     foia_year_col = schema["foia_year_col"]
     opt_end_col = str(schema["opt_end_col"])
+    foia_person_cols = [row[0] for row in con.sql("DESCRIBE foia_person_panel_raw").fetchall()]
+    ipeds_cost_cols = [row[0] for row in con.sql("DESCRIBE ipeds_cost_raw").fetchall()]
+
+    foia_person_inst_col = base.first_present(foia_person_cols, base.FOIA_INST_COLS, "FOIA person institution column")
+    foia_person_cip_col = base.first_present(foia_person_cols, base.FOIA_CIP_COLS, "FOIA person CIP column")
+    foia_person_end_col = base.first_present(foia_person_cols, base.FOIA_PROG_END_COLS, "FOIA person program end column")
+    foia_person_student_col = base.first_present(foia_person_cols, base.FOIA_STUDENT_KEY_COLS, "FOIA person student identifier column")
+    foia_person_person_id_col = base.first_present(foia_person_cols, ["person_id"], "FOIA person_id column")
+    foia_person_edu_col = base.first_present(foia_person_cols, base.FOIA_EDU_LEVEL_COLS, "FOIA person education level column")
+    foia_person_year_col = None
+    for cand in base.FOIA_YEAR_COLS:
+        if cand.lower() in [c.lower() for c in foia_person_cols]:
+            foia_person_year_col = next(c for c in foia_person_cols if c.lower() == cand.lower())
+            break
+    if ipeds_tuition_col.lower() not in [c.lower() for c in ipeds_cost_cols]:
+        raise ValueError(
+            f"Could not locate IPEDS tuition column '{ipeds_tuition_col}'. Available columns: {sorted(ipeds_cost_cols)}"
+        )
+    ipeds_tuition_col_sql = next(c for c in ipeds_cost_cols if c.lower() == ipeds_tuition_col.lower())
 
     norm_cip_expr = base.normalize_cip_sql(foia_cip_col)
     source_cip_where = _source_only_cip_where("cipcode")
+    foia_end_date_expr = f"TRY_CAST({foia_end_col} AS DATE)"
+    foia_opt_end_date_expr = f"TRY_CAST({opt_end_col} AS DATE)"
+    foia_person_end_date_expr = f"TRY_CAST({foia_person_end_col} AS DATE)"
     year_match_clause = (
-        f"AND CAST({foia_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_end_col}) AS INTEGER)"
+        f"AND CAST({foia_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_end_date_expr}) AS INTEGER)"
         if foia_year_col
+        else ""
+    )
+    person_year_match_clause = (
+        f"AND CAST({foia_person_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_person_end_date_expr}) AS INTEGER)"
+        if foia_person_year_col
         else ""
     )
 
@@ -826,18 +899,18 @@ def compute_never_treated_econ_did_panel(
             SELECT
                 cw.{cw_unitid_col} AS unitid,
                 {norm_cip_expr} AS cipcode,
-                CAST(EXTRACT(YEAR FROM {foia_end_col}) AS INTEGER) AS grad_year,
+                CAST(EXTRACT(YEAR FROM {foia_end_date_expr}) AS INTEGER) AS grad_year,
                 CAST({foia_student_col} AS VARCHAR) AS student_id,
                 employer_name,
                 employment_opt_type,
-                {opt_end_col} AS opt_end_date,
+                {foia_opt_end_date_expr} AS opt_end_date,
                 {foia_tuition_col} AS tuition,
-                {foia_end_col} AS program_end_date,
+                {foia_end_date_expr} AS program_end_date,
                 {status_col} AS requested_status
             FROM foia_raw fr
             LEFT JOIN f1_inst_cw cw
               ON fr.{foia_inst_col} = cw.{cw_inst_col}
-            WHERE {foia_end_col} IS NOT NULL
+            WHERE {foia_end_date_expr} IS NOT NULL
               AND fr.{foia_edu_col} = 'MASTER''S'
               AND ({base.FOIA_CIP_WHERE})
               {year_match_clause}
@@ -913,6 +986,107 @@ def compute_never_treated_econ_did_panel(
         """
     ).df()
 
+    treated_external = con.sql(
+        f"""
+        WITH foia_match_base AS (
+            SELECT
+                cw.{cw_unitid_col} AS unitid,
+                {base.normalize_cip_sql(foia_person_cip_col)} AS cipcode,
+                CAST(EXTRACT(YEAR FROM {foia_person_end_date_expr}) AS INTEGER) AS grad_year,
+                CAST({foia_person_student_col} AS VARCHAR) AS student_id,
+                CAST({foia_person_person_id_col} AS BIGINT) AS person_id
+            FROM foia_person_panel_raw fp
+            LEFT JOIN f1_inst_cw cw
+              ON fp.{foia_person_inst_col} = cw.{cw_inst_col}
+            WHERE {foia_person_end_date_expr} IS NOT NULL
+              AND fp.{foia_person_edu_col} = 'MASTER''S'
+              AND ({base.FOIA_CIP_WHERE})
+              {person_year_match_clause}
+        ),
+        foia_match_relevant AS (
+            SELECT *
+            FROM foia_match_base
+            WHERE unitid IS NOT NULL
+              AND cipcode IS NOT NULL
+              AND grad_year IS NOT NULL
+              AND student_id IS NOT NULL
+        ),
+        treated_flagged AS (
+            SELECT
+                f.*,
+                r.relabel_year,
+                r.relabel_type
+            FROM foia_match_relevant f
+            JOIN relabel_events_did r
+              ON f.unitid = r.unitid
+             AND f.grad_year = r.year
+             AND ({base.RELABEL_TYPE_PREDICATES})
+        ),
+        matched_treated AS (
+            SELECT
+                tf.*,
+                mp.pair_id
+            FROM treated_flagged tf
+            JOIN matched_pairs_did mp
+              ON CAST(tf.unitid AS BIGINT) = CAST(mp.treated_unitid AS BIGINT)
+             AND CAST(tf.relabel_year AS BIGINT) = CAST(mp.relabel_year AS BIGINT)
+             AND tf.relabel_type = mp.relabel_type
+        ),
+        linkedin_match_counts AS (
+            SELECT
+                pair_id,
+                unitid,
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS linkedin_match_total_students,
+                COUNT(DISTINCT CASE WHEN s.person_id IS NOT NULL THEN student_id END) AS linkedin_matched_students
+            FROM matched_treated f
+            LEFT JOIN stage05_linked_persons s
+              ON f.person_id = s.person_id
+            GROUP BY pair_id, unitid, calendar_year, relabel_year, relabel_type
+        ),
+        unit_year_counts AS (
+            SELECT
+                pair_id,
+                unitid,
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS total_grads_unit
+            FROM matched_treated
+            GROUP BY pair_id, unitid, calendar_year, relabel_year, relabel_type
+        )
+        SELECT
+            u.pair_id,
+            u.unitid,
+            u.calendar_year,
+            u.relabel_year,
+            u.relabel_type,
+            COALESCE(m.linkedin_matched_students, 0) AS linkedin_matched_students,
+            COALESCE(m.linkedin_match_total_students, 0) AS linkedin_match_total_students,
+            SUM(u.total_grads_unit * TRY_CAST(ic.{ipeds_tuition_col_sql} AS DOUBLE)) AS tuition_ipeds_total
+        FROM unit_year_counts u
+        LEFT JOIN linkedin_match_counts m
+          ON u.pair_id = m.pair_id
+         AND u.unitid = m.unitid
+         AND u.calendar_year = m.calendar_year
+         AND u.relabel_year = m.relabel_year
+         AND u.relabel_type = m.relabel_type
+        LEFT JOIN ipeds_cost_raw ic
+          ON CAST(ic.unitid AS BIGINT) = CAST(u.unitid AS BIGINT)
+         AND CAST(ic.year AS INTEGER) = CAST(u.calendar_year AS INTEGER)
+        GROUP BY
+            u.pair_id,
+            u.unitid,
+            u.calendar_year,
+            u.relabel_year,
+            u.relabel_type,
+            m.linkedin_matched_students,
+            m.linkedin_match_total_students
+        """
+    ).df()
+
     control_calendar = con.sql(
         f"""
         WITH control_ipeds AS (
@@ -933,18 +1107,18 @@ def compute_never_treated_econ_did_panel(
             SELECT
                 cw.{cw_unitid_col} AS unitid,
                 {norm_cip_expr} AS cipcode,
-                CAST(EXTRACT(YEAR FROM {foia_end_col}) AS INTEGER) AS grad_year,
+                CAST(EXTRACT(YEAR FROM {foia_end_date_expr}) AS INTEGER) AS grad_year,
                 CAST({foia_student_col} AS VARCHAR) AS student_id,
                 employer_name,
                 employment_opt_type,
-                {opt_end_col} AS opt_end_date,
+                {foia_opt_end_date_expr} AS opt_end_date,
                 {foia_tuition_col} AS tuition,
-                {foia_end_col} AS program_end_date,
+                {foia_end_date_expr} AS program_end_date,
                 {status_col} AS requested_status
             FROM foia_raw fr
             LEFT JOIN f1_inst_cw cw
               ON fr.{foia_inst_col} = cw.{cw_inst_col}
-            WHERE {foia_end_col} IS NOT NULL
+            WHERE {foia_end_date_expr} IS NOT NULL
               AND fr.{foia_edu_col} = 'MASTER''S'
               AND ({source_cip_where})
               {year_match_clause}
@@ -1008,8 +1182,104 @@ def compute_never_treated_econ_did_panel(
         """
     ).df()
 
+    control_external = con.sql(
+        f"""
+        WITH foia_match_base AS (
+            SELECT
+                cw.{cw_unitid_col} AS unitid,
+                {base.normalize_cip_sql(foia_person_cip_col)} AS cipcode,
+                CAST(EXTRACT(YEAR FROM {foia_person_end_date_expr}) AS INTEGER) AS grad_year,
+                CAST({foia_person_student_col} AS VARCHAR) AS student_id,
+                CAST({foia_person_person_id_col} AS BIGINT) AS person_id
+            FROM foia_person_panel_raw fp
+            LEFT JOIN f1_inst_cw cw
+              ON fp.{foia_person_inst_col} = cw.{cw_inst_col}
+            WHERE {foia_person_end_date_expr} IS NOT NULL
+              AND fp.{foia_person_edu_col} = 'MASTER''S'
+              AND ({source_cip_where})
+              {person_year_match_clause}
+        ),
+        foia_match_relevant AS (
+            SELECT *
+            FROM foia_match_base
+            WHERE unitid IS NOT NULL
+              AND cipcode IS NOT NULL
+              AND grad_year IS NOT NULL
+              AND student_id IS NOT NULL
+        ),
+        matched_control AS (
+            SELECT
+                f.*,
+                mp.pair_id,
+                mp.relabel_type,
+                mp.relabel_year
+            FROM foia_match_relevant f
+            JOIN matched_pairs_did mp
+              ON CAST(f.unitid AS BIGINT) = CAST(mp.control_unitid AS BIGINT)
+        ),
+        linkedin_match_counts AS (
+            SELECT
+                pair_id,
+                unitid,
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS linkedin_match_total_students,
+                COUNT(DISTINCT CASE WHEN s.person_id IS NOT NULL THEN student_id END) AS linkedin_matched_students
+            FROM matched_control f
+            LEFT JOIN stage05_linked_persons s
+              ON f.person_id = s.person_id
+            GROUP BY pair_id, unitid, calendar_year, relabel_year, relabel_type
+        ),
+        unit_year_counts AS (
+            SELECT
+                pair_id,
+                unitid,
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS total_grads_unit
+            FROM matched_control
+            GROUP BY pair_id, unitid, calendar_year, relabel_year, relabel_type
+        )
+        SELECT
+            u.pair_id,
+            u.unitid,
+            u.calendar_year,
+            u.relabel_year,
+            u.relabel_type,
+            COALESCE(m.linkedin_matched_students, 0) AS linkedin_matched_students,
+            COALESCE(m.linkedin_match_total_students, 0) AS linkedin_match_total_students,
+            SUM(u.total_grads_unit * TRY_CAST(ic.{ipeds_tuition_col_sql} AS DOUBLE)) AS tuition_ipeds_total
+        FROM unit_year_counts u
+        LEFT JOIN linkedin_match_counts m
+          ON u.pair_id = m.pair_id
+         AND u.unitid = m.unitid
+         AND u.calendar_year = m.calendar_year
+         AND u.relabel_year = m.relabel_year
+         AND u.relabel_type = m.relabel_type
+        LEFT JOIN ipeds_cost_raw ic
+          ON CAST(ic.unitid AS BIGINT) = CAST(u.unitid AS BIGINT)
+         AND CAST(ic.year AS INTEGER) = CAST(u.calendar_year AS INTEGER)
+        GROUP BY
+            u.pair_id,
+            u.unitid,
+            u.calendar_year,
+            u.relabel_year,
+            u.relabel_type,
+            m.linkedin_matched_students,
+            m.linkedin_match_total_students
+        """
+    ).df()
+
     if treated_calendar.empty or control_calendar.empty:
         return pd.DataFrame()
+
+    merge_keys = ["pair_id", "unitid", "calendar_year", "relabel_year", "relabel_type"]
+    treated_calendar = treated_calendar.merge(treated_external, on=merge_keys, how="left")
+    control_calendar = control_calendar.merge(control_external, on=merge_keys, how="left")
+    treated_calendar = base._finalize_cohort_calendar(treated_calendar)
+    control_calendar = base._finalize_cohort_calendar(control_calendar)
 
     treated_calendar["treated"] = 1
     control_calendar["treated"] = 0
@@ -1032,9 +1302,12 @@ def compute_did_event_study(
     reference_event_time: int = DID_REFERENCE_EVENT_TIME,
     event_time_min: int = DID_EVENT_TIME_MIN,
     event_time_max: int = DID_EVENT_TIME_MAX,
+    use_weights: bool = True,
 ) -> pd.DataFrame:
     """Estimate event-time x treated coefficients with school and grad-year FE."""
     if did_panel.empty:
+        return pd.DataFrame()
+    if yvar not in did_panel.columns:
         return pd.DataFrame()
 
     try:
@@ -1072,19 +1345,20 @@ def compute_did_event_study(
     if reference_event_time not in event_values or len(event_values) < 2 or n_schools < 2:
         return pd.DataFrame()
 
-    formula = (
-        f"{yvar} ~ "
-        f"C(event_t, Treatment(reference={reference_event_time})):treated "
-        "+ C(unitid) + C(grad_year)"
+    formula = _did_event_study_formula(
+        yvar=yvar,
+        reference_event_time=reference_event_time,
     )
     try:
-        result = smf.wls(formula, data=reg_df, weights=reg_df["total_grads"]).fit(
+        model = smf.wls(formula, data=reg_df, weights=reg_df["total_grads"]) if use_weights else smf.ols(formula, data=reg_df)
+        result = model.fit(
             cov_type="cluster",
             cov_kwds={"groups": reg_df["unitid"]},
         )
     except Exception as exc:
         print(f"Clustered DiD regression failed for {yvar}; falling back to HC1 ({exc})")
-        result = smf.wls(formula, data=reg_df, weights=reg_df["total_grads"]).fit(cov_type="HC1")
+        model = smf.wls(formula, data=reg_df, weights=reg_df["total_grads"]) if use_weights else smf.ols(formula, data=reg_df)
+        result = model.fit(cov_type="HC1")
 
     rows: list[dict[str, object]] = []
     event_counts = (
@@ -1155,6 +1429,17 @@ def compute_did_event_study(
     return pd.DataFrame(rows)
 
 
+def _did_event_study_formula(
+    yvar: str,
+    reference_event_time: int,
+) -> str:
+    return (
+        f"{yvar} ~ "
+        f"C(event_t, Treatment(reference={reference_event_time}))*treated "
+        "+ C(unitid) + C(grad_year)"
+    )
+
+
 def plot_did_event_study(
     did_event_study: pd.DataFrame,
     yvar: str,
@@ -1171,23 +1456,30 @@ def plot_did_event_study(
 
     sns.set(style="whitegrid")
     sns.set_palette(base.PALETTE_SEQ)
-    plt.rcParams.update({"font.size": base.BASE_FONT_SIZE})
+    plt.rcParams.update({"font.size": DID_PLOT_FONT_SIZE})
 
     fig, ax = plt.subplots(figsize=(10, 6))
+    ax.scatter(
+        plot_df["event_t"],
+        plot_df["coef"],
+        color=base.PALETTE_SEQ[0],
+        s=DID_PLOT_MARKER_SIZE * DID_PLOT_MARKER_SIZE,
+        marker="o",
+    )
     ax.errorbar(
         plot_df["event_t"],
         plot_df["coef"],
         yerr=plot_df["se"],
-        fmt="o-",
+        fmt="none",
         color=base.PALETTE_SEQ[0],
-        capsize=4,
-        linewidth=2,
-        markersize=6,
+        ecolor=to_rgba(base.PALETTE_SEQ[0], DID_ERRORBAR_ALPHA),
+        capsize=0,
+        elinewidth=DID_PLOT_MARKER_SIZE,
     )
     ax.axhline(y=0, linestyle="--", color="gray", linewidth=1)
-    ax.axvline(x=0, linestyle="--", color="gray", linewidth=1)
-    ax.set_xlabel("Years relative to relabel (t=0)")
-    ax.set_ylabel(f"DiD coef on treated x event time: {base.yvar_label(yvar)}")
+    ax.axvline(x=DID_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    ax.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=DID_PLOT_FONT_SIZE)
+    ax.set_ylabel(f"DiD coef: {base.yvar_label(yvar)}", fontsize=DID_PLOT_FONT_SIZE)
     ax.set_title("")
     fig.tight_layout()
 
@@ -1204,6 +1496,11 @@ def plot_did_event_study(
 def compute_never_treated_econ_control_event_time(
     con: ddb.DuckDBPyConnection,
     relabel_df: pd.DataFrame,
+    *,
+    foia_person_panel_path: str | None = None,
+    stage05_person_baseline_path: str | None = None,
+    ipeds_cost_panel_path: str | None = None,
+    ipeds_tuition_col: str = "tuition7",
 ) -> pd.DataFrame:
     """
     Compute event-time controls from never-treated institutions matched to treated cohorts.
@@ -1220,6 +1517,12 @@ def compute_never_treated_econ_control_event_time(
 
     con.sql(f"CREATE OR REPLACE TEMP VIEW foia_raw AS SELECT * FROM read_parquet('{base.FOIA_PATH}')")
     con.sql(f"CREATE OR REPLACE TEMP VIEW f1_inst_cw AS SELECT * FROM read_parquet('{base.F1_INST_CW_PATH}')")
+    base._prepare_external_support_views(
+        con,
+        foia_person_panel_path=foia_person_panel_path,
+        stage05_person_baseline_path=stage05_person_baseline_path,
+        ipeds_cost_panel_path=ipeds_cost_panel_path,
+    )
 
     matched_pairs = _match_treated_to_untreated_cohorts(con=con, relabel_df=relabel_df)
     if matched_pairs.empty:
@@ -1228,7 +1531,9 @@ def compute_never_treated_econ_control_event_time(
     con.sql("CREATE OR REPLACE TEMP VIEW matched_pairs AS SELECT * FROM matched_pairs_py")
 
     foia_cols = [row[0] for row in con.sql("DESCRIBE foia_raw").fetchall()]
+    foia_person_cols = [row[0] for row in con.sql("DESCRIBE foia_person_panel_raw").fetchall()]
     cw_cols = [row[0] for row in con.sql("DESCRIBE f1_inst_cw").fetchall()]
+    ipeds_cost_cols = [row[0] for row in con.sql("DESCRIBE ipeds_cost_raw").fetchall()]
 
     foia_inst_col = base.first_present(foia_cols, base.FOIA_INST_COLS, "FOIA institution column")
     foia_cip_col = base.first_present(foia_cols, base.FOIA_CIP_COLS, "FOIA CIP column")
@@ -1240,6 +1545,22 @@ def compute_never_treated_econ_control_event_time(
     cw_inst_col = base.first_present(cw_cols, base.CW_INST_COLS, "crosswalk institution column")
     cw_unitid_col = base.first_present(cw_cols, base.CW_UNITID_COLS, "crosswalk unitid column")
 
+    foia_person_inst_col = base.first_present(foia_person_cols, base.FOIA_INST_COLS, "FOIA person institution column")
+    foia_person_cip_col = base.first_present(foia_person_cols, base.FOIA_CIP_COLS, "FOIA person CIP column")
+    foia_person_end_col = base.first_present(foia_person_cols, base.FOIA_PROG_END_COLS, "FOIA person program end column")
+    foia_person_student_col = base.first_present(foia_person_cols, base.FOIA_STUDENT_KEY_COLS, "FOIA person student identifier column")
+    foia_person_person_id_col = base.first_present(foia_person_cols, ["person_id"], "FOIA person_id column")
+    foia_person_edu_col = base.first_present(foia_person_cols, base.FOIA_EDU_LEVEL_COLS, "FOIA person education level column")
+    foia_person_year_col = None
+    for cand in base.FOIA_YEAR_COLS:
+        if cand.lower() in [c.lower() for c in foia_person_cols]:
+            foia_person_year_col = next(c for c in foia_person_cols if c.lower() == cand.lower())
+            break
+    if ipeds_tuition_col.lower() not in [c.lower() for c in ipeds_cost_cols]:
+        raise ValueError(
+            f"Could not locate IPEDS tuition column '{ipeds_tuition_col}'. Available columns: {sorted(ipeds_cost_cols)}"
+        )
+    ipeds_tuition_col_sql = next(c for c in ipeds_cost_cols if c.lower() == ipeds_tuition_col.lower())
     foia_year_col = None
     for cand in base.FOIA_YEAR_COLS:
         if cand.lower() in [c.lower() for c in foia_cols]:
@@ -1252,12 +1573,20 @@ def compute_never_treated_econ_control_event_time(
             break
     if opt_end_col is None:
         raise ValueError("Could not locate an OPT authorization end column in FOIA data.")
+    foia_end_date_expr = f"TRY_CAST({foia_end_col} AS DATE)"
+    foia_person_end_date_expr = f"TRY_CAST({foia_person_end_col} AS DATE)"
+    foia_opt_end_date_expr = f"TRY_CAST({opt_end_col} AS DATE)"
 
     source_cip_where = _source_only_cip_where("cipcode")
     norm_cip_expr = base.normalize_cip_sql(foia_cip_col)
     year_match_clause = (
-        f"AND CAST({foia_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_end_col}) AS INTEGER)"
+        f"AND CAST({foia_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_end_date_expr}) AS INTEGER)"
         if foia_year_col
+        else ""
+    )
+    person_year_match_clause = (
+        f"AND CAST({foia_person_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_person_end_date_expr}) AS INTEGER)"
+        if foia_person_year_col
         else ""
     )
 
@@ -1268,18 +1597,18 @@ def compute_never_treated_econ_control_event_time(
                 cw.{cw_unitid_col} AS unitid,
                 {norm_cip_expr} AS cipcode,
                 LPAD(CAST({norm_cip_expr} AS VARCHAR), 6, '0') AS cip6,
-                CAST(EXTRACT(YEAR FROM {foia_end_col}) AS INTEGER) AS grad_year,
+                CAST(EXTRACT(YEAR FROM {foia_end_date_expr}) AS INTEGER) AS grad_year,
                 CAST({foia_student_col} AS VARCHAR) AS student_id,
                 employer_name,
                 employment_opt_type,
-                {opt_end_col} AS opt_end_date,
+                {foia_opt_end_date_expr} AS opt_end_date,
                 {foia_tuition_col} AS tuition,
-                {foia_end_col} AS program_end_date,
+                {foia_end_date_expr} AS program_end_date,
                 {status_col} AS requested_status
             FROM foia_raw fr
             LEFT JOIN f1_inst_cw cw
               ON fr.{foia_inst_col} = cw.{cw_inst_col}
-            WHERE {foia_end_col} IS NOT NULL
+            WHERE {foia_end_date_expr} IS NOT NULL
               AND fr.{foia_edu_col} = 'MASTER''S'
               AND ({source_cip_where})
               {year_match_clause}
@@ -1343,58 +1672,120 @@ def compute_never_treated_econ_control_event_time(
             FROM student_level
             WHERE grad_year IS NOT NULL
             GROUP BY pair_id, calendar_year, relabel_year, relabel_type
+        ),
+        unit_year_counts AS (
+            SELECT
+                pair_id,
+                unitid,
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS total_grads_unit
+            FROM student_level
+            GROUP BY pair_id, unitid, calendar_year, relabel_year, relabel_type
+        ),
+        ipeds_tuition AS (
+            SELECT
+                u.pair_id,
+                u.calendar_year,
+                u.relabel_year,
+                u.relabel_type,
+                SUM(u.total_grads_unit * TRY_CAST(ic.{ipeds_tuition_col_sql} AS DOUBLE)) AS tuition_ipeds_total
+            FROM unit_year_counts u
+            LEFT JOIN ipeds_cost_raw ic
+              ON CAST(ic.unitid AS BIGINT) = CAST(u.unitid AS BIGINT)
+             AND CAST(ic.year AS INTEGER) = CAST(u.calendar_year AS INTEGER)
+            GROUP BY u.pair_id, u.calendar_year, u.relabel_year, u.relabel_type
+        ),
+        foia_match_base AS (
+            SELECT
+                cw.{cw_unitid_col} AS unitid,
+                {norm_cip_expr} AS cipcode,
+                LPAD(CAST({norm_cip_expr} AS VARCHAR), 6, '0') AS cip6,
+                CAST(EXTRACT(YEAR FROM {foia_person_end_date_expr}) AS INTEGER) AS grad_year,
+                CAST({foia_person_student_col} AS VARCHAR) AS student_id,
+                CAST({foia_person_person_id_col} AS BIGINT) AS person_id
+            FROM foia_person_panel_raw fp
+            LEFT JOIN f1_inst_cw cw
+              ON fp.{foia_person_inst_col} = cw.{cw_inst_col}
+            WHERE {foia_person_end_date_expr} IS NOT NULL
+              AND fp.{foia_person_edu_col} = 'MASTER''S'
+              AND ({source_cip_where})
+              {person_year_match_clause}
+        ),
+        foia_match_relevant AS (
+            SELECT *
+            FROM foia_match_base
+            WHERE unitid IS NOT NULL
+              AND cipcode IS NOT NULL
+              AND grad_year IS NOT NULL
+              AND student_id IS NOT NULL
+        ),
+        matched_control_person AS (
+            SELECT f.*
+                 , mp.pair_id
+                 , mp.relabel_type
+                 , mp.relabel_year
+            FROM foia_match_relevant f
+            JOIN matched_pairs mp
+              ON CAST(f.unitid AS BIGINT) = CAST(mp.control_unitid AS BIGINT)
+        ),
+        linkedin_match_counts AS (
+            SELECT
+                pair_id,
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS linkedin_match_total_students,
+                COUNT(DISTINCT CASE WHEN s.person_id IS NOT NULL THEN student_id END) AS linkedin_matched_students
+            FROM matched_control_person f
+            LEFT JOIN stage05_linked_persons s
+              ON f.person_id = s.person_id
+            GROUP BY pair_id, calendar_year, relabel_year, relabel_type
         )
         SELECT
-            calendar_year,
-            relabel_year,
-            relabel_type,
-            avg_tuition,
-            total_grads,
-            opt_users,
-            opt_stem_users,
-            status_change_users,
-            total_opt_years,
+            c.calendar_year,
+            c.relabel_year,
+            c.relabel_type,
+            c.avg_tuition,
+            c.total_grads,
+            c.opt_users,
+            c.opt_stem_users,
+            c.status_change_users,
+            c.total_opt_years,
+            COALESCE(m.linkedin_matched_students, 0) AS linkedin_matched_students,
+            COALESCE(m.linkedin_match_total_students, 0) AS linkedin_match_total_students,
+            t.tuition_ipeds_total,
+            CASE
+                WHEN c.total_grads > 0 THEN t.tuition_ipeds_total / c.total_grads
+                ELSE NULL
+            END AS avg_tuition_ipeds,
             NULL::DOUBLE AS ctotalt,
             NULL::DOUBLE AS cnralt
-        FROM calendar_level
+        FROM calendar_level c
+        LEFT JOIN linkedin_match_counts m
+          ON c.pair_id = m.pair_id
+         AND c.calendar_year = m.calendar_year
+         AND c.relabel_year = m.relabel_year
+         AND c.relabel_type = m.relabel_type
+        LEFT JOIN ipeds_tuition t
+          ON c.pair_id = t.pair_id
+         AND c.calendar_year = t.calendar_year
+         AND c.relabel_year = t.relabel_year
+         AND c.relabel_type = t.relabel_type
         """
     ).df()
 
     if control_calendar.empty:
         return pd.DataFrame()
 
-    control_calendar["opt_share"] = control_calendar["opt_users"] / control_calendar["total_grads"]
-    control_calendar["opt_stem_share"] = control_calendar["opt_stem_users"] / control_calendar["total_grads"]
-    control_calendar["status_change_share"] = control_calendar["status_change_users"] / control_calendar["total_grads"]
-    control_calendar["opt_years_avg"] = control_calendar["total_opt_years"] / control_calendar["total_grads"]
-    control_calendar["f1_share_of_ctotalt"] = control_calendar["total_grads"] / control_calendar["ctotalt"]
-    control_calendar["f1_share_of_cnralt"] = control_calendar["total_grads"] / control_calendar["cnralt"]
-    control_calendar["tuition_total"] = control_calendar["avg_tuition"] * control_calendar["total_grads"]
+    control_calendar = base._finalize_cohort_calendar(control_calendar)
 
     control_calendar["event_t"] = control_calendar["calendar_year"] - control_calendar["relabel_year"]
-    control_event = (
-        control_calendar.groupby(["event_t", "relabel_type"], as_index=False)
-        .agg(
-            total_grads=("total_grads", "sum"),
-            opt_users=("opt_users", "sum"),
-            opt_stem_users=("opt_stem_users", "sum"),
-            status_change_users=("status_change_users", "sum"),
-            total_opt_years=("total_opt_years", "sum"),
-            tuition_total=("tuition_total", "sum"),
-            ctotalt=("ctotalt", "sum"),
-            cnralt=("cnralt", "sum"),
-        )
-    )
-    # Institution-level never-treated controls are not matched to treated IPEDS denominators.
+    control_event = base._aggregate_cohort_event_time(control_calendar)
     control_event["ctotalt"] = pd.NA
     control_event["cnralt"] = pd.NA
-    control_event["opt_share"] = control_event["opt_users"] / control_event["total_grads"]
-    control_event["opt_stem_share"] = control_event["opt_stem_users"] / control_event["total_grads"]
-    control_event["status_change_share"] = control_event["status_change_users"] / control_event["total_grads"]
-    control_event["opt_years_avg"] = control_event["total_opt_years"] / control_event["total_grads"]
-    control_event["f1_share_of_ctotalt"] = control_event["total_grads"] / control_event["ctotalt"]
-    control_event["f1_share_of_cnralt"] = control_event["total_grads"] / control_event["cnralt"]
-    control_event["avg_tuition"] = control_event["tuition_total"] / control_event["total_grads"]
+    control_event = base._finalize_cohort_calendar(control_event)
     return control_event
 
 
@@ -1423,7 +1814,7 @@ def plot_opt_usage_event_time_with_control_label(
 
     sns.set(style="whitegrid")
     sns.set_palette(base.PALETTE_SEQ)
-    plt.rcParams.update({"font.size": base.BASE_FONT_SIZE})
+    plt.rcParams.update({"font.size": DID_PLOT_FONT_SIZE})
 
     if make_treated_only_plot:
         fig_t, ax_t = plt.subplots(figsize=(10, 6))
@@ -1433,12 +1824,13 @@ def plot_opt_usage_event_time_with_control_label(
             y=yvar,
             hue="series_label",
             marker="o",
+            markersize=DID_PLOT_MARKER_SIZE,
             ax=ax_t,
         )
-        ax_t.set_ylabel(base.yvar_label(yvar))
-        ax_t.set_xlabel("Years relative to relabel (t=0)")
+        ax_t.set_ylabel(base.yvar_label(yvar), fontsize=DID_PLOT_FONT_SIZE)
+        ax_t.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=DID_PLOT_FONT_SIZE)
         ax_t.set_title("")
-        ax_t.axvline(x=0, linestyle="--", color="gray", linewidth=1)
+        ax_t.axvline(x=DID_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
         ax_t.legend(title=None)
         fig_t.tight_layout()
         if save:
@@ -1454,12 +1846,13 @@ def plot_opt_usage_event_time_with_control_label(
         y=yvar,
         hue="series_label",
         marker="o",
+        markersize=DID_PLOT_MARKER_SIZE,
         ax=ax,
     )
-    ax.set_ylabel(base.yvar_label(yvar))
-    ax.set_xlabel("Years relative to relabel (t=0)")
+    ax.set_ylabel(base.yvar_label(yvar), fontsize=DID_PLOT_FONT_SIZE)
+    ax.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=DID_PLOT_FONT_SIZE)
     ax.set_title("")
-    ax.axvline(x=0, linestyle="--", color="gray", linewidth=1)
+    ax.axvline(x=DID_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
     ax.legend(title=None)
     fig.tight_layout()
 
@@ -1581,7 +1974,19 @@ def main() -> None:
     #   "f1_share_of_ctotalt" – FOIA share of IPEDS ctotalt
     #   "f1_share_of_cnralt"  – FOIA share of IPEDS cnralt
     #   "avg_tuition"         – Average tuition (USD)
-    yvars: list[str] = ["opt_share", "opt_stem_share", "status_change_share", "opt_years_avg", "f1_share_of_ctotalt", "f1_share_of_cnralt", "avg_tuition"]
+    #   "linkedin_match_share" – Share of FOIA students matched to LinkedIn
+    #   "avg_tuition_ipeds"    – Average external tuition from IPEDS
+    yvars: list[str] = [
+        "opt_share",
+        "opt_stem_share",
+        "status_change_share",
+        "opt_years_avg",
+        "f1_share_of_ctotalt",
+        "f1_share_of_cnralt",
+        "avg_tuition",
+        "linkedin_match_share",
+        "avg_tuition_ipeds",
+    ]
 
     plt.rcParams.update({"font.size": base.BASE_FONT_SIZE})
     sns.set(style="whitegrid")

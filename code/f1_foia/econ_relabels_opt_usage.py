@@ -17,6 +17,7 @@ from typing import Iterable, Optional
 
 import duckdb as ddb
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 # Ensure progress logs flush immediately.
@@ -39,7 +40,10 @@ PALETTE_SEQ = [IHMP_COLORS["IHMP"], IHMP_COLORS["Non-IHMP"], "#4c78a8", "#a05195
 INT_FOLDER = f"{root}/data/int/int_files_nov2025"
 IPEDS_PATH = f"{INT_FOLDER}/ipeds_completions_all.parquet"
 FOIA_PATH = f"{root}/data/int/foia_sevp_combined_raw.parquet"
+FOIA_PERSON_PANEL_PATH = f"{root}/data/int/f1_indiv_merge/01_f1_foia_clean/foia_person_panel_apr2026v1.parquet"
+STAGE05_PERSON_BASELINE_PATH = f"{root}/data/int/f1_indiv_merge/05_indiv_merge/f1_merge_person_baseline_apr2026v1.parquet"
 F1_INST_CW_PATH = f"{INT_FOLDER}/f1_inst_unitid_crosswalk.parquet"
+IPEDS_COST_PANEL_PATH = f"{root}/data/raw/ipeds/ipeds_cost_panel.parquet"
 STEM_OPT_LONG_PATH = f"{root}/data/raw/stem_opt_cip_codes/stem_opt_cip_lists_2008_to_2024_long.csv"
 CIP_2010_CATALOG_PATH = f"{root}/data/crosswalks/cip/CIPCode2010.csv"
 CIP_2020_CATALOG_PATH = f"{root}/data/crosswalks/cip/CIPCode2020.csv"
@@ -59,13 +63,25 @@ TOP_COMMON_RELABELS = 20
 PICK_FIRST_RELABEL = True  # True: keep first relabel year; False: keep largest drop_pct
 YVAR = "avg_tuition"
 YVAR_LABELS = {
+    "stem_cip_eligible_share": "Share in STEM OPT-eligible CIP",
     "opt_share": "Share of F-1s using OPT",
     "opt_stem_share": "Share of F-1s using STEM OPT",
     "status_change_share": "Share with status change",
-    "opt_years_avg": "Average OPT years",
+    "post_grad_authorization_years_avg": "Post-grad authorization years",
+    "opt_duration_years_avg": "OPT duration years",
+    "opt_years_avg": "Post-grad authorization years",
+    "unique_employers": "Number of unique employers",
+    "unique_opt_cities": "Number of unique OPT cities",
+    "auth_employment_tenure_years": "Average authorization-employment tenure (years)",
+    "employer_opt_intensity_pctile": "Average employer OPT intensity percentile",
+    "internship_count": "Average internships per F-1 student",
+    "internship_opt_years": "Average OPT years in internships per F-1 student",
     "f1_share_of_ctotalt": "FOIA share of IPEDS ctotalt",
     "f1_share_of_cnralt": "FOIA share of IPEDS cnralt",
+    "cnralt_share_of_ctotalt": "Nonresident share of IPEDS completions",
     "avg_tuition": "Average tuition (USD)",
+    "linkedin_match_share": "Share matched to LinkedIn",
+    "avg_tuition_ipeds": "Average tuition (IPEDS, USD)",
 }
 RELABEL_SPECS = [
     {
@@ -183,6 +199,155 @@ def _normalize_text(value: object) -> Optional[str]:
     s = re.sub(r"[^a-z0-9]+", " ", s)
     s = " ".join(s.split())
     return s or None
+
+
+def _create_empty_temp_view(
+    con: ddb.DuckDBPyConnection,
+    name: str,
+    columns: list[tuple[str, str]],
+) -> None:
+    selects = ", ".join(f"CAST(NULL AS {dtype}) AS {col}" for col, dtype in columns)
+    con.sql(
+        f"""
+        CREATE OR REPLACE TEMP VIEW {name} AS
+        SELECT {selects}
+        WHERE 1 = 0
+        """
+    )
+
+
+def _prepare_external_support_views(
+    con: ddb.DuckDBPyConnection,
+    *,
+    foia_person_panel_path: str | None = None,
+    stage05_person_baseline_path: str | None = None,
+    ipeds_cost_panel_path: str | None = None,
+) -> None:
+    foia_person_panel_path = foia_person_panel_path or FOIA_PERSON_PANEL_PATH
+    stage05_person_baseline_path = stage05_person_baseline_path or STAGE05_PERSON_BASELINE_PATH
+    ipeds_cost_panel_path = ipeds_cost_panel_path or IPEDS_COST_PANEL_PATH
+
+    if foia_person_panel_path and os.path.exists(foia_person_panel_path):
+        con.sql(
+            f"""
+            CREATE OR REPLACE TEMP VIEW foia_person_panel_raw AS
+            SELECT * FROM read_parquet('{foia_person_panel_path}')
+            """
+        )
+    else:
+        _create_empty_temp_view(
+            con,
+            "foia_person_panel_raw",
+            [
+                ("school_name", "VARCHAR"),
+                ("major_1_cip_code", "VARCHAR"),
+                ("program_end_date", "DATE"),
+                ("student_edu_level_desc", "VARCHAR"),
+                ("student_key", "VARCHAR"),
+                ("person_id", "BIGINT"),
+                ("year", "INTEGER"),
+            ],
+        )
+
+    if stage05_person_baseline_path and os.path.exists(stage05_person_baseline_path):
+        con.sql(
+            f"""
+            CREATE OR REPLACE TEMP VIEW stage05_person_baseline_raw AS
+            SELECT * FROM read_parquet('{stage05_person_baseline_path}')
+            """
+        )
+        stage05_cols = [row[0] for row in con.sql("DESCRIBE stage05_person_baseline_raw").fetchall()]
+        user_id_col = first_present(stage05_cols, ["user_id"], "stage05 user column")
+        person_id_col = first_present(stage05_cols, ["person_id"], "stage05 person column")
+        rank_filter = ""
+        if any(str(col).lower() == "person_match_rank" for col in stage05_cols):
+            rank_filter = "AND CAST(person_match_rank AS BIGINT) = 1"
+        con.sql(
+            f"""
+            CREATE OR REPLACE TEMP VIEW stage05_linked_persons AS
+            SELECT DISTINCT
+                CAST({person_id_col} AS BIGINT) AS person_id,
+                CAST({user_id_col} AS BIGINT) AS user_id
+            FROM stage05_person_baseline_raw
+            WHERE {person_id_col} IS NOT NULL
+              AND {user_id_col} IS NOT NULL
+              {rank_filter}
+            """
+        )
+    else:
+        _create_empty_temp_view(
+            con,
+            "stage05_linked_persons",
+            [("person_id", "BIGINT"), ("user_id", "BIGINT")],
+        )
+
+    if ipeds_cost_panel_path and os.path.exists(ipeds_cost_panel_path):
+        con.sql(
+            f"""
+            CREATE OR REPLACE TEMP VIEW ipeds_cost_raw AS
+            SELECT * FROM read_parquet('{ipeds_cost_panel_path}')
+            """
+        )
+    else:
+        _create_empty_temp_view(
+            con,
+            "ipeds_cost_raw",
+            [("unitid", "BIGINT"), ("year", "INTEGER"), ("tuition7", "DOUBLE")],
+        )
+
+
+def _safe_share(numer: pd.Series, denom: pd.Series) -> pd.Series:
+    numer = pd.to_numeric(numer, errors="coerce")
+    denom = pd.to_numeric(denom, errors="coerce")
+    return numer.where(denom.notna(), np.nan) / denom.where(denom != 0)
+
+
+def _finalize_cohort_calendar(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    out["opt_share"] = _safe_share(out["opt_users"], out["total_grads"])
+    out["opt_stem_share"] = _safe_share(out["opt_stem_users"], out["total_grads"])
+    out["status_change_share"] = _safe_share(out["status_change_users"], out["total_grads"])
+    out["opt_years_avg"] = _safe_share(out["total_opt_years"], out["total_grads"])
+    out["f1_share_of_ctotalt"] = _safe_share(out["total_grads"], out["ctotalt"])
+    out["f1_share_of_cnralt"] = _safe_share(out["total_grads"], out["cnralt"])
+    if "avg_tuition" in out.columns and "tuition_total" not in out.columns:
+        out["tuition_total"] = pd.to_numeric(out["avg_tuition"], errors="coerce") * pd.to_numeric(out["total_grads"], errors="coerce")
+    if "linkedin_match_total_students" not in out.columns:
+        out["linkedin_match_total_students"] = pd.to_numeric(out["total_grads"], errors="coerce")
+    out["linkedin_matched_students"] = pd.to_numeric(out.get("linkedin_matched_students", 0), errors="coerce").fillna(0)
+    out["linkedin_match_total_students"] = pd.to_numeric(out["linkedin_match_total_students"], errors="coerce").fillna(0)
+    out["linkedin_match_share"] = _safe_share(out["linkedin_matched_students"], out["linkedin_match_total_students"])
+    if "tuition_ipeds_total" not in out.columns:
+        if "avg_tuition_ipeds" in out.columns:
+            out["tuition_ipeds_total"] = pd.to_numeric(out["avg_tuition_ipeds"], errors="coerce") * pd.to_numeric(out["total_grads"], errors="coerce")
+        else:
+            out["tuition_ipeds_total"] = np.nan
+    out["avg_tuition_ipeds"] = _safe_share(out["tuition_ipeds_total"], out["total_grads"])
+    return out
+
+
+def _aggregate_cohort_event_time(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    grouped = (
+        df.groupby(["event_t", "relabel_type"], as_index=False)
+        .agg(
+            total_grads=("total_grads", "sum"),
+            opt_users=("opt_users", "sum"),
+            opt_stem_users=("opt_stem_users", "sum"),
+            status_change_users=("status_change_users", "sum"),
+            total_opt_years=("total_opt_years", "sum"),
+            tuition_total=("tuition_total", "sum"),
+            tuition_ipeds_total=("tuition_ipeds_total", "sum"),
+            linkedin_matched_students=("linkedin_matched_students", "sum"),
+            linkedin_match_total_students=("linkedin_match_total_students", "sum"),
+            ctotalt=("ctotalt", "sum"),
+            cnralt=("cnralt", "sum"),
+        )
+    )
+    return _finalize_cohort_calendar(grouped)
 
 
 def _load_cip_transition_map(catalog_path: str) -> tuple[dict[str, str], set[str]]:
@@ -861,7 +1026,13 @@ def find_common_relabels(con: ddb.DuckDBPyConnection, top_n: int = TOP_COMMON_RE
 
 
 def compute_opt_usage(
-    con: ddb.DuckDBPyConnection, relabel_df: pd.DataFrame
+    con: ddb.DuckDBPyConnection,
+    relabel_df: pd.DataFrame,
+    *,
+    foia_person_panel_path: str | None = None,
+    stage05_person_baseline_path: str | None = None,
+    ipeds_cost_panel_path: str | None = None,
+    ipeds_tuition_col: str = "tuition7",
 ) -> pd.DataFrame:
     """
     Compute OPT usage shares by calendar year with hue = relabel year.
@@ -876,6 +1047,12 @@ def compute_opt_usage(
 
     con.sql(f"CREATE OR REPLACE TEMP VIEW foia_raw AS SELECT * FROM read_parquet('{FOIA_PATH}')")
     con.sql(f"CREATE OR REPLACE TEMP VIEW f1_inst_cw AS SELECT * FROM read_parquet('{F1_INST_CW_PATH}')")
+    _prepare_external_support_views(
+        con,
+        foia_person_panel_path=foia_person_panel_path,
+        stage05_person_baseline_path=stage05_person_baseline_path,
+        ipeds_cost_panel_path=ipeds_cost_panel_path,
+    )
 
     relabel_events = (
         relabel_df[["unitid", "year", "relabel_type", "ctotalt", "cnralt", "relabel_year"]]
@@ -886,25 +1063,20 @@ def compute_opt_usage(
     con.sql("CREATE OR REPLACE TEMP VIEW relabel_events AS SELECT * FROM relabel_events_py")
 
     foia_cols = [row[0] for row in con.sql("DESCRIBE foia_raw").fetchall()]
+    foia_person_cols = [row[0] for row in con.sql("DESCRIBE foia_person_panel_raw").fetchall()]
     cw_cols = [row[0] for row in con.sql("DESCRIBE f1_inst_cw").fetchall()]
+    ipeds_cost_cols = [row[0] for row in con.sql("DESCRIBE ipeds_cost_raw").fetchall()]
 
     foia_inst_col = first_present(foia_cols, FOIA_INST_COLS, "FOIA institution column")
     foia_cip_col = first_present(foia_cols, FOIA_CIP_COLS, "FOIA CIP column")
     foia_end_col = first_present(foia_cols, FOIA_PROG_END_COLS, "program end date column")
     foia_student_col = first_present(foia_cols, FOIA_STUDENT_KEY_COLS, "student identifier column")
     foia_tuition_col = first_present(foia_cols, FOIA_TUITION_COLS, "tuition column")
-    opt_start_col: Optional[str] = None
-    for cand in FOIA_OPT_START_COLS:
-        if cand.lower() in [c.lower() for c in foia_cols]:
-            opt_start_col = next(c for c in foia_cols if c.lower() == cand.lower())
-            break
     foia_year_col = None
     for cand in FOIA_YEAR_COLS:
         if cand.lower() in [c.lower() for c in foia_cols]:
             foia_year_col = next(c for c in foia_cols if c.lower() == cand.lower())
             break
-    if opt_start_col is None:
-        raise ValueError("Could not locate an OPT authorization start column in FOIA data.")
     opt_end_col = None
     for cand in FOIA_OPT_END_COLS:
         if cand.lower() in [c.lower() for c in foia_cols]:
@@ -919,9 +1091,34 @@ def compute_opt_usage(
     cw_inst_col = first_present(cw_cols, CW_INST_COLS, "crosswalk institution column")
     cw_unitid_col = first_present(cw_cols, CW_UNITID_COLS, "crosswalk unitid column")
 
+    foia_person_inst_col = first_present(foia_person_cols, FOIA_INST_COLS, "FOIA person institution column")
+    foia_person_cip_col = first_present(foia_person_cols, FOIA_CIP_COLS, "FOIA person CIP column")
+    foia_person_end_col = first_present(foia_person_cols, FOIA_PROG_END_COLS, "FOIA person program end date column")
+    foia_person_student_col = first_present(foia_person_cols, FOIA_STUDENT_KEY_COLS, "FOIA person student identifier column")
+    foia_person_person_id_col = first_present(foia_person_cols, ["person_id"], "FOIA person_id column")
+    foia_person_edu_col = first_present(foia_person_cols, FOIA_EDU_LEVEL_COLS, "FOIA person education level column")
+    foia_person_year_col = None
+    for cand in FOIA_YEAR_COLS:
+        if cand.lower() in [c.lower() for c in foia_person_cols]:
+            foia_person_year_col = next(c for c in foia_person_cols if c.lower() == cand.lower())
+            break
+    if ipeds_tuition_col.lower() not in [c.lower() for c in ipeds_cost_cols]:
+        raise ValueError(
+            f"Could not locate IPEDS tuition column '{ipeds_tuition_col}'. Available columns: {sorted(ipeds_cost_cols)}"
+        )
+    ipeds_tuition_col_sql = next(c for c in ipeds_cost_cols if c.lower() == ipeds_tuition_col.lower())
+    foia_end_date_expr = f"TRY_CAST({foia_end_col} AS DATE)"
+    foia_opt_end_date_expr = f"TRY_CAST({opt_end_col} AS DATE)"
+    foia_person_end_date_expr = f"TRY_CAST({foia_person_end_col} AS DATE)"
+
     year_match_clause = (
-        f"AND CAST({foia_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_end_col}) AS INTEGER)"
+        f"AND CAST({foia_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_end_date_expr}) AS INTEGER)"
         if foia_year_col
+        else ""
+    )
+    person_year_match_clause = (
+        f"AND CAST({foia_person_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_person_end_date_expr}) AS INTEGER)"
+        if foia_person_year_col
         else ""
     )
 
@@ -931,19 +1128,19 @@ def compute_opt_usage(
             SELECT
                 cw.{cw_unitid_col} AS unitid,
                 {normalize_cip_sql(foia_cip_col)} AS cipcode,
-                CAST(EXTRACT(YEAR FROM {foia_end_col}) AS INTEGER) AS grad_year,
+                CAST(EXTRACT(YEAR FROM {foia_end_date_expr}) AS INTEGER) AS grad_year,
                 CAST({foia_student_col} AS VARCHAR) AS student_id,
                 {'CAST(' + foia_year_col + ' AS INTEGER)' if foia_year_col else 'NULL'} AS reported_year,
                 employer_name,
                 employment_opt_type,
-                {opt_end_col},
+                {foia_opt_end_date_expr} AS opt_end_date,
                 {foia_tuition_col} AS tuition,
-                program_end_date,
+                {foia_end_date_expr} AS program_end_date,
                 {status_col} AS requested_status
             FROM foia_raw fr
             LEFT JOIN f1_inst_cw cw
               ON fr.{foia_inst_col} = cw.{cw_inst_col}
-            WHERE {foia_end_col} IS NOT NULL
+            WHERE {foia_end_date_expr} IS NOT NULL
               AND fr.{foia_edu_col} = 'MASTER''S'
               AND ({FOIA_CIP_WHERE})
               {year_match_clause}
@@ -977,7 +1174,11 @@ def compute_opt_usage(
                 MAX(CASE WHEN COALESCE(employment_opt_type, '') = 'POST-COMPLETION' THEN 1 ELSE 0 END) AS opt_ind_old,
                 MAX(CASE WHEN COALESCE(employment_opt_type, '') = 'STEM' THEN 1 ELSE 0 END) AS opt_stem_ind,
                 MAX(CASE WHEN requested_status IS NOT NULL THEN 1 ELSE 0 END) AS status_change_ind,
-                CASE WHEN MAX({opt_end_col}) IS NOT NULL THEN DATE_DIFF('day', MAX({foia_end_col}), MAX({opt_end_col})) / 365.25 ELSE 0 END AS opt_years,
+                CASE
+                    WHEN MAX(opt_end_date) IS NOT NULL
+                    THEN DATE_DIFF('day', MAX(program_end_date), MAX(opt_end_date)) / 365.25
+                    ELSE 0
+                END AS opt_years,
                 AVG(TRY_CAST(tuition AS DOUBLE)) AS avg_tuition,
                 student_id,
                 relabel_year,
@@ -987,35 +1188,125 @@ def compute_opt_usage(
         ),
         dedup AS (
             SELECT * FROM student_level
+        ),
+        calendar_level AS (
+            SELECT
+                grad_year AS calendar_year,
+                relabel_year AS relabel_year,
+                relabel_type,
+                cnralt,
+                ctotalt,
+                AVG(avg_tuition) AS avg_tuition,
+                COUNT(DISTINCT student_id) AS total_grads,
+                COUNT(DISTINCT CASE WHEN opt_ind = 1 THEN student_id END) AS opt_users,
+                COUNT(DISTINCT CASE WHEN opt_stem_ind = 1 THEN student_id END) AS opt_stem_users,
+                COUNT(DISTINCT CASE WHEN status_change_ind = 1 THEN student_id END) AS status_change_users,
+                SUM(opt_years) AS total_opt_years
+            FROM dedup
+            WHERE relabel_year IS NOT NULL
+              AND grad_year IS NOT NULL
+            GROUP BY calendar_year, relabel_year, relabel_type, cnralt, ctotalt
+        ),
+        unit_year_counts AS (
+            SELECT
+                unitid,
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS total_grads_unit
+            FROM dedup
+            GROUP BY unitid, calendar_year, relabel_year, relabel_type
+        ),
+        ipeds_tuition AS (
+            SELECT
+                u.calendar_year,
+                u.relabel_year,
+                u.relabel_type,
+                SUM(u.total_grads_unit * TRY_CAST(ic.{ipeds_tuition_col_sql} AS DOUBLE)) AS tuition_ipeds_total
+            FROM unit_year_counts u
+            LEFT JOIN ipeds_cost_raw ic
+              ON CAST(ic.unitid AS BIGINT) = CAST(u.unitid AS BIGINT)
+             AND CAST(ic.year AS INTEGER) = CAST(u.calendar_year AS INTEGER)
+            GROUP BY u.calendar_year, u.relabel_year, u.relabel_type
+        ),
+        foia_match_base AS (
+            SELECT
+                cw.{cw_unitid_col} AS unitid,
+                {normalize_cip_sql(foia_person_cip_col)} AS cipcode,
+                CAST(EXTRACT(YEAR FROM {foia_person_end_date_expr}) AS INTEGER) AS grad_year,
+                CAST({foia_person_student_col} AS VARCHAR) AS student_id,
+                CAST({foia_person_person_id_col} AS BIGINT) AS person_id
+            FROM foia_person_panel_raw fp
+            LEFT JOIN f1_inst_cw cw
+              ON fp.{foia_person_inst_col} = cw.{cw_inst_col}
+            WHERE {foia_person_end_date_expr} IS NOT NULL
+              AND fp.{foia_person_edu_col} = 'MASTER''S'
+              AND ({FOIA_CIP_WHERE})
+              {person_year_match_clause}
+        ),
+        foia_match_relevant AS (
+            SELECT *
+            FROM foia_match_base
+            WHERE unitid IS NOT NULL
+              AND cipcode IS NOT NULL
+              AND grad_year IS NOT NULL
+              AND student_id IS NOT NULL
+        ),
+        foia_match_flagged AS (
+            SELECT
+                f.*,
+                r.relabel_year,
+                r.relabel_type
+            FROM foia_match_relevant f
+            JOIN relabel_events r
+              ON f.unitid = r.unitid AND f.grad_year = r.year
+             AND ({RELABEL_TYPE_PREDICATES})
+        ),
+        linkedin_match_counts AS (
+            SELECT
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS linkedin_match_total_students,
+                COUNT(DISTINCT CASE WHEN s.person_id IS NOT NULL THEN student_id END) AS linkedin_matched_students
+            FROM foia_match_flagged f
+            LEFT JOIN stage05_linked_persons s
+              ON f.person_id = s.person_id
+            GROUP BY calendar_year, relabel_year, relabel_type
         )
         SELECT
-            grad_year AS calendar_year,
-            relabel_year AS relabel_year,
-            relabel_type,
-            cnralt,
-            ctotalt,
-            AVG(avg_tuition) AS avg_tuition,
-            COUNT(DISTINCT student_id) AS total_grads,
-            COUNT(DISTINCT CASE WHEN opt_ind = 1 THEN student_id END) AS opt_users,
-            COUNT(DISTINCT CASE WHEN opt_stem_ind = 1 THEN student_id END) AS opt_stem_users,
-            COUNT(DISTINCT CASE WHEN status_change_ind = 1 THEN student_id END) AS status_change_users,
-            SUM(opt_years) AS total_opt_years
-        FROM dedup
-        WHERE relabel_year IS NOT NULL
-          AND grad_year IS NOT NULL
-        GROUP BY calendar_year, relabel_year, relabel_type, cnralt, ctotalt
-        ORDER BY calendar_year, relabel_year, relabel_type, cnralt, ctotalt
+            c.calendar_year,
+            c.relabel_year,
+            c.relabel_type,
+            c.cnralt,
+            c.ctotalt,
+            c.avg_tuition,
+            c.total_grads,
+            c.opt_users,
+            c.opt_stem_users,
+            c.status_change_users,
+            c.total_opt_years,
+            COALESCE(m.linkedin_matched_students, 0) AS linkedin_matched_students,
+            COALESCE(m.linkedin_match_total_students, 0) AS linkedin_match_total_students,
+            t.tuition_ipeds_total,
+            CASE
+                WHEN c.total_grads > 0 THEN t.tuition_ipeds_total / c.total_grads
+                ELSE NULL
+            END AS avg_tuition_ipeds
+        FROM calendar_level c
+        LEFT JOIN linkedin_match_counts m
+          ON c.calendar_year = m.calendar_year
+         AND c.relabel_year = m.relabel_year
+         AND c.relabel_type = m.relabel_type
+        LEFT JOIN ipeds_tuition t
+          ON c.calendar_year = t.calendar_year
+         AND c.relabel_year = t.relabel_year
+         AND c.relabel_type = t.relabel_type
+        ORDER BY c.calendar_year, c.relabel_year, c.relabel_type, c.cnralt, c.ctotalt
         """
     ).df()
 
-    opt_usage["opt_share"] = opt_usage["opt_users"] / opt_usage["total_grads"]
-    opt_usage['opt_stem_share'] = opt_usage["opt_stem_users"] / opt_usage["total_grads"]
-    opt_usage["status_change_share"] = opt_usage["status_change_users"] / opt_usage["total_grads"]
-    opt_usage["opt_years_avg"] = opt_usage["total_opt_years"] / opt_usage["total_grads"]
-    opt_usage['f1_share_of_ctotalt'] = opt_usage['total_grads'] / opt_usage['ctotalt']
-    opt_usage['f1_share_of_cnralt'] = opt_usage['total_grads'] / opt_usage['cnralt']
-    opt_usage["tuition_total"] = opt_usage["avg_tuition"] * opt_usage["total_grads"]
-    return opt_usage
+    return _finalize_cohort_calendar(opt_usage)
 
 
 def compute_opt_usage_event_time(opt_usage: pd.DataFrame) -> pd.DataFrame:
@@ -1025,31 +1316,17 @@ def compute_opt_usage_event_time(opt_usage: pd.DataFrame) -> pd.DataFrame:
     """
     df = opt_usage[opt_usage['calendar_year'].between(PLOT_YEAR_MIN, PLOT_YEAR_MAX)].copy()
     df["event_t"] = df["calendar_year"] - df["relabel_year"]
-    grouped = (
-        df.groupby(["event_t", "relabel_type"], as_index=False)
-        .agg(
-            total_grads=("total_grads", "sum"),
-            opt_users=("opt_users", "sum"),
-            opt_stem_users=("opt_stem_users", "sum"),
-            total_opt_years=("total_opt_years", "sum"),
-            total_status_change_users=("status_change_users", "sum"),
-            tuition_total=("tuition_total", "sum"),
-            ctotalt=("ctotalt", "sum"),
-            cnralt=("cnralt", "sum")
-        )
-    )
-    grouped["opt_share"] = grouped["opt_users"] / grouped["total_grads"]
-    grouped["opt_stem_share"] = grouped["opt_stem_users"] / grouped["total_grads"]
-    grouped["opt_years_avg"] = grouped["total_opt_years"] / grouped["total_grads"]
-    grouped["status_change_share"] = grouped["total_status_change_users"] / grouped["total_grads"]
-    grouped['f1_share_of_ctotalt'] = grouped['total_grads'] / grouped['ctotalt']
-    grouped['f1_share_of_cnralt'] = grouped['total_grads'] / grouped['cnralt']
-    grouped["avg_tuition"] = grouped["tuition_total"] / grouped["total_grads"]
-    return grouped
+    return _aggregate_cohort_event_time(df)
 
 
 def compute_control_opt_usage_event_time(
-    con: ddb.DuckDBPyConnection, relabel_df: pd.DataFrame
+    con: ddb.DuckDBPyConnection,
+    relabel_df: pd.DataFrame,
+    *,
+    foia_person_panel_path: str | None = None,
+    stage05_person_baseline_path: str | None = None,
+    ipeds_cost_panel_path: str | None = None,
+    ipeds_tuition_col: str = "tuition7",
 ) -> pd.DataFrame:
     """
     Compute OPT usage for a control CIP group (e.g., 11xxxx) relative to the same relabel events.
@@ -1065,6 +1342,12 @@ def compute_control_opt_usage_event_time(
 
     con.sql(f"CREATE OR REPLACE TEMP VIEW foia_raw AS SELECT * FROM read_parquet('{FOIA_PATH}')")
     con.sql(f"CREATE OR REPLACE TEMP VIEW f1_inst_cw AS SELECT * FROM read_parquet('{F1_INST_CW_PATH}')")
+    _prepare_external_support_views(
+        con,
+        foia_person_panel_path=foia_person_panel_path,
+        stage05_person_baseline_path=stage05_person_baseline_path,
+        ipeds_cost_panel_path=ipeds_cost_panel_path,
+    )
 
     relabel_events = (
         relabel_df[["unitid", "year", "relabel_type", "ctotalt", "cnralt", "relabel_year"]]
@@ -1074,25 +1357,20 @@ def compute_control_opt_usage_event_time(
     con.sql("CREATE OR REPLACE TEMP VIEW relabel_events_control AS SELECT * FROM relabel_events_control_py")
 
     foia_cols = [row[0] for row in con.sql("DESCRIBE foia_raw").fetchall()]
+    foia_person_cols = [row[0] for row in con.sql("DESCRIBE foia_person_panel_raw").fetchall()]
     cw_cols = [row[0] for row in con.sql("DESCRIBE f1_inst_cw").fetchall()]
+    ipeds_cost_cols = [row[0] for row in con.sql("DESCRIBE ipeds_cost_raw").fetchall()]
 
     foia_inst_col = first_present(foia_cols, FOIA_INST_COLS, "FOIA institution column")
     foia_cip_col = first_present(foia_cols, FOIA_CIP_COLS, "FOIA CIP column")
     foia_end_col = first_present(foia_cols, FOIA_PROG_END_COLS, "program end date column")
     foia_student_col = first_present(foia_cols, FOIA_STUDENT_KEY_COLS, "student identifier column")
     foia_tuition_col = first_present(foia_cols, FOIA_TUITION_COLS, "tuition column")
-    opt_start_col: Optional[str] = None
-    for cand in FOIA_OPT_START_COLS:
-        if cand.lower() in [c.lower() for c in foia_cols]:
-            opt_start_col = next(c for c in foia_cols if c.lower() == cand.lower())
-            break
     foia_year_col = None
     for cand in FOIA_YEAR_COLS:
         if cand.lower() in [c.lower() for c in foia_cols]:
             foia_year_col = next(c for c in foia_cols if c.lower() == cand.lower())
             break
-    if opt_start_col is None:
-        raise ValueError("Could not locate an OPT authorization start column in FOIA data.")
     opt_end_col = None
     for cand in FOIA_OPT_END_COLS:
         if cand.lower() in [c.lower() for c in foia_cols]:
@@ -1106,9 +1384,34 @@ def compute_control_opt_usage_event_time(
     cw_inst_col = first_present(cw_cols, CW_INST_COLS, "crosswalk institution column")
     cw_unitid_col = first_present(cw_cols, CW_UNITID_COLS, "crosswalk unitid column")
 
+    foia_person_inst_col = first_present(foia_person_cols, FOIA_INST_COLS, "FOIA person institution column")
+    foia_person_cip_col = first_present(foia_person_cols, FOIA_CIP_COLS, "FOIA person CIP column")
+    foia_person_end_col = first_present(foia_person_cols, FOIA_PROG_END_COLS, "FOIA person program end date column")
+    foia_person_student_col = first_present(foia_person_cols, FOIA_STUDENT_KEY_COLS, "FOIA person student identifier column")
+    foia_person_person_id_col = first_present(foia_person_cols, ["person_id"], "FOIA person_id column")
+    foia_person_edu_col = first_present(foia_person_cols, FOIA_EDU_LEVEL_COLS, "FOIA person education level column")
+    foia_person_year_col = None
+    for cand in FOIA_YEAR_COLS:
+        if cand.lower() in [c.lower() for c in foia_person_cols]:
+            foia_person_year_col = next(c for c in foia_person_cols if c.lower() == cand.lower())
+            break
+    if ipeds_tuition_col.lower() not in [c.lower() for c in ipeds_cost_cols]:
+        raise ValueError(
+            f"Could not locate IPEDS tuition column '{ipeds_tuition_col}'. Available columns: {sorted(ipeds_cost_cols)}"
+        )
+    ipeds_tuition_col_sql = next(c for c in ipeds_cost_cols if c.lower() == ipeds_tuition_col.lower())
+    foia_end_date_expr = f"TRY_CAST({foia_end_col} AS DATE)"
+    foia_opt_end_date_expr = f"TRY_CAST({opt_end_col} AS DATE)"
+    foia_person_end_date_expr = f"TRY_CAST({foia_person_end_col} AS DATE)"
+
     year_match_clause = (
-        f"AND CAST({foia_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_end_col}) AS INTEGER)"
+        f"AND CAST({foia_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_end_date_expr}) AS INTEGER)"
         if foia_year_col
+        else ""
+    )
+    person_year_match_clause = (
+        f"AND CAST({foia_person_year_col} AS INTEGER) = CAST(EXTRACT(YEAR FROM {foia_person_end_date_expr}) AS INTEGER)"
+        if foia_person_year_col
         else ""
     )
 
@@ -1118,19 +1421,19 @@ def compute_control_opt_usage_event_time(
             SELECT
                 cw.{cw_unitid_col} AS unitid,
                 {normalize_cip_sql(foia_cip_col)} AS cipcode,
-                CAST(EXTRACT(YEAR FROM {foia_end_col}) AS INTEGER) AS grad_year,
+                CAST(EXTRACT(YEAR FROM {foia_end_date_expr}) AS INTEGER) AS grad_year,
                 CAST({foia_student_col} AS VARCHAR) AS student_id,
                 {'CAST(' + foia_year_col + ' AS INTEGER)' if foia_year_col else 'NULL'} AS reported_year,
                 employer_name,
                 employment_opt_type,
-                {opt_end_col},
+                {foia_opt_end_date_expr} AS opt_end_date,
                 {foia_tuition_col} AS tuition,
-                {foia_end_col} AS program_end_date,
+                {foia_end_date_expr} AS program_end_date,
                 {status_col} AS requested_status
             FROM foia_raw fr
             LEFT JOIN f1_inst_cw cw
               ON fr.{foia_inst_col} = cw.{cw_inst_col}
-            WHERE {foia_end_col} IS NOT NULL
+            WHERE {foia_end_date_expr} IS NOT NULL
               AND fr.{foia_edu_col} = 'MASTER''S'
               AND ({CONTROL_CIP_WHERE})
               {year_match_clause}
@@ -1163,7 +1466,11 @@ def compute_control_opt_usage_event_time(
                 MAX(CASE WHEN COALESCE(employment_opt_type, '') = 'POST-COMPLETION' THEN 1 ELSE 0 END) AS opt_ind_old,
                 MAX(CASE WHEN COALESCE(employment_opt_type, '') = 'STEM' THEN 1 ELSE 0 END) AS opt_stem_ind,
                 MAX(CASE WHEN requested_status IS NOT NULL THEN 1 ELSE 0 END) AS status_change_ind,
-                CASE WHEN MAX({opt_end_col}) IS NOT NULL THEN DATE_DIFF('day', MAX(program_end_date), MAX({opt_end_col})) / 365.25 ELSE 0 END AS opt_years,
+                CASE
+                    WHEN MAX(opt_end_date) IS NOT NULL
+                    THEN DATE_DIFF('day', MAX(program_end_date), MAX(opt_end_date)) / 365.25
+                    ELSE 0
+                END AS opt_years,
                 AVG(TRY_CAST(tuition AS DOUBLE)) AS avg_tuition,
                 student_id,
                 relabel_year,
@@ -1188,53 +1495,110 @@ def compute_control_opt_usage_event_time(
             WHERE relabel_year IS NOT NULL
               AND grad_year IS NOT NULL
             GROUP BY calendar_year, relabel_year, relabel_type, cnralt, ctotalt
+        ),
+        unit_year_counts AS (
+            SELECT
+                unitid,
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS total_grads_unit
+            FROM student_level
+            GROUP BY unitid, calendar_year, relabel_year, relabel_type
+        ),
+        ipeds_tuition AS (
+            SELECT
+                u.calendar_year,
+                u.relabel_year,
+                u.relabel_type,
+                SUM(u.total_grads_unit * TRY_CAST(ic.{ipeds_tuition_col_sql} AS DOUBLE)) AS tuition_ipeds_total
+            FROM unit_year_counts u
+            LEFT JOIN ipeds_cost_raw ic
+              ON CAST(ic.unitid AS BIGINT) = CAST(u.unitid AS BIGINT)
+             AND CAST(ic.year AS INTEGER) = CAST(u.calendar_year AS INTEGER)
+            GROUP BY u.calendar_year, u.relabel_year, u.relabel_type
+        ),
+        foia_match_base AS (
+            SELECT
+                cw.{cw_unitid_col} AS unitid,
+                {normalize_cip_sql(foia_person_cip_col)} AS cipcode,
+                CAST(EXTRACT(YEAR FROM {foia_person_end_date_expr}) AS INTEGER) AS grad_year,
+                CAST({foia_person_student_col} AS VARCHAR) AS student_id,
+                CAST({foia_person_person_id_col} AS BIGINT) AS person_id
+            FROM foia_person_panel_raw fp
+            LEFT JOIN f1_inst_cw cw
+              ON fp.{foia_person_inst_col} = cw.{cw_inst_col}
+            WHERE {foia_person_end_date_expr} IS NOT NULL
+              AND fp.{foia_person_edu_col} = 'MASTER''S'
+              AND ({CONTROL_CIP_WHERE})
+              {person_year_match_clause}
+        ),
+        foia_match_relevant AS (
+            SELECT *
+            FROM foia_match_base
+            WHERE unitid IS NOT NULL
+              AND cipcode IS NOT NULL
+              AND grad_year IS NOT NULL
+              AND student_id IS NOT NULL
+        ),
+        foia_match_flagged AS (
+            SELECT
+                f.*,
+                r.relabel_year AS relabel_year,
+                r.relabel_type,
+                r.ctotalt,
+                r.cnralt
+            FROM foia_match_relevant f
+            JOIN relabel_events_control r
+              ON f.unitid = r.unitid AND f.grad_year = r.year
+        ),
+        linkedin_match_counts AS (
+            SELECT
+                grad_year AS calendar_year,
+                relabel_year,
+                relabel_type,
+                COUNT(DISTINCT student_id) AS linkedin_match_total_students,
+                COUNT(DISTINCT CASE WHEN s.person_id IS NOT NULL THEN student_id END) AS linkedin_matched_students
+            FROM foia_match_flagged f
+            LEFT JOIN stage05_linked_persons s
+              ON f.person_id = s.person_id
+            GROUP BY calendar_year, relabel_year, relabel_type
         )
         SELECT
-            calendar_year,
-            relabel_year AS relabel_year,
-            relabel_type,
-            avg_tuition,
-            total_grads,
-            opt_users,
-            opt_stem_users,
-            status_change_users,
-            total_opt_years,
-            ctotalt,
-            cnralt
-        FROM calendar_level
+            c.calendar_year,
+            c.relabel_year AS relabel_year,
+            c.relabel_type,
+            c.avg_tuition,
+            c.total_grads,
+            c.opt_users,
+            c.opt_stem_users,
+            c.status_change_users,
+            c.total_opt_years,
+            c.ctotalt,
+            c.cnralt,
+            COALESCE(m.linkedin_matched_students, 0) AS linkedin_matched_students,
+            COALESCE(m.linkedin_match_total_students, 0) AS linkedin_match_total_students,
+            t.tuition_ipeds_total,
+            CASE
+                WHEN c.total_grads > 0 THEN t.tuition_ipeds_total / c.total_grads
+                ELSE NULL
+            END AS avg_tuition_ipeds
+        FROM calendar_level c
+        LEFT JOIN linkedin_match_counts m
+          ON c.calendar_year = m.calendar_year
+         AND c.relabel_year = m.relabel_year
+         AND c.relabel_type = m.relabel_type
+        LEFT JOIN ipeds_tuition t
+          ON c.calendar_year = t.calendar_year
+         AND c.relabel_year = t.relabel_year
+         AND c.relabel_type = t.relabel_type
         """
     ).df()
 
-    control_calendar["opt_share"] = control_calendar["opt_users"] / control_calendar["total_grads"]
-    control_calendar["opt_stem_share"] = control_calendar["opt_stem_users"] / control_calendar["total_grads"]
-    control_calendar["status_change_share"] = control_calendar["status_change_users"] / control_calendar["total_grads"]
-    control_calendar["opt_years_avg"] = control_calendar["total_opt_years"] / control_calendar["total_grads"]
-    control_calendar["f1_share_of_ctotalt"] = control_calendar["total_grads"] / control_calendar["ctotalt"]
-    control_calendar["f1_share_of_cnralt"] = control_calendar["total_grads"] / control_calendar["cnralt"]
-    control_calendar["tuition_total"] = control_calendar["avg_tuition"] * control_calendar["total_grads"]
+    control_calendar = _finalize_cohort_calendar(control_calendar)
 
     control_calendar["event_t"] = control_calendar["calendar_year"] - control_calendar["relabel_year"]
-    control_event = (
-        control_calendar.groupby(["event_t", "relabel_type"], as_index=False)
-        .agg(
-            total_grads=("total_grads", "sum"),
-            opt_users=("opt_users", "sum"),
-            opt_stem_users=("opt_stem_users", "sum"),
-            status_change_users=("status_change_users", "sum"),
-            total_opt_years=("total_opt_years", "sum"),
-            tuition_total=("tuition_total", "sum"),
-            ctotalt=("ctotalt", "sum"),
-            cnralt=("cnralt", "sum")
-        )
-    )
-    control_event["opt_share"] = control_event["opt_users"] / control_event["total_grads"]
-    control_event["opt_stem_share"] = control_event["opt_stem_users"] / control_event["total_grads"]
-    control_event["status_change_share"] = control_event["status_change_users"] / control_event["total_grads"]
-    control_event["opt_years_avg"] = control_event["total_opt_years"] / control_event["total_grads"]
-    control_event["f1_share_of_ctotalt"] = control_event["total_grads"] / control_event["ctotalt"]
-    control_event["f1_share_of_cnralt"] = control_event["total_grads"] / control_event["cnralt"]
-    control_event["avg_tuition"] = control_event["tuition_total"] / control_event["total_grads"]
-    return control_event    
+    return _aggregate_cohort_event_time(control_calendar)
 
 
 def _compute_unit_level_foia_counts(
@@ -1350,7 +1714,7 @@ def plot_opt_usage(opt_usage: pd.DataFrame, yvar = 'opt_share', show: bool = Fal
     # print figure to see
     print(fig)
     if save:
-        out_path = FIG_DIR / "opt_usage_by_relabel_year.png"
+        out_path = FIG_DIR / f"opt_usage_by_relabel_year_{yvar}.png"
         fig.savefig(out_path, dpi=300)
     
         return out_path
@@ -1396,7 +1760,7 @@ def plot_opt_usage_event_time(
         ax=ax1,
     )
     ax1.set_ylabel(yvar_label(yvar))
-    ax1.set_xlabel("Years relative to relabel (t=0)")
+    ax1.set_xlabel("Graduation Cohort Relative to Relabel Event")
     ax1.set_title("")
     ax1.axvline(x=0, linestyle="--", color="gray", linewidth=1)
     ax1.legend(title=None)
@@ -1425,7 +1789,7 @@ def plot_opt_usage_event_time(
             ax=ax2,
         )
         ax2.set_ylabel(yvar_label(yvar))
-        ax2.set_xlabel("Years relative to relabel (t=0)")
+        ax2.set_xlabel("Graduation Cohort Relative to Relabel Event")
         ax2.set_title("")
         ax2.axvline(x=0, linestyle="--", color="gray", linewidth=1)
         ax2.legend(title=None)
