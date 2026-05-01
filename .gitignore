@@ -27,6 +27,7 @@ writing/.claude/
 __pycache__/
 code/logs/
 code/output/
+code/${out_dir}/
 output/
 code/f1_indiv_merge/logs/
 code/f1_indiv_merge/tmp_*.py
