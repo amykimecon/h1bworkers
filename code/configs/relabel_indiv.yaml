@@ -3,12 +3,18 @@ run_tag: "feb2026"
 build:
   overwrite: true
 
+  # Event source:
+  # - econ_v2: current economics-focused relabel detector/output
+  # - generalized_final_sample: finalized broad-bin treated sample from
+  #   relabel_events_generalized's verified panel
+  event_source_mode: "econ_v2"
+
   # Cohort window shown in plots / DiD: graduation year relative to relabel year.
   event_window: 5
 
   # Evaluate outcomes at these fixed horizons after graduation.
   # The default refactor uses the 3-years-post-graduation definition.
-  outcome_horizons: [3]
+  outcome_horizons: [0, 1, 2, 3, 4, 5]
 
   # If a target year is beyond the latest observed Revelio position year, cap the
   # evaluation year to the latest available year but mark the target year as
@@ -29,6 +35,29 @@ build:
   # starts with one of these prefixes. "4506" = CIP 45.06xx.
   sample_cip_prefixes:
     - "4506"
+
+  # Conservative institution-quality gate applied when matching individual
+  # Revelio education rows to treated/control event schools. A row passes if
+  # either the existing stage-04 institution score is high enough OR the cleaned
+  # university_raw has high Jaro-Winkler similarity to an F1/IPEDS alias for the
+  # assigned UNITID.
+  institution_match_quality_gate: true
+  institution_match_score_min: 0.85
+  institution_alias_jw_min: 0.92
+
+  # Optional strict RSID consistency gate. When enabled, an individual education
+  # row must have an rsid that is common among rows mapped to the proposed UNITID:
+  # count(rsid, unitid) >= max(rsid_support_min_count,
+  #                           ceil(rsid_support_min_share * rows_with_rsid_at_unitid)).
+  rsid_support_gate: false
+  rsid_support_min_share: 0.05
+  rsid_support_min_count: 10
+
+  # Add foreign/non-foreign heterogeneity DiD splits to the Revelio output.
+  # Foreign is imputed from readily available signals: FOIA-linked F-1 rows are
+  # foreign; otherwise observed non-US Revelio origin countries are foreign and
+  # US/unknown origin is non-foreign.
+  foreign_heterogeneity: true
 
   # Sample variants to run. `stage04_all` uses the full stage-04 CIP-filtered universe.
   # `foia_linked_person_baseline` further restricts to Revelio users that appear in the
@@ -56,6 +85,32 @@ build:
   # the FE DiD runs through the 'simple' cohort_t specification. 'panel' and 'both'
   # are accepted for backward compatibility and fall back to the same estimator.
   did_model: "simple"
+  # Estimator for Step 8 coefficient plots:
+  # - did: treated vs matched controls
+  # - stacked_treated: treated-only stacked event study, excluding controls
+  # - both: run and save both sets of estimates
+  did_estimator: "did"
+  # Plot mode for Step 8:
+  # - event_study_by_cohort: event-time x treated coefficients, x-axis = grad year relative to relabel
+  # - pooled_post_by_horizon: pooled treat x post by post-grad horizon, x-axis = years after graduation
+  did_plot_mode: "event_study_by_cohort"
+  pooled_post_event_min: -1
+  pooled_post_event_max: 3
+
+  # Optional DiD controls.
+  did_include_individual_controls: false
+  did_include_school_char_gradyear_controls: false
+  did_country_top_n: 20
+
+  # Cohort-level enrichments used by Step 1 aggregate plots.
+  cohort_external_tuition_col: "tuition7"
+  cohort_plot_yvars:
+    - "opt_share"
+    - "opt_stem_share"
+    - "avg_tuition"
+    - "linkedin_match_share"
+    - "avg_tuition_ipeds"
+    - "cnralt_share_of_ctotalt"
 
 testing:
   enabled: false
@@ -66,24 +121,32 @@ testing:
 paths:
   # --- RELABEL EVENTS (produced by econ_relabels_opt_usage_v2 or loaded from cache) ---
   relabels_parquet: "{root}/data/int/int_files_nov2025/econ_relabels_v2.parquet"
+  generalized_relabels_panel_parquet: "{root}/h1bworkers/code/output/relabel_indiv/generalized_relabels_panel.parquet"
 
   # --- NEW PIPELINE INPUTS ---
   stage04_merge_ready_parquet: "{root}/data/int/f1_indiv_merge/04_rev_user_clean/rev_match_ready_apr2026v1.parquet"
   stage05_person_baseline_parquet: "{root}/data/int/f1_indiv_merge/05_indiv_merge/f1_merge_person_baseline_apr2026v1.parquet"
+  foia_person_panel_parquet: "{root}/data/int/f1_indiv_merge/01_f1_foia_clean/foia_person_panel_apr2026v1.parquet"
+  ipeds_cost_panel_parquet: "{root}/data/raw/ipeds/ipeds_cost_panel.parquet"
+  ipeds_hd_dir: "{root}/data/raw/ipeds/directory_info_hd"
 
   # --- IPEDS → REVELIO INSTITUTION CROSSWALK ---
   # Maps UNITID ↔ university_raw in Revelio education records.
   revelio_ipeds_inst_cw_parquet: "{root}/data/int/int_files_feb2026/revelio_ipeds_foia_inst_crosswalk.parquet"
+  ipeds_crosswalk_parquet: "{root}/data/int/int_files_nov2025/ipeds_crosswalk_2021.parquet"
 
   # --- REVELIO INPUTS ---
+  rev_users_core_parquet: "{root}/data/int/f1_indiv_merge/04_rev_user_clean/rev_users_core_apr2026v1.parquet"
+  rev_educ_clean_long_parquet: "{root}/data/int/f1_indiv_merge/04_rev_user_clean/rev_educ_clean_long_apr2026v1.parquet"
+  rev_pos_clean_long_parquet: "{root}/data/int/f1_indiv_merge/04_rev_user_clean/rev_pos_clean_long_apr2026v1.parquet"
   # rev_user_nationality: top-1 blended nationality (name model + institution country)
   # for ALL Revelio users. Produced by rev_users_clean.py. Broader than rev_indiv —
   # not filtered to OPT/H-1B pipeline users. Columns: user_id, nationality_country, nationality_score.
   rev_user_nationality_parquet: "{root}/data/int/rev_user_nationality_${run_tag}.parquet"
   rev_user_nationality_parquet_legacy: "{root}/data/int/rev_user_nationality_feb2026.parquet"
-  rev_educ_long_parquet: "{root}/data/int/rev_educ_long_${run_tag}.parquet"
+  rev_educ_long_parquet: "{root}/data/int/f1_indiv_merge/04_rev_user_clean/rev_educ_clean_long_apr2026v1.parquet"
   rev_educ_long_parquet_legacy: "{root}/data/int/rev_educ_long_mar2026.parquet"
-  rev_pos_parquet: "{root}/data/int/merged_pos_clean_${run_tag}.parquet"
+  rev_pos_parquet: "{root}/data/int/f1_indiv_merge/04_rev_user_clean/rev_pos_clean_long_apr2026v1.parquet"
   rev_pos_parquet_legacy: "{root}/data/int/merged_pos_clean_mar2026.parquet"
 
   # --- OUTPUTS ---

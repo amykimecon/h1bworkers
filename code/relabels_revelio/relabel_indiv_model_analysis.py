@@ -1697,7 +1697,7 @@ def plot_did_regression_event_study(
         ax.axhline(y=0, linestyle=":", color="gray", linewidth=1)
         ax.set_xlabel("Graduation year relative to relabel event")
         ax.set_ylabel(
-            f"DiD coefficient vs cohort_t={reference_event_time}\n"
+            f"did coef: Fraction still in US vs cohort_t={reference_event_time}\n"
             "(school + grad-year + relabel-year FE, clustered by school)"
         )
         ax.set_title(f"{int(horizon)} years after event")

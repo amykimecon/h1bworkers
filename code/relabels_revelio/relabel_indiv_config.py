@@ -172,9 +172,14 @@ def choose_path(primary: str, fallback: str | None = None) -> str:
 
 # --- INPUT PATHS ---
 RELABELS_PARQUET = PATHS.get("relabels_parquet", "")
+GENERALIZED_RELABELS_PANEL_PARQUET = PATHS.get("generalized_relabels_panel_parquet", "")
 REVELIO_IPEDS_INST_CW_PARQUET = PATHS.get("revelio_ipeds_inst_cw_parquet", "")
+IPEDS_CROSSWALK_PARQUET = PATHS.get("ipeds_crosswalk_parquet", "")
 STAGE04_MERGE_READY_PARQUET = PATHS.get("stage04_merge_ready_parquet", "")
 STAGE05_PERSON_BASELINE_PARQUET = PATHS.get("stage05_person_baseline_parquet", "")
+FOIA_PERSON_PANEL_PARQUET = PATHS.get("foia_person_panel_parquet", "")
+IPEDS_COST_PANEL_PARQUET = PATHS.get("ipeds_cost_panel_parquet", "")
+IPEDS_HD_DIR = PATHS.get("ipeds_hd_dir", "")
 # Blended nationality (name model + institution country) for ALL Revelio users.
 # Broader than rev_indiv (not filtered to OPT/H-1B pipeline).
 # Columns: user_id, nationality_country, nationality_score.
@@ -182,13 +187,25 @@ REV_USER_NATIONALITY_PARQUET = choose_path(
     PATHS.get("rev_user_nationality_parquet", ""),
     PATHS.get("rev_user_nationality_parquet_legacy"),
 )
+REV_USERS_CORE_PARQUET = choose_path(
+    PATHS.get("rev_users_core_parquet", ""),
+    PATHS.get("rev_users_core_parquet_legacy"),
+)
+REV_EDUC_CLEAN_LONG_PARQUET = choose_path(
+    PATHS.get("rev_educ_clean_long_parquet", ""),
+    PATHS.get("rev_educ_long_parquet", PATHS.get("rev_educ_long_parquet_legacy")),
+)
+REV_POS_CLEAN_LONG_PARQUET = choose_path(
+    PATHS.get("rev_pos_clean_long_parquet", ""),
+    PATHS.get("rev_pos_parquet", PATHS.get("rev_pos_parquet_legacy")),
+)
 REV_EDUC_LONG_PARQUET = choose_path(
     PATHS.get("rev_educ_long_parquet", ""),
-    PATHS.get("rev_educ_long_parquet_legacy"),
+    PATHS.get("rev_educ_clean_long_parquet", PATHS.get("rev_educ_long_parquet_legacy")),
 )
 REV_POS_PARQUET = choose_path(
     PATHS.get("rev_pos_parquet", ""),
-    PATHS.get("rev_pos_parquet_legacy"),
+    PATHS.get("rev_pos_clean_long_parquet", PATHS.get("rev_pos_parquet_legacy")),
 )
 
 # --- OUTPUT PATHS ---
@@ -198,7 +215,11 @@ OUTPUT_DIR = PATHS.get("output_dir", "")
 
 # --- BUILD PARAMS ---
 BUILD_OVERWRITE = _as_bool(BUILD_CFG.get("overwrite"), True)
+BUILD_EVENT_SOURCE_MODE = _as_lower_str(BUILD_CFG.get("event_source_mode"), "econ_v2")
+BUILD_CONTROL_GROUP = _as_lower_str(BUILD_CFG.get("control_group"), "never_treated")
 BUILD_EVENT_WINDOW = _as_int(BUILD_CFG.get("event_window"), 5)
+BUILD_POOLED_POST_EVENT_MIN = _as_int(BUILD_CFG.get("pooled_post_event_min"), -1)
+BUILD_POOLED_POST_EVENT_MAX = _as_int(BUILD_CFG.get("pooled_post_event_max"), 3)
 BUILD_COHORT_WINDOW = _as_int(BUILD_CFG.get("cohort_window"), 3)
 BUILD_OUTCOME_HORIZONS = sorted(
     {h for h in _as_int_list(BUILD_CFG.get("outcome_horizons"), [3]) if h >= 0}
@@ -214,6 +235,34 @@ BUILD_SAMPLE_CIP_PREFIXES: list[str] = [
     for value in BUILD_CFG.get("sample_cip_prefixes", ["4506"])
     if str(value).strip()
 ]
+BUILD_INSTITUTION_MATCH_QUALITY_GATE = _as_bool(
+    BUILD_CFG.get("institution_match_quality_gate"),
+    True,
+)
+BUILD_INSTITUTION_MATCH_SCORE_MIN = _as_float(
+    BUILD_CFG.get("institution_match_score_min"),
+    0.85,
+)
+BUILD_INSTITUTION_ALIAS_JW_MIN = _as_float(
+    BUILD_CFG.get("institution_alias_jw_min"),
+    0.92,
+)
+BUILD_RSID_SUPPORT_GATE = _as_bool(
+    BUILD_CFG.get("rsid_support_gate"),
+    False,
+)
+BUILD_RSID_SUPPORT_MIN_SHARE = _as_float(
+    BUILD_CFG.get("rsid_support_min_share"),
+    0.05,
+)
+BUILD_RSID_SUPPORT_MIN_COUNT = max(
+    1,
+    _as_int(BUILD_CFG.get("rsid_support_min_count"), 10),
+)
+BUILD_FOREIGN_HETEROGENEITY = _as_bool(
+    BUILD_CFG.get("foreign_heterogeneity"),
+    True,
+)
 BUILD_SAMPLE_VARIANTS: list[str] = [
     str(value).strip()
     for value in BUILD_CFG.get(
@@ -225,6 +274,31 @@ BUILD_SAMPLE_VARIANTS: list[str] = [
 BUILD_MIN_POS_DURATION_DAYS = _as_int(BUILD_CFG.get("min_pos_duration_days"), 1)
 BUILD_RUN_DID = _as_bool(BUILD_CFG.get("run_did"), True)
 BUILD_DID_MODEL = _as_lower_str(BUILD_CFG.get("did_model"), "simple")
+BUILD_DID_ESTIMATOR = _as_lower_str(BUILD_CFG.get("did_estimator"), "did")
+BUILD_DID_PLOT_MODE = _as_lower_str(
+    BUILD_CFG.get("did_plot_mode"),
+    "event_study_by_cohort",
+)
+BUILD_DID_INCLUDE_INDIVIDUAL_CONTROLS = _as_bool(
+    BUILD_CFG.get("did_include_individual_controls"),
+    False,
+)
+BUILD_DID_INCLUDE_SCHOOL_CHAR_GRADYEAR_CONTROLS = _as_bool(
+    BUILD_CFG.get("did_include_school_char_gradyear_controls"),
+    False,
+)
+BUILD_DID_COUNTRY_TOP_N = max(1, _as_int(BUILD_CFG.get("did_country_top_n"), 20))
+BUILD_COHORT_EXTERNAL_TUITION_COL = (
+    _as_optional_str(BUILD_CFG.get("cohort_external_tuition_col")) or "tuition7"
+)
+BUILD_COHORT_PLOT_YVARS: list[str] = [
+    str(value).strip()
+    for value in BUILD_CFG.get(
+        "cohort_plot_yvars",
+        ["opt_share", "opt_stem_share", "avg_tuition", "linkedin_match_share", "avg_tuition_ipeds"],
+    )
+    if str(value).strip()
+]
 BUILD_EXCLUDE_US_NATIONALS = _as_bool(BUILD_CFG.get("exclude_us_nationals"), True)
 BUILD_EXCLUDE_US_COUNTRY_VALUE = _as_optional_str(BUILD_CFG.get("exclude_us_country_value")) or "United States"
 
