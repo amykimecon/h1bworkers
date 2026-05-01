@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "feature_year_min": 2010,
+  "feature_year_max": 2022,
+  "source_mode": "raw_wrds",
+  "source_force_rebuild": false,
+  "workforce_path": "/home/yk0581/data/out/company_shift_share_apr2026/wrds_company_year_workforce.parquet",
+  "workforce_mtime": 1776884640,
+  "opt_counts_path": "/home/yk0581/data/out/company_shift_share_apr2026/source_opt_counts.parquet",
+  "opt_counts_mtime": 1776887241,
+  "positions_path": "/home/yk0581/data/out/company_shift_share_apr2026/wrds_workforce_selected_us_positions.parquet",
+  "positions_path_mtime": 1776830855,
+  "position_metrics_required": true,
+  "required_columns": [
+    "c",
+    "any_opt_hire_rate_annual_pre_level",
+    "any_opt_hire_count_annual_pre_level"
+  ],
+  "workforce_rows": 2703158,
+  "opt_counts_rows": 440302,
+  "position_metrics_included": true,
+  "workforce_meta_positions_path": "/home/yk0581/data/out/company_shift_share_apr2026/wrds_workforce_selected_us_positions.parquet",
+  "columns": [
+    "c",
+    "avg_tenure_years_annual_pre_level",
+    "tenure_n_years",
+    "any_opt_hire_count_annual_pre_level",
+    "any_opt_hire_count_annual_pre_n_years",
+    "masters_opt_hire_count_annual_pre_level",
+    "masters_opt_hire_count_annual_pre_n_years",
+    "any_opt_hire_rate_annual_pre_level",
+    "any_opt_hire_rate_annual_pre_n_years",
+    "masters_opt_hire_rate_annual_pre_level",
+    "masters_opt_hire_rate_annual_pre_n_years",
+    "avg_tenure_new_hires_annual_pre_level",
+    "tenure_new_hires_n_years",
+    "avg_tenure_new_positions_annual_pre_level",
+    "tenure_new_positions_n_years",
+    "avg_tenure_recent_grads_annual_pre_level",
+    "tenure_recent_grads_n_years"
+  ]
+}
