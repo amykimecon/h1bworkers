@@ -21,6 +21,8 @@ paths:
   # REVELIO FILES
   revelio_company_mapping: "${int_dir}/revelio_company_mapping_full.parquet" # revelio companies from WRDS, including top metro, state, n users from positions
   wrds_users: "{root}/data/int/wrds_users_sep2.parquet" # WRDS users data to get institution names from revelio
+  revelio_inst_deterministic_map: "{root}/data/della_import/deterministic_candidate_map_apr2026_f1merge_v2.parquet" # preferred Revelio university_raw -> ref_inst candidates from f1_indiv_merge deterministic matching
+  revelio_ref_inst_catalog: "{root}/data/della_import/ref_inst_catalog_apr2026_f1merge_v2.parquet" # ref_inst_id -> IPEDS/OpenAlex bridge for deterministic school mapping
   
   ## outputs from revelio_school_to_employer
   transitions_out: "${int_dir}/revelio_school_to_employer_transitions.parquet"
@@ -36,6 +38,8 @@ paths:
   ipeds_unitid_main_crosswalk: "${int_dir}/ipeds_unitid_main_crosswalk.parquet" # OUTPUT: original UNITID x year to canonical UNITID mapping
   ipeds_ma_only: "{root}/data/int/ipeds_ma_only.parquet" # OUTPUT: IPEDS institutions meeting criteria for inclusion in shift-share analysis (masters-only, CIP >= 10000, year >= 2002)
   ipeds_ma_ba_only: "{root}/data/int/ipeds_ma_ba_only.parquet" # OUTPUT: IPEDS institutions meeting criteria for inclusion (masters + bachelors, CIP >= 10000, year >= 2002)
+  # Optional full IPEDS completion parquet with Carnegie/category fields (for matched-sample matching).
+  ipeds_completions_all: "{root}/data/int/int_files_nov2025/ipeds_completions_all.parquet"
 
   # CROSSWALKS
   geonames_dir: "{root}/data/crosswalks/geonames" # RAW: directory of geonames file
@@ -68,9 +72,27 @@ paths:
   outcomes_out: "{root}/data/out/company_shift_share/outcomes.parquet"
   analysis_panel_out: "{root}/data/out/company_shift_share/analysis_panel.parquet"
   analysis_panel_out_ma_ba: "{root}/data/out/company_shift_share/analysis_panel_ma_ba.parquet"
+  school_shift_metric_panel_out: "{root}/data/out/company_shift_share/school_shift_metric_panel.parquet"
+  school_shift_sample_out: "{root}/data/out/company_shift_share/school_shift_sample.parquet"
   analysis_panel: "{root}/data/out/company_shift_share/analysis_panel.parquet"
   analysis_panel_ma_ba: "{root}/data/out/company_shift_share/analysis_panel_ma_ba.parquet"
   instrument_components: "{root}/data/out/company_shift_share/instrument_components.parquet"
+  source_opt_counts_out: "{root}/data/out/company_shift_share/source_opt_counts.parquet"
+  school_opt_benchmark_out: "{root}/data/out/company_shift_share/school_opt_benchmark.parquet"
+  opt_exposure_analysis_panel_out: "{root}/data/out/company_shift_share/opt_exposure_analysis_panel.parquet"
+  company_features_out: "{root}/data/out/company_shift_share/company_features.parquet"
+  outside_negative_sample_out: "{root}/data/out/company_shift_share/outside_negative_sample.parquet"
+  wrds_company_year_workforce_out: "{root}/data/out/company_shift_share/wrds_company_year_workforce.parquet"
+  wrds_workforce_user_ids_out: "{root}/data/out/company_shift_share/wrds_workforce_user_ids.parquet"
+  wrds_workforce_users_out: "{root}/data/out/company_shift_share/wrds_workforce_users.parquet"
+  wrds_workforce_positions_out: "{root}/data/out/company_shift_share/wrds_workforce_positions.parquet"
+  wrds_workforce_selected_us_positions_out: "{root}/data/out/company_shift_share/wrds_workforce_selected_us_positions.parquet"
+  wrds_workforce_users_chunk_dir: "{root}/data/out/company_shift_share/wrds_workforce_users_chunks"
+  wrds_workforce_positions_chunk_dir: "{root}/data/out/company_shift_share/wrds_workforce_positions_chunks"
+  wrds_workforce_selected_us_positions_chunk_dir: "{root}/data/out/company_shift_share/wrds_workforce_selected_us_positions_chunks"
+  wrds_user_profile_origin_out: "{root}/data/out/company_shift_share/wrds_user_profile_origin_cache.parquet"
+  wrds_school_flows_out: "{root}/data/out/company_shift_share/wrds_school_flows.parquet"
+  opt_probability_index_out: "{root}/data/out/company_shift_share/opt_probability_index.parquet"
   # rsid_geoname_cw: "{root}/data/int/rsid_geoname_cw.parquet"
   # ipeds_geoname_cw: "{root}/data/int/ipeds_geoname_cw.parquet"
   # ipeds_completions_raw: "{root}/data/raw/ipeds_completions_all.dta"
@@ -119,6 +141,27 @@ revelio_school_to_employer:
   resume_batches: true # if false, rebuild from scratch
   use_preferred_rcids: true # restrict sample to preferred rcids identified in employer crosswalk construction (if true, only include transitions involving these rcids; if false, include all transitions regardless of rcid; can be overridden by command-line argument)
 
+revelio_company_features:
+  wrds_username: "amykimecon"
+  feature_year_min: 2010
+  feature_year_max: 2015
+  outside_negative_ratio: 2.0
+  outside_negative_seed: 42
+  outside_negative_min_n_users: 10
+  wrds_rcid_batch_size: 100
+  wrds_large_firm_n_users_threshold: 75000
+  wrds_large_firm_year_span: 1
+  wrds_workforce_build_local_extracts: true
+  wrds_workforce_extract_chunk_size: 20000
+  wrds_workforce_extract_max_workers: 3
+  wrds_workforce_use_local_user_profile_cache: true
+  wrds_workforce_include_education_features: true
+  query_timeout_minutes: 10
+  wrds_singleton_query_timeout_minutes: 60
+  query_max_retries: 1
+  min_position_days: 365
+  tenure_min_days: 365
+
 build_company_shift_share:
   share_base_year: 2010
   outcome_lag_start: -5
@@ -131,6 +174,24 @@ build_company_shift_share:
   exclude_unitids: []
   include_non_masters: false
   include_bachelors: false
+  school_sample_mode: matched_shift_sample # options: all, matched_shift_sample
+  school_shift_metric: ihmp_share # options: ihmp_share, international_share, opt_ihmp_share, opt_share
+  # opt_share = FOIA OPT-user share by school-year:
+  #   numerator = foia_total_opt_students
+  #   denominator = foia_total_students
+  school_sample_n_shifted: 25
+  school_sample_window_start: 2014
+  school_sample_window_end: 2017
+  school_sample_control_positive_cap: 0.02
+  school_sample_min_size: 400
+  restrict_treated_to_no_large_enrollment_jump: false
+  school_sample_max_yoy_size_jump: 0.50
+  confirm_matched_school_sample: true
+  opt_ihmp_ipeds_share_intl_threshold: 0.30
+  opt_ihmp_foia_opt_share_threshold: 0.50
+  opt_ihmp_min_program_f1_count: 10
+  opt_share_min_school_f1_count: 50
+  opt_share_max_yoy_drop: 0.50
   opt_shifts: true
   opt_shifts_normalization: none # options: ipeds_graduates, foia_students, none
   opt_shifts_normalize_by_graduates: false
@@ -229,12 +290,33 @@ ipeds_ma_only:
   include_bachelors: false
 
 exposure_event_study:
-  # Which exposure version(s) to run: "opt_hire_rate" | "school_opt_share" | "both"
+  # Which exposure version(s) to run:
+  # "opt_hire_rate" | "school_opt_share" | "opt_probability_index" | "both" | "all"
   exposure_version: "both"
-  # Year range over which to aggregate the exposure measure (pre-period)
+  # Year range over which to aggregate the legacy exposure measures
   exposure_year_min: 2010
   exposure_year_max: 2015
-  # Number of ntile groups (4 = quartiles)
+  # Pre-period window for opt_probability_index feature construction
+  feature_year_min: 2010
+  feature_year_max: 2015
+  # Target window for the binary exposure model
+  target_year_min: 2016
+  target_year_max: 2022
+  # Modeled exposure settings
+  index_model_method: "lpm" # "lpm" | "lasso" | "random_forest"
+  index_entry_mode: "ntiles" # "ntiles" | "continuous" (continuous is invalid for random_forest)
+  lasso_cv_folds: 3
+  lasso_n_cs: 10
+  leaveout_enabled: false
+  leaveout_share: 0.25
+  leaveout_seed: 42
+  rf_n_estimators: 500
+  rf_max_depth: null
+  rf_min_samples_leaf: 10
+  rf_min_samples_split: 20
+  force_rebuild_company_features: false
+  force_rebuild_source_analysis_panel: false
+  # Number of ntile groups (RF requires 2)
   ntiles: 2
   # Event year (vertical reference line)
   event_year: 2016
@@ -244,11 +326,11 @@ exposure_event_study:
   data_min_t: 2010
   data_max_t: 2022
   # Source column used to derive x_bin_any_nonzero
-  x_source_col: "masters_opt_hires_correction_aware"
+  x_source_col: "any_opt_hires_correction_aware"
   # Outcome columns to analyze (one full pipeline pass per outcome)
   outcome_cols:
     - "x_bin_any_nonzero"
-    - "masters_opt_hires_correction_aware"
+    - "any_opt_hires_correction_aware"
     - "log1p_y_cst_lag0"
     - "log1p_y_new_hires_lag0"
   # Directory for saving PNG outputs (null = show only, don't save)

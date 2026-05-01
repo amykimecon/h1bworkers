@@ -53,7 +53,7 @@ instrument_col = str(reg_cfg.get("instrument", _INSTRUMENT_COL))
 if instrument_col not in {"z_ct", "z_ct_full"}:
     raise ValueError(f"Unsupported instrument column '{instrument_col}'. Use 'z_ct' or 'z_ct_full'.")
 use_log_instrument = bool(reg_cfg.get("use_log_instrument", False))
-instrument_interact_post2016 = bool(reg_cfg.get("instrument_interact_post2016", False))
+instrument_interact_post2016 = False # bool(reg_cfg.get("instrument_interact_post2016", False))
 instrument_interact_post_year = int(reg_cfg.get("instrument_interact_post_year", 2016))
 treatment_col = _TREATMENT_COL
 # str(

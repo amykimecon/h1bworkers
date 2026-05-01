@@ -1,0 +1,319 @@
+# Shift-share analysis config — April 2026.
+# Used by: company_shift_share/shift_share_analysis.py
+#
+# Variable interpolation: {root} is replaced with the project root from config.py.
+# ${key} references other top-level keys in this file (two-pass resolution).
+
+root: "/home/yk0581"
+int_dir: "{root}/data/int/int_files_feb2026"
+
+paths:
+  # --- Revelio school-to-employer flow outputs ---
+  transitions: "${int_dir}/revelio_school_to_employer_transitions.parquet"
+  headcounts: "${int_dir}/revelio_company_headcounts.parquet"
+
+  # --- Revelio school -> IPEDS institution mapping ---
+  # Legacy three-way crosswalk (Revelio <-> IPEDS <-> F1).
+  revelio_ipeds_foia_inst_crosswalk: "${int_dir}/revelio_ipeds_foia_inst_crosswalk.parquet"
+  # Deterministic candidate map from f1_indiv_merge (preferred; overrides legacy when present).
+  revelio_inst_deterministic_map: "{root}/data/della_import/deterministic_candidate_map_apr2026_f1merge_v2.parquet"
+  # Reference institution catalog for resolving deterministic map to IPEDS unitids.
+  revelio_ref_inst_catalog: "{root}/data/della_import/ref_inst_catalog_apr2026_f1merge_v2.parquet"
+
+  # --- IPEDS completions (pre-filtered) ---
+  # Masters-only (used by default).
+  ipeds_ma_only: "{root}/data/int/ipeds_ma_only.parquet"
+  # Masters + bachelors (used when include_bachelors: true, or for ipeds_graduates normalization).
+  ipeds_ma_ba_only: "{root}/data/int/ipeds_ma_ba_only.parquet"
+  # Optional full IPEDS completion parquet with Carnegie/category fields (for matched-sample matching).
+  ipeds_completions_all: "{root}/data/int/int_files_nov2025/ipeds_completions_all.parquet"
+  # IPEDS institution dimension table (for school names in matched-sample preview).
+  ipeds_main_institutions: "${int_dir}/ipeds_main_institutions.parquet"
+
+  # --- FOIA SEVP person-linked files ---
+  # Raw (no employer correction) — used for OPT growth view.
+  foia_sevp_with_person_id: "${int_dir}/foia_sevp_with_person_id.parquet"
+  # Employment-corrected — used for treatment variable (correction_aware measure).
+  foia_sevp_with_person_id_employment_corrected: "${int_dir}/foia_sevp_with_person_id_employment_corrected.parquet"
+
+  # --- Crosswalks ---
+  # F1 SEVP institution -> IPEDS unitid (required for FOIA-based school metrics and OPT shifts).
+  f1_inst_unitid_crosswalk: "${int_dir}/f1_inst_unitid_crosswalk.parquet"
+  # Employer name/location -> Revelio RCID.
+  employer_crosswalk: "${int_dir}/f1_employer_final_crosswalk.parquet"
+  # Preferred RCIDs: restrict transitions to matched companies only.
+  preferred_rcids: "${int_dir}/f1_preferred_rcids_multi_year.parquet"
+  # Source exposure workflow cache with origin-split new hires and tenure.
+  wrds_company_year_workforce_out: "{root}/data/out/company_shift_share_apr2026/wrds_company_year_workforce.parquet"
+
+  # --- Outputs (all under apr2026 subfolder) ---
+  out_dir: "{root}/data/out/company_shift_share/apr2026"
+  analysis_panel: "{root}/data/out/company_shift_share/apr2026/analysis_panel.parquet"
+  instrument_components: "{root}/data/out/company_shift_share/apr2026/instrument_components.parquet"
+  instrument_panel: "{root}/data/out/company_shift_share/apr2026/instrument_panel.parquet"
+  transition_shares: "{root}/data/out/company_shift_share/apr2026/transition_shares.parquet"
+  ipeds_unit_growth: "{root}/data/out/company_shift_share/apr2026/ipeds_unit_growth.parquet"
+  school_shift_metric_panel: "{root}/data/out/company_shift_share/apr2026/school_shift_metric_panel.parquet"
+  school_shift_sample: "{root}/data/out/company_shift_share/apr2026/school_shift_sample.parquet"
+  diagnostics_dir: "{root}/data/out/company_shift_share/apr2026/diagnostics"
+  reg_table: "{root}/data/out/company_shift_share/apr2026/reg_table.csv"
+
+pipeline:
+  # shock_design:
+  #   event_quantity = persistent event-based quantity shocks from school share breaks
+  #   legacy         = previous single g_kt builder
+  shock_design: event_quantity
+
+  # ── Share construction ──────────────────────────────────────────────────────
+  share_base_year: 2010
+
+  # share_period: time window for computing company-university hiring shares.
+  #   pre_window = strict pre-shock window (preferred)
+  #   full      = all available years in Revelio transitions
+  #   base_year = base_year ± 5 window only (anchors shares to pre-2012 period)
+  share_period: pre_window
+  share_year_min: 2008
+  share_year_max: 2013
+  share_robustness_windows:
+    - [2008, 2010]
+    - [2011, 2013]
+    - [2008, 2013]
+  # Minimum number of IPEDS universities required for a company to be included in share_ck.
+  # Companies with fewer universities are dropped from transition_shares and instrument construction.
+  share_min_universities_for_share: 2
+
+  # ── Growth metric (g_kt) ───────────────────────────────────────────────────
+  # opt_shifts: use FOIA OPT student records to construct school-level growth.
+  #   true  = count OPT-active students per school-year from FOIA (preferred)
+  #   false = use IPEDS international enrollment counts
+  opt_shifts: true
+
+  # opt_shifts_normalization: denominator for OPT student counts (only when opt_shifts=true).
+  #   none            = raw OPT-student count per school-year (preferred: fewest assumptions)
+  #   ipeds_graduates = normalize by IPEDS graduate count
+  #   foia_students   = normalize by total FOIA student count
+  opt_shifts_normalization: none
+
+  # opt_shifts_degree_scope: which degree levels to include in FOIA/IPEDS OPT counts.
+  #   bachelors_masters = BA + MA records (preferred)
+  #   masters           = MA only
+  #   bachelors         = BA only
+  opt_shifts_degree_scope: bachelors_masters
+
+  # growth_population: which IPEDS column maps to g_kt (only matters when opt_shifts=false
+  # AND school_sample_mode=all; irrelevant in OPT mode or matched-sample mode).
+  #   main  = IHMP seats (internationally-heavy master's programs, share_intl >= 50%)
+  #   all   = total international students across all programs
+  #   intl  = international students in IHMP programs
+  growth_population: main
+
+  # ── School sample ───────────────────────────────────────────────────────────
+  # school_sample_mode: which schools contribute to the shift-share instrument.
+  #   matched_shift_sample = only treated/control school pairs matched on size
+  #                          (preferred: cleaner identification, focused sample)
+  #   all                  = all IPEDS schools with valid data
+  school_sample_mode: matched_shift_sample
+
+  # school_shift_metric: which school-level metric to use for treated/control selection
+  # (and as g_kt in matched-sample mode).
+  #   ihmp_share = IPEDS-based share of students in IHMP programs:
+  #       numerator = Σ program_students for programs with program_intl / program_students >= 0.5
+  #                   and program_students >= 10
+  #       denominator = Σ program_students (total IPEDS student count)
+  #   international_share = IPEDS-based share of all international students:
+  #       numerator = total_intl_students
+  #       denominator = total students
+  #   opt_ihmp_share = ratio of opt users over total enrollment (for mechanism checks):
+  #       numerator = foia_total_opt_students (unique OPT-active students)
+  #       denominator = ipeds school_size (Σ program_students)
+  #       degree_scope filters FOIA records used in foia_total_opt_students aggregation.
+  #   opt_share = OPT-user share with FOIA denominator:
+  #       numerator = foia_total_opt_students
+  #       denominator = foia_total_students
+  school_shift_metric: ihmp_share
+
+  school_sample_n_shifted: 25          # target number of treated schools
+  school_sample_window_start: 2014     # first year of shift detection window
+  school_sample_window_end: 2017       # last year of shift detection window
+  event_shock_pre_years: 2             # years averaged before candidate event year
+  event_shock_post_years: 2            # years averaged after candidate event year
+  # Common calendar baseline used by growth variants and proof-of-concept outcome normalization.
+  # Main z_ct is raw annual IHMP flow: Σ_k pre-period firm-school share × annual IHMP flow_kt.
+  common_baseline_start: 2011
+  common_baseline_end: 2013
+  require_common_baseline_full_coverage: true
+  school_sample_control_positive_cap: 0.05  # max allowed positive metric change for controls
+  school_sample_min_size: 400          # minimum school enrollment (avg over window)
+  restrict_treated_to_no_large_enrollment_jump: false   # if true, treated schools must not have large enrollment jumps
+  school_sample_max_yoy_size_jump: 0.40              # max allowed year-over-year enrollment increase for treated
+  match_school_pairs_by_carnegie_classification: true  # match controls to treated within same Carnegie class when available
+
+  # Advanced school-metric thresholds are retained for backward compatibility but are no longer used for opt_ihmp_share.
+  opt_ihmp_ipeds_share_intl_threshold: 0.30   # retained for config parity only
+  opt_ihmp_foia_opt_share_threshold: 0.50     # retained for config parity only
+  opt_ihmp_min_program_f1_count: 10           # retained for config parity only
+  # Advanced thresholds for opt_share metric.
+  opt_share_min_school_f1_count: 50    # min total FOIA students for a school to be eligible
+  opt_share_max_yoy_drop: 0.50         # max allowed year-over-year size drop for schools
+  # Diagnostic: firm-level plots by treated-school event year for instruments/treatment/outcome.
+  # Select the top N firms per event year by cumulative share from treated/control schools.
+  firm_share_size_bin_diagnostic: true  # enable/disable this diagnostic block
+  firm_share_size_bin_top_n: 50         # legacy alias for firm_share_event_year_top_n
+  firm_share_event_year_top_n: 50        # firms per event year per side (treated/control)
+  firm_share_y_metric: y_cst_lag0       # y metric plotted on the "y_ct" panels
+
+  # ── Treatment variable ──────────────────────────────────────────────────────
+  # treatment_measure: which OPT-hire count to expose as x_ct in the analysis panel.
+  #   correction_aware = post-2015 employer-spell-corrected count (preferred)
+  #   valid            = hires where OPT authorization start >= program end date
+  #   raw              = all OPT-associated hires (no validity check)
+  treatment_measure: correction_aware
+
+  # treatment_binary_rule: how to binarize x_ct into x_bin for first-stage regression.
+  #   any_nonzero      = 1 if company ever had x_ct > 0 in any year (preferred)
+  #   year_median      = 1 if x_ct exceeds the within-year median
+  #   topbot_quartile  = 1 for top-quartile firms, 0 for bottom-quartile (drops middle 50%)
+  treatment_binary_rule: any_nonzero
+
+  # ── Outcome construction ────────────────────────────────────────────────────
+  outcome_lag_start: -5    # earliest outcome lag relative to hire year (negative = pre-period)
+  outcome_lag_end: 5       # latest outcome lag
+
+  # Final analysis sample restriction.
+  sample_year_min: 2008
+  sample_year_max: 2022
+  falsification_lead_years: 4      # fake-timing placebo shifts the real shock 4 years earlier
+  min_active_shock_schools: 2     # when z_ct is nonzero, require at least this many contributing schools
+  require_balanced_panel: true    # keep only firms observed in every year of sample_year_min..sample_year_max
+
+  # ── Degree scope ────────────────────────────────────────────────────────────
+  # include_non_masters: if true, skip degree filter entirely in treatment counts.
+  include_non_masters: false
+  # include_bachelors: if true, include BA records alongside MA in treatment counts.
+  include_bachelors: false
+
+  # ── Growth transformations ───────────────────────────────────────────────────
+  # use_changes: if true, first-difference g_kt using ASINH(g_t) - ASINH(g_{t-1}).
+  use_changes: false
+  # use_log_y: if true, apply ASINH transform to all outcome variables in analysis panel.
+  use_log_y: false
+
+  # UNITIDs to exclude from both growth view and transition shares (comma-separated).
+  exclude_unitids: []
+
+regressions:
+  # instrument_cols: regression variants to run automatically.
+  # `z_ct` is the preferred raw annual IHMP-flow instrument.
+  instrument_cols:
+    - z_ct
+    - z_ct_event_pulse
+    - z_ct_flow_diff
+    - z_ct_flow_ar_resid
+    - z_ct_flow_diff_cumulative
+    - z_ct_flow_ar_resid_cumulative
+    - z_ct_common_base_level
+    - z_ct_common_base_asinh
+    - z_ct_event_step_dose
+    - z_ct_share_2008_2010
+    - z_ct_share_2011_2013
+    - z_ct_full
+
+  # Main outcome column from analysis panel for reduced-form regression.
+  # This remains the primary output written at the root of out_dir.
+  outcome_col: y_cst_lag0
+  # Additional reduced-form outcomes. Preferred-instrument plots/tables for
+  # non-primary outcomes are written under out_dir/outcome_variants/<outcome>.
+  outcome_cols:
+    - y_cst_lag0
+    - y_new_hires_lag0
+    - y_new_hires_foreign_lag0
+    - y_new_hires_native_lag0
+    - avg_tenure_years_lag0
+
+  # use_log_outcome: if true, apply log1p transform to outcome before regression.
+  # avg_tenure_years_* is kept in level years unless use_log_tenure_outcome is true.
+  use_log_outcome: true
+  use_log_tenure_outcome: false
+  # Add baseline firm-size-decile × calendar-year fixed effects to all TWFE
+  # reduced-form, first-stage, and dynamic-effect specifications.
+  absorb_baseline_size_year_fe: true
+  # Preferred baseline FE: calendar year × baseline-size decile × baseline
+  # headcount-growth quantile. The baseline window remains 2008-2013, while
+  # regression base years start in 2013.
+  absorb_baseline_size_growth_year_fe: true
+
+  # first_stage_use_ppml: if true, estimate first stages with PPML on the
+  # continuous OPT-hire count. If false, use the legacy OLS/LPM x_bin first stage.
+  first_stage_use_ppml: true
+  # Preferred main regression uses the IHMP-share level shift:
+  # z_ct_ihmp_share = sum_k pre-period firm-school share_ck * IHMP share_kt.
+  # This keeps g_kt in share levels rather than counts/flows.
+  instrument_col: z_ct_ihmp_share
+  instrument_transform: none
+  instrument_transform_apply_to: []
+
+  # Sample year window for regressions (null = use all years available in panel).
+  start_t: 2013
+  end_t: 2022
+
+  # Dedicated falsification tests use only the true pre-period sample.
+  falsification_pre_period_end: 2013
+
+  # Retained for backward compatibility only. Interaction specs now omit the
+  # baseline z term and estimate one coefficient per year / decile.
+  interaction_reference_year: 2014
+  size_decile_reference: 1
+
+  # Dynamic effect plots for the preferred specification only. Each coefficient
+  # regresses x_{c,t+h} or y_{c,t+h} on z_ct with firm and year FE.
+  run_dynamic_effect_plots: true
+  dynamic_horizon_start: -4
+  dynamic_horizon_end: 5
+  dynamic_instrument_cols:
+    - z_ct_ihmp_share
+    - z_ct
+    - z_ct_event_pulse
+    - z_ct_flow_diff
+    - z_ct_flow_ar_resid
+    - z_ct_flow_diff_cumulative
+    - z_ct_flow_ar_resid_cumulative
+  run_distributed_lag_specs: true
+  # Distributed-lag regressions should use innovation shocks, not cumulative
+  # stock-like exposure measures.
+  distributed_lag_instrument_cols:
+    - z_ct_flow_diff
+    - z_ct_flow_ar_resid
+  distributed_lag_max_lag: 3
+  run_residualized_binscatter: true
+  residualized_binscatter_bins: 50
+
+  # Conditional first-stage decomposition settings.
+  conditioning_baseline_window_start: 2008
+  conditioning_baseline_window_end: 2013
+  current_size_bins: 10
+  current_growth_bins: 5
+  baseline_growth_bins: 5
+  joint_size_growth_bins: 3
+  first_stage_conditioning_outcomes:
+    - x_bin
+    - x_asinh
+    - x_rate_headcount
+  headline_first_stage_spec: joint_size_growth_year_fe
+
+  # enforce_balanced_panel: if true, restrict to companies observed in every year
+  # in the sample window (required for clean TWFE interpretation).
+  enforce_balanced_panel: true
+
+output:
+  # Skip expensive panel rebuild and load pre-built panel views from disk.
+  skip_panel_rebuild: false
+  save_panel: true           # write analysis_panel.parquet and auxiliary tables
+  plot_diagnostics: true     # generate and save diagnostic plots as PNGs
+  slides_out_dir: "{root}/h1bworkers/output/slides/slides_20260421"
+
+testing:
+  # enabled: if true, subsample to a small random set of companies for fast iteration.
+  # All outputs go to the same paths (no suffix added) — do not use on production runs.
+  enabled: false
+  seed: 0
+  sample_n_companies: 100

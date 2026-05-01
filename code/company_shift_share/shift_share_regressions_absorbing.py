@@ -76,6 +76,46 @@ def _parse_x_lag_col(colname: str, suffix: str) -> int | None:
     return _parse_lag_token(m.group(1))
 
 
+def _normalize_school_sample_mode(raw: str | None) -> str:
+    value = str(raw or "").strip().lower().replace("-", "_")
+    if value in {"", "all", "legacy"}:
+        return "all"
+    if value in {"matched_shift_sample", "matched_sample", "matched", "sampled"}:
+        return "matched_shift_sample"
+    return value
+
+
+def _normalize_school_shift_metric(raw: str | None) -> str:
+    value = str(raw or "").strip().lower().replace("-", "_")
+    if value in {"", "ihmp", "ihmp_share"}:
+        return "ihmp_share"
+    if value in {"international", "international_share", "intl", "intl_share"}:
+        return "international_share"
+    if value in {"opt_ihmp", "opt_ihmp_share"}:
+        return "opt_ihmp_share"
+    if value in {"opt", "opt_share"}:
+        return "opt_share"
+    return value
+
+
+def _resolve_active_shift_metric(build_cfg: dict) -> str:
+    school_sample_mode = _normalize_school_sample_mode(
+        build_cfg.get("school_sample_mode", "all")
+    )
+    opt_shifts = bool(build_cfg.get("opt_shifts", False))
+    if school_sample_mode == "matched_shift_sample":
+        metric_raw = build_cfg.get("school_shift_metric")
+        if metric_raw is None:
+            metric_raw = "opt_share" if opt_shifts else "ihmp_share"
+        return _normalize_school_shift_metric(metric_raw)
+    return "opt_share_legacy" if opt_shifts else "ihmp_share_legacy"
+
+
+def _active_shift_metric_is_opt_family(metric: str) -> bool:
+    metric_norm = str(metric or "").strip().lower().replace("-", "_")
+    return metric_norm in {"opt_ihmp_share", "opt_share", "opt_share_legacy"}
+
+
 def _enforce_balanced_panel(
     df: pd.DataFrame,
     years: np.ndarray,
@@ -1274,6 +1314,8 @@ def main() -> None:
     reg_cfg = get_cfg_section(cfg, "shift_share_regressions")
     include_bachelors_sample = bool(reg_cfg.get("include_bachelors_sample", False))
     opt_shifts = bool(build_cfg.get("opt_shifts", False))
+    active_shift_metric = _resolve_active_shift_metric(build_cfg)
+    opt_metric_family = _active_shift_metric_is_opt_family(active_shift_metric)
     opt_shifts_degree_scope = str(build_cfg.get("opt_shifts_degree_scope", "bachelors_masters"))
 
     outcome_prefix = str(reg_cfg.get("outcome_prefix", "y_cst_lag"))
@@ -1305,7 +1347,7 @@ def main() -> None:
     # first-differences (not pct changes) + minimum shock floor at a high quantile.
     shock_metric_cfg = str(reg_cfg.get("absorbing_event_shock_metric", "auto")).strip().lower()
     if shock_metric_cfg == "auto":
-        use_pct_change_for_event_assignment = not opt_shifts
+        use_pct_change_for_event_assignment = not opt_metric_family
     elif shock_metric_cfg in {"pct_change", "percent_change", "pct"}:
         use_pct_change_for_event_assignment = True
     elif shock_metric_cfg in {"first_difference", "difference", "diff", "level_change"}:
@@ -1322,7 +1364,7 @@ def main() -> None:
     min_shock_quantile = (
         float(min_shock_quantile_cfg)
         if min_shock_quantile_cfg is not None
-        else (0.90 if opt_shifts else None)
+        else (0.90 if opt_metric_family else None)
     )
 
     min_shock_abs_cfg = reg_cfg.get("absorbing_event_min_shock_abs", None)
@@ -1403,10 +1445,10 @@ def main() -> None:
     # Event assignment always uses the raw instrument. Shock metric defaults can
     # switch based on opt_shifts unless overridden in config.
     instrument_col_for_events = instrument_col_raw
-    if opt_shifts and shock_metric_cfg == "auto":
+    if opt_metric_family and shock_metric_cfg == "auto":
         print(
-            "[info] opt_shifts=true: using first-difference shocks for absorbing "
-            "event assignment and a default min-shock quantile floor (0.90)."
+            "[info] opt-family shift metric detected: using first-difference shocks "
+            "for absorbing event assignment and a default min-shock quantile floor (0.90)."
         )
     print(
         f"[info] absorbing event assignment config: metric="
@@ -1525,6 +1567,8 @@ def main() -> None:
                     ),
                     "instrument_for_events": instrument_col_for_events,
                     "instrument_for_estimation": instrument_col_for_estimation,
+                    "active_shift_metric": active_shift_metric,
+                    "opt_metric_family": opt_metric_family,
                     "opt_shifts": opt_shifts,
                     "opt_shifts_degree_scope": opt_shifts_degree_scope,
                     "absorbing_plot_raw_means_by_event_time": absorbing_plot_raw_means_by_event_time,

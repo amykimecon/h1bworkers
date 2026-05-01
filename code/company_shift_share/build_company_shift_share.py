@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import seaborn as sns
+import math
 from pathlib import Path
 import sys
 from typing import Iterable, Optional
 
 import duckdb as ddb
+import pandas as pd
+import seaborn as sns
 # Ensure progress logs flush immediately.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True, write_through=True)
@@ -25,17 +27,22 @@ if hasattr(sys.stderr, "reconfigure"):
 
 try:
     from company_shift_share.config_loader import DEFAULT_CONFIG_PATH, get_cfg_section, load_config
+    from company_shift_share.institution_mapping import load_revelio_school_map, sql_normalize_school_key
 except ModuleNotFoundError:
     # Allow direct execution when repo root is not already on PYTHONPATH.
     sys.path.append(str(Path(__file__).resolve().parents[1]))
     from company_shift_share.config_loader import DEFAULT_CONFIG_PATH, get_cfg_section, load_config
+    from company_shift_share.institution_mapping import load_revelio_school_map, sql_normalize_school_key
 
 @dataclass(frozen=True)
 class PipelinePaths:
     transitions: Path
     headcount: Path
     revelio_ipeds_foia_inst_crosswalk: Path
+    revelio_inst_deterministic_map: Path | None
+    revelio_ref_inst_catalog: Path | None
     f1_inst_unitid_crosswalk: Path | None
+    ipeds_main_institutions: Path | None
     ipeds_ma_only: Path
     ipeds_ma_ba_only: Path | None
     foia_sevp_with_person_id: Path
@@ -48,6 +55,8 @@ class PipelinePaths:
     outcomes_out: Path
     analysis_panel_out: Path
     analysis_panel_out_ma_ba: Path | None
+    school_shift_metric_panel_out: Path | None
+    school_shift_sample_out: Path | None
 
 
 def _resolve_path(paths_cfg: dict, key: str) -> Path:
@@ -70,7 +79,10 @@ def _resolve_pipeline_paths(cfg: dict) -> PipelinePaths:
         transitions=_resolve_path(paths_cfg, "transitions_out"),
         headcount=_resolve_path(paths_cfg, "headcounts_out"),
         revelio_ipeds_foia_inst_crosswalk=_resolve_path(paths_cfg, "revelio_ipeds_foia_inst_crosswalk"),
+        revelio_inst_deterministic_map=_resolve_optional_path(paths_cfg, "revelio_inst_deterministic_map"),
+        revelio_ref_inst_catalog=_resolve_optional_path(paths_cfg, "revelio_ref_inst_catalog"),
         f1_inst_unitid_crosswalk=_resolve_optional_path(paths_cfg, "f1_inst_unitid_crosswalk"),
+        ipeds_main_institutions=_resolve_optional_path(paths_cfg, "ipeds_main_institutions"),
         ipeds_ma_only=_resolve_path(paths_cfg, "ipeds_ma_only"),
         ipeds_ma_ba_only=_resolve_optional_path(paths_cfg, "ipeds_ma_ba_only"),
         foia_sevp_with_person_id=_resolve_path(paths_cfg, "foia_sevp_with_person_id"),
@@ -83,6 +95,8 @@ def _resolve_pipeline_paths(cfg: dict) -> PipelinePaths:
         outcomes_out=_resolve_path(paths_cfg, "outcomes_out"),
         analysis_panel_out=_resolve_path(paths_cfg, "analysis_panel_out"),
         analysis_panel_out_ma_ba=_resolve_optional_path(paths_cfg, "analysis_panel_out_ma_ba"),
+        school_shift_metric_panel_out=_resolve_optional_path(paths_cfg, "school_shift_metric_panel_out"),
+        school_shift_sample_out=_resolve_optional_path(paths_cfg, "school_shift_sample_out"),
     )
 
 
@@ -168,6 +182,62 @@ def _normalize_opt_shift_normalization(raw: str | None) -> str:
     )
 
 
+def _normalize_school_sample_mode(raw: str | None) -> str:
+    value = str(raw or "").strip().lower().replace("-", "_")
+    if value in {"", "all", "legacy"}:
+        return "all"
+    if value in {"matched_shift_sample", "matched_sample", "matched", "sampled"}:
+        return "matched_shift_sample"
+    raise ValueError(
+        "Invalid school sample mode. Use one of: all (default), matched_shift_sample."
+    )
+
+
+def _normalize_school_shift_metric(raw: str | None) -> str:
+    value = str(raw or "").strip().lower().replace("-", "_")
+    if value in {"", "ihmp", "ihmp_share"}:
+        return "ihmp_share"
+    if value in {"international", "international_share", "intl", "intl_share"}:
+        return "international_share"
+    if value in {"opt_ihmp", "opt_ihmp_share"}:
+        return "opt_ihmp_share"
+    if value in {"opt", "opt_share"}:
+        return "opt_share"
+    raise ValueError(
+        "Invalid school shift metric. Use one of: "
+        "ihmp_share, international_share, opt_ihmp_share, opt_share."
+    )
+
+
+def _school_metric_uses_foia(metric: str) -> bool:
+    metric_norm = str(metric or "").strip().lower().replace("-", "_")
+    return metric_norm in {"opt_ihmp_share", "opt_share", "opt_share_legacy"}
+
+
+def _school_metric_is_opt_family(metric: str) -> bool:
+    metric_norm = str(metric or "").strip().lower().replace("-", "_")
+    return metric_norm in {"opt_ihmp_share", "opt_share", "opt_share_legacy"}
+
+
+def _matched_school_metric_degree_scope(include_bachelors: bool) -> str:
+    return "bachelors_masters" if include_bachelors else "masters"
+
+
+def _resolve_active_shift_metric(
+    *,
+    school_sample_mode: str,
+    school_shift_metric: str | None,
+    opt_shifts: bool,
+) -> str:
+    school_sample_mode = _normalize_school_sample_mode(school_sample_mode)
+    if school_sample_mode == "matched_shift_sample":
+        metric_raw = school_shift_metric if school_shift_metric is not None else (
+            "opt_share" if opt_shifts else "ihmp_share"
+        )
+        return _normalize_school_shift_metric(metric_raw)
+    return "opt_share_legacy" if opt_shifts else "ihmp_share_legacy"
+
+
 def _degree_predicate_for_scope(
     con: ddb.DuckDBPyConnection,
     view: str = "foia_raw",
@@ -246,16 +316,24 @@ def _register_inputs(
     paths: PipelinePaths,
     include_bachelors: bool = False,
     opt_shifts: bool = False,
+    school_sample_mode: str = "all",
+    school_shift_metric: str | None = None,
     opt_shift_degree_scope: str = "bachelors_masters",
     opt_shifts_normalization: str | None = None,
     opt_shifts_normalize_by_graduates: bool = True,
 ) -> None:
+    school_sample_mode = _normalize_school_sample_mode(school_sample_mode)
     opt_shift_degree_scope = _normalize_degree_scope(opt_shift_degree_scope)
     if opt_shifts_normalization is None:
         opt_shifts_normalization = (
             "ipeds_graduates" if opt_shifts_normalize_by_graduates else "none"
         )
     opt_shifts_normalization = _normalize_opt_shift_normalization(opt_shifts_normalization)
+    active_shift_metric = _resolve_active_shift_metric(
+        school_sample_mode=school_sample_mode,
+        school_shift_metric=school_shift_metric,
+        opt_shifts=opt_shifts,
+    )
     ipeds_path = paths.ipeds_ma_ba_only if include_bachelors else paths.ipeds_ma_only
     if include_bachelors and ipeds_path is None:
         print(
@@ -285,10 +363,10 @@ def _register_inputs(
     }
     if need_ipeds_ma_ba and paths.ipeds_ma_ba_only is not None:
         required_paths["ipeds_ma_ba_only"] = paths.ipeds_ma_ba_only
-    if opt_shifts:
+    if opt_shifts or _school_metric_uses_foia(active_shift_metric):
         if paths.f1_inst_unitid_crosswalk is None:
             raise ValueError(
-                "opt_shifts=true requires paths.f1_inst_unitid_crosswalk in config."
+                "FOIA-based shift metrics require paths.f1_inst_unitid_crosswalk in config."
             )
         required_paths["f1_inst_unitid_crosswalk"] = paths.f1_inst_unitid_crosswalk
 
@@ -296,25 +374,26 @@ def _register_inputs(
 
     con.sql(f"CREATE OR REPLACE TEMP VIEW revelio_transitions AS SELECT * FROM read_parquet('{_escape(paths.transitions)}')")
     con.sql(f"CREATE OR REPLACE TEMP VIEW revelio_headcount AS SELECT * FROM read_parquet('{_escape(paths.headcount)}')")
-    con.sql(f"CREATE OR REPLACE TEMP VIEW revelio_inst_cw_raw AS SELECT * FROM read_parquet('{_escape(paths.revelio_ipeds_foia_inst_crosswalk)}')")
+    revelio_school_map, revelio_school_map_meta = load_revelio_school_map(
+        legacy_crosswalk=paths.revelio_ipeds_foia_inst_crosswalk,
+        deterministic_triple_map=paths.revelio_inst_deterministic_map,
+        ref_inst_catalog=paths.revelio_ref_inst_catalog,
+    )
+    con.register("revelio_inst_cw_df", revelio_school_map[["university_raw_key", "unitid"]])
     con.sql(
         """
         CREATE OR REPLACE TEMP VIEW revelio_inst_cw AS
-        WITH norm AS (
-            SELECT
-                LOWER(TRIM(CAST(university_raw AS VARCHAR))) AS university_raw_norm,
-                CAST(CAST(UNITID AS BIGINT) AS VARCHAR) AS unitid
-            FROM revelio_inst_cw_raw
-            WHERE university_raw IS NOT NULL
-              AND TRIM(CAST(university_raw AS VARCHAR)) <> ''
-              AND UNITID IS NOT NULL
-        )
         SELECT
-            university_raw_norm,
-            MIN(unitid) AS unitid
-        FROM norm
-        GROUP BY university_raw_norm
+            CAST(university_raw_key AS VARCHAR) AS university_raw_norm,
+            CAST(unitid AS VARCHAR) AS unitid
+        FROM revelio_inst_cw_df
+        WHERE university_raw_key IS NOT NULL
+          AND unitid IS NOT NULL
         """
+    )
+    print(
+        "[inputs] Revelio school map "
+        f"{revelio_school_map_meta['mapping_method']} ({len(revelio_school_map):,} schools)"
     )
     con.sql(f"CREATE OR REPLACE TEMP VIEW ipeds_raw_ma AS SELECT * FROM read_parquet('{_escape(paths.ipeds_ma_only)}')")
     has_ipeds_ma_ba = paths.ipeds_ma_ba_only is not None and paths.ipeds_ma_ba_only.exists()
@@ -334,6 +413,22 @@ def _register_inputs(
             "CREATE OR REPLACE TEMP VIEW f1_inst_unitid_cw AS "
             f"SELECT * FROM read_parquet('{_escape(paths.f1_inst_unitid_crosswalk)}')"
         )
+    if paths.ipeds_main_institutions is not None and paths.ipeds_main_institutions.exists():
+        con.sql(
+            "CREATE OR REPLACE TEMP VIEW ipeds_main_institutions AS "
+            f"SELECT * FROM read_parquet('{_escape(paths.ipeds_main_institutions)}')"
+        )
+    else:
+        con.sql(
+            """
+            CREATE OR REPLACE TEMP VIEW ipeds_main_institutions AS
+            SELECT
+                CAST(NULL AS VARCHAR) AS main_unitid,
+                CAST(NULL AS VARCHAR) AS ipeds_name,
+                CAST(NULL AS VARCHAR) AS ipeds_instname_clean
+            WHERE 1 = 0
+            """
+        )
     con.sql(f"CREATE OR REPLACE TEMP VIEW preferred_rcids AS SELECT DISTINCT preferred_rcid FROM read_parquet('{_escape(paths.preferred_rcids)}')")
     con.sql(
         f"""
@@ -352,6 +447,940 @@ def _register_inputs(
         WHERE preferred_rcid IS NOT NULL
         """
     )
+
+
+def _sql_normalize_cip6(colname: str) -> str:
+    digits = f"REGEXP_REPLACE(TRIM(CAST({colname} AS VARCHAR)), '[^0-9]', '', 'g')"
+    return f"""
+        CASE
+            WHEN {digits} IS NULL OR TRIM(CAST({digits} AS VARCHAR)) = '' THEN NULL
+            ELSE LPAD(SUBSTRING(TRIM(CAST({digits} AS VARCHAR)) FROM 1 FOR 6), 6, '0')
+        END
+    """
+
+
+def _empty_school_metric_panel() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "k",
+            "t",
+            "metric",
+            "school_size",
+            "metric_level",
+            "metric_share",
+            "ipeds_total_students",
+            "ipeds_total_intl_students",
+            "foia_total_students",
+            "foia_total_opt_students",
+        ]
+    )
+
+
+def _empty_school_shift_sample() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "k",
+            "school_name",
+            "metric",
+            "sample_role",
+            "selected_for_instrument",
+            "matched_school_k",
+            "matched_school_name",
+            "matched_pair_id",
+            "treated_rank",
+            "treated_score",
+            "control_eligible",
+            "treated_candidate",
+            "has_full_window_coverage",
+            "meets_min_size",
+            "fails_large_yoy_drop",
+            "min_required_size",
+            "control_positive_cap",
+            "avg_size_window",
+            "log_avg_size_window",
+            "max_positive_annual_change",
+            "max_positive_yoy_size_change",
+            "max_negative_yoy_size_change",
+            "fails_large_yoy_size_jump",
+        ]
+    )
+
+
+def _school_name_lookup(con: ddb.DuckDBPyConnection) -> pd.DataFrame:
+    if not _has_column(con, "ipeds_main_institutions", "main_unitid"):
+        return pd.DataFrame(columns=["k", "school_name"])
+    lookup = con.sql(
+        """
+        SELECT
+            CAST(main_unitid AS VARCHAR) AS k,
+            COALESCE(
+                NULLIF(TRIM(CAST(ipeds_name AS VARCHAR)), ''),
+                NULLIF(TRIM(CAST(ipeds_instname_clean AS VARCHAR)), '')
+            ) AS school_name
+        FROM ipeds_main_institutions
+        WHERE main_unitid IS NOT NULL
+        """
+    ).df()
+    if lookup.empty:
+        return pd.DataFrame(columns=["k", "school_name"])
+    lookup["k"] = lookup["k"].astype(str)
+    lookup["school_name"] = lookup["school_name"].fillna("").astype(str)
+    lookup = lookup.drop_duplicates("k")
+    return lookup
+
+
+def _ipeds_program_year_ctes_sql(exclude_unitids: list[str] | None = None) -> str:
+    exclude_unitids = exclude_unitids or []
+    exclude_clause = ""
+    if exclude_unitids:
+        exclude_clause = f"AND CAST(unitid AS VARCHAR) NOT IN {_sql_in_list(exclude_unitids)}"
+    return f"""
+        ipeds_program_year AS (
+            SELECT
+                CAST(CAST(unitid AS BIGINT) AS VARCHAR) AS k,
+                CAST(year AS INTEGER) AS t,
+                LPAD(CAST(CAST(cipcode AS BIGINT) AS VARCHAR), 6, '0') AS cip6,
+                SUM(COALESCE(CAST(ctotalt AS DOUBLE), 0)) AS program_students,
+                SUM(COALESCE(CAST(cnralt AS DOUBLE), 0)) AS program_intl_students,
+                CASE
+                    WHEN SUM(COALESCE(CAST(ctotalt AS DOUBLE), 0)) > 0
+                    THEN SUM(COALESCE(CAST(cnralt AS DOUBLE), 0))
+                         / SUM(COALESCE(CAST(ctotalt AS DOUBLE), 0))
+                    ELSE NULL
+                END AS program_share_intl
+            FROM ipeds_raw
+            WHERE unitid IS NOT NULL
+              AND year IS NOT NULL
+              AND cipcode IS NOT NULL
+              {exclude_clause}
+            GROUP BY 1, 2, 3
+        ),
+        ipeds_school_year AS (
+            SELECT
+                k,
+                t,
+                SUM(program_students) AS school_size,
+                SUM(program_intl_students) AS total_intl_students
+            FROM ipeds_program_year
+            GROUP BY 1, 2
+        )
+    """
+
+
+def _foia_school_program_person_ctes_sql(
+    con: ddb.DuckDBPyConnection,
+    *,
+    degree_scope: str,
+    exclude_unitids: list[str] | None = None,
+) -> str:
+    end_col = _first_present_column(
+        con,
+        "foia_raw",
+        ["program_end_date", "program_completion_date", "program_end_dt", "program_complete_date"],
+    )
+    if end_col is None:
+        raise ValueError(
+            "FOIA-based school shift metrics require a program end date column "
+            "(program_end_date/program_completion_date/program_end_dt/program_complete_date)."
+        )
+    cip_col = _first_present_column(
+        con,
+        "foia_raw",
+        ["major_1_cip_code", "program_cip_code", "cipcode", "cip_code", "cip"],
+    )
+    end_expr = _date_parse_sql(end_col)
+    opt_date_cols = [
+        col
+        for col in (
+            "opt_employer_start_date",
+            "opt_authorization_start_date",
+            "authorization_start_date",
+        )
+        if _has_column(con, "foia_raw", col)
+    ]
+    if opt_date_cols:
+        parsed_opt_dates = ", ".join(_date_parse_sql(col) for col in opt_date_cols)
+        opt_activity_expr = f"CASE WHEN COALESCE({parsed_opt_dates}) IS NOT NULL THEN 1 ELSE 0 END"
+    else:
+        opt_activity_expr = "0"
+        print(
+            "[warn] Could not find OPT date columns in FOIA input. "
+            "FOIA-based school shift numerators will evaluate to zero."
+        )
+    degree_pred = _degree_predicate_for_scope(con, view="foia_raw", degree_scope=degree_scope)
+    degree_clause = f"AND ({degree_pred})" if degree_pred else ""
+    if degree_pred is None:
+        print(
+            "[warn] Could not infer FOIA degree column for school shift metric; "
+            "using all degree levels in FOIA numerator."
+        )
+    exclude_unitids = exclude_unitids or []
+    exclude_clause = ""
+    if exclude_unitids:
+        exclude_clause = f"AND cw.k NOT IN {_sql_in_list(exclude_unitids)}"
+    cip_expr = "CAST(NULL AS VARCHAR)"
+    if cip_col is not None:
+        cip_expr = _sql_normalize_cip6(cip_col)
+    return f"""
+        cw AS (
+            SELECT
+                TRIM(CAST(school_name AS VARCHAR)) AS school_name_raw,
+                COALESCE(TRIM(CAST(f1_city_clean AS VARCHAR)), '') AS f1_city_clean,
+                COALESCE(TRIM(CAST(f1_state_clean AS VARCHAR)), '') AS f1_state_clean,
+                COALESCE(TRIM(CAST(f1_zip_clean AS VARCHAR)), '') AS f1_zip_clean,
+                CAST(CAST(MIN(UNITID) AS BIGINT) AS VARCHAR) AS k
+            FROM f1_inst_unitid_cw
+            WHERE UNITID IS NOT NULL
+              AND school_name IS NOT NULL
+            GROUP BY 1, 2, 3, 4
+        ),
+        foia_students AS (
+            SELECT
+                person_id,
+                CAST(EXTRACT(YEAR FROM {end_expr}) AS INTEGER) AS t,
+                TRIM(CAST(school_name AS VARCHAR)) AS school_name_raw,
+                COALESCE({_sql_normalize('campus_city')}, '') AS f1_city_clean,
+                COALESCE({_sql_state_name_to_abbr('campus_state')}, '') AS f1_state_clean,
+                COALESCE({_sql_clean_zip('campus_zip_code')}, '') AS f1_zip_clean,
+                {cip_expr} AS cip6,
+                {opt_activity_expr} AS has_opt
+            FROM foia_raw
+            WHERE person_id IS NOT NULL
+              AND school_name IS NOT NULL
+              AND {end_expr} IS NOT NULL
+              {degree_clause}
+        ),
+        foia_school_program_person AS (
+            SELECT
+                cw.k,
+                f.t,
+                f.person_id,
+                f.cip6,
+                MAX(f.has_opt) AS ever_opt
+            FROM foia_students AS f
+            JOIN cw
+              ON f.school_name_raw = cw.school_name_raw
+             AND f.f1_city_clean = cw.f1_city_clean
+             AND f.f1_state_clean = cw.f1_state_clean
+             AND f.f1_zip_clean = cw.f1_zip_clean
+            WHERE f.t IS NOT NULL
+              {exclude_clause}
+            GROUP BY 1, 2, 3, 4
+        ),
+        foia_school_year AS (
+            SELECT
+                k,
+                t,
+                COUNT(DISTINCT person_id) AS foia_total_students,
+                COUNT(DISTINCT CASE WHEN ever_opt = 1 THEN person_id END) AS foia_total_opt_students
+            FROM foia_school_program_person
+            GROUP BY 1, 2
+        ),
+        foia_program_year AS (
+            SELECT
+                k,
+                t,
+                cip6,
+                COUNT(DISTINCT person_id) AS foia_program_students,
+                COUNT(DISTINCT CASE WHEN ever_opt = 1 THEN person_id END) AS foia_program_opt_students,
+                CASE
+                    WHEN COUNT(DISTINCT person_id) > 0
+                    THEN COUNT(DISTINCT CASE WHEN ever_opt = 1 THEN person_id END)::DOUBLE
+                         / COUNT(DISTINCT person_id)::DOUBLE
+                    ELSE NULL
+                END AS foia_program_opt_share
+            FROM foia_school_program_person
+            WHERE cip6 IS NOT NULL
+            GROUP BY 1, 2, 3
+        )
+    """
+
+
+def _foia_school_year_ctes_sql(
+    con: ddb.DuckDBPyConnection,
+    degree_scope: str,
+    exclude_unitids: list[str] | None = None,
+) -> str:
+    """Backward-compatible helper retained for call sites that need foia_school_year only."""
+    return _foia_school_program_person_ctes_sql(
+        con,
+        degree_scope=degree_scope,
+        exclude_unitids=exclude_unitids,
+    )
+
+
+def _finalize_school_metric_panel(df: pd.DataFrame, metric: str) -> pd.DataFrame:
+    if df.empty:
+        out = _empty_school_metric_panel()
+        out["metric"] = pd.Series(dtype="string")
+        return out
+    out = df.copy()
+    out["k"] = out["k"].astype(str)
+    out["t"] = pd.to_numeric(out["t"], errors="coerce").astype("Int64")
+    numeric_cols = [
+        "school_size",
+        "metric_level",
+        "metric_share",
+        "ipeds_total_students",
+        "ipeds_total_intl_students",
+        "foia_total_students",
+        "foia_total_opt_students",
+    ]
+    for col in numeric_cols:
+        if col not in out.columns:
+            out[col] = pd.NA
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    out["metric"] = metric
+    return out[
+        [
+            "k",
+            "t",
+            "metric",
+            "school_size",
+            "metric_level",
+            "metric_share",
+            "ipeds_total_students",
+            "ipeds_total_intl_students",
+            "foia_total_students",
+            "foia_total_opt_students",
+        ]
+    ].sort_values(["k", "t"]).reset_index(drop=True)
+
+
+def _build_ipeds_school_metric_panel(
+    con: ddb.DuckDBPyConnection,
+    *,
+    metric: str,
+    exclude_unitids: list[str] | None = None,
+) -> pd.DataFrame:
+    metric = _normalize_school_shift_metric(metric)
+    if metric not in {"ihmp_share", "international_share"}:
+        raise ValueError(f"Unsupported IPEDS school metric '{metric}'.")
+    if metric == "ihmp_share":
+        level_expr = "COALESCE(m.metric_level, 0)"
+        metric_cte = """
+            school_metric AS (
+                SELECT
+                    k,
+                    t,
+                    SUM(
+                        CASE
+                            WHEN program_share_intl >= 0.5
+                             AND program_students >= 10
+                            THEN program_students
+                            ELSE 0
+                        END
+                    ) AS metric_level
+                FROM ipeds_program_year
+                GROUP BY 1, 2
+            )
+        """
+    else:
+        level_expr = "COALESCE(sy.total_intl_students, 0)"
+        metric_cte = """
+            school_metric AS (
+                SELECT
+                    k,
+                    t,
+                    total_intl_students AS metric_level
+                FROM ipeds_school_year
+            )
+        """
+    df = con.sql(
+        f"""
+        WITH
+        {_ipeds_program_year_ctes_sql(exclude_unitids)},
+        {metric_cte}
+        SELECT
+            sy.k,
+            sy.t,
+            sy.school_size,
+            {level_expr} AS metric_level,
+            CASE
+                WHEN sy.school_size > 0 THEN {level_expr} / sy.school_size
+                ELSE NULL
+            END AS metric_share,
+            sy.school_size AS ipeds_total_students,
+            sy.total_intl_students AS ipeds_total_intl_students,
+            CAST(NULL AS DOUBLE) AS foia_total_students,
+            CAST(NULL AS DOUBLE) AS foia_total_opt_students
+        FROM ipeds_school_year AS sy
+        LEFT JOIN school_metric AS m
+          ON sy.k = m.k
+         AND sy.t = m.t
+        ORDER BY sy.k, sy.t
+        """
+    ).df()
+    return _finalize_school_metric_panel(df, metric)
+
+
+def _build_opt_ihmp_school_metric_panel(
+    con: ddb.DuckDBPyConnection,
+    *,
+    degree_scope: str,
+    exclude_unitids: list[str] | None = None,
+    ipeds_share_intl_threshold: float = 0.30,
+    foia_opt_share_threshold: float = 0.50,
+    min_program_f1_count: int = 10,
+) -> pd.DataFrame:
+    df = con.sql(
+        f"""
+        WITH
+        {_ipeds_program_year_ctes_sql(exclude_unitids)},
+        {_foia_school_year_ctes_sql(con, degree_scope=degree_scope, exclude_unitids=exclude_unitids)},
+        school_metric AS (
+            SELECT
+                k,
+                t,
+                foia_total_opt_students AS metric_level
+            FROM foia_school_year
+        )
+        SELECT
+            sy.k,
+            sy.t,
+            sy.school_size,
+            COALESCE(m.metric_level, 0) AS metric_level,
+            CASE
+                WHEN sy.school_size > 0 THEN COALESCE(m.metric_level, 0) / sy.school_size
+                ELSE NULL
+            END AS metric_share,
+            sy.school_size AS ipeds_total_students,
+            sy.total_intl_students AS ipeds_total_intl_students,
+            fy.foia_total_students,
+            fy.foia_total_opt_students
+        FROM ipeds_school_year AS sy
+        LEFT JOIN school_metric AS m
+          ON sy.k = m.k
+         AND sy.t = m.t
+        LEFT JOIN foia_school_year AS fy
+          ON sy.k = fy.k
+         AND sy.t = fy.t
+        ORDER BY sy.k, sy.t
+        """
+    ).df()
+    return _finalize_school_metric_panel(df, "opt_ihmp_share")
+
+
+def _build_opt_share_school_metric_panel(
+    con: ddb.DuckDBPyConnection,
+    *,
+    degree_scope: str,
+    exclude_unitids: list[str] | None = None,
+) -> pd.DataFrame:
+    df = con.sql(
+        f"""
+        WITH
+        {_foia_school_program_person_ctes_sql(con, degree_scope=degree_scope, exclude_unitids=exclude_unitids)}
+        SELECT
+            fy.k,
+            fy.t,
+            fy.foia_total_students AS school_size,
+            fy.foia_total_opt_students AS metric_level,
+            CASE
+                WHEN fy.foia_total_students > 0
+                THEN fy.foia_total_opt_students::DOUBLE / fy.foia_total_students::DOUBLE
+                ELSE NULL
+            END AS metric_share,
+            CAST(NULL AS DOUBLE) AS ipeds_total_students,
+            CAST(NULL AS DOUBLE) AS ipeds_total_intl_students,
+            fy.foia_total_students,
+            fy.foia_total_opt_students
+        FROM foia_school_year AS fy
+        ORDER BY fy.k, fy.t
+        """
+    ).df()
+    return _finalize_school_metric_panel(df, "opt_share")
+
+
+def _build_school_metric_panel(
+    con: ddb.DuckDBPyConnection,
+    *,
+    metric: str,
+    degree_scope: str,
+    exclude_unitids: list[str] | None = None,
+    opt_ihmp_ipeds_share_intl_threshold: float = 0.30,
+    opt_ihmp_foia_opt_share_threshold: float = 0.50,
+    opt_ihmp_min_program_f1_count: int = 10,
+) -> pd.DataFrame:
+    metric = _normalize_school_shift_metric(metric)
+    if metric in {"ihmp_share", "international_share"}:
+        return _build_ipeds_school_metric_panel(
+            con,
+            metric=metric,
+            exclude_unitids=exclude_unitids,
+        )
+    if metric == "opt_ihmp_share":
+        return _build_opt_ihmp_school_metric_panel(
+            con,
+            degree_scope=degree_scope,
+            exclude_unitids=exclude_unitids,
+            ipeds_share_intl_threshold=opt_ihmp_ipeds_share_intl_threshold,
+            foia_opt_share_threshold=opt_ihmp_foia_opt_share_threshold,
+            min_program_f1_count=opt_ihmp_min_program_f1_count,
+        )
+    if metric == "opt_share":
+        return _build_opt_share_school_metric_panel(
+            con,
+            degree_scope=degree_scope,
+            exclude_unitids=exclude_unitids,
+        )
+    raise ValueError(f"Unsupported school shift metric '{metric}'.")
+
+
+def _build_school_shift_sample(
+    metric_panel: pd.DataFrame,
+    *,
+    metric: str,
+    school_name_lookup: pd.DataFrame | None = None,
+    n_shifted: int = 25,
+    window_start: int = 2014,
+    window_end: int = 2017,
+    control_positive_cap: float = 0.02,
+    min_school_size: int = 100,
+    opt_share_min_school_f1_count: int = 50,
+    opt_share_max_yoy_drop: float = 0.50,
+    restrict_treated_to_no_large_enrollment_jump: bool = False,
+    max_yoy_size_jump: float = 0.50,
+) -> pd.DataFrame:
+    metric = _normalize_school_shift_metric(metric)
+    if metric_panel.empty:
+        return _empty_school_shift_sample()
+    years = list(range(int(window_start), int(window_end) + 1))
+    if len(years) < 2:
+        raise ValueError("School sample window must span at least two years.")
+    work = metric_panel.loc[
+        metric_panel["t"].isin(years),
+        ["k", "t", "school_size", "metric_level", "metric_share"],
+    ].copy()
+    if work.empty:
+        return _empty_school_shift_sample()
+    share_wide = work.pivot(index="k", columns="t", values="metric_share").reindex(columns=years)
+    size_wide = work.pivot(index="k", columns="t", values="school_size").reindex(columns=years)
+    level_wide = work.pivot(index="k", columns="t", values="metric_level").reindex(columns=years)
+    summary = pd.DataFrame({"k": share_wide.index.astype(str)})
+    summary["metric"] = metric
+    summary = summary.set_index("k", drop=False)
+    summary.index.name = None
+    name_map: dict[str, str] = {}
+    if school_name_lookup is not None and not school_name_lookup.empty:
+        name_map = dict(
+            zip(
+                school_name_lookup["k"].astype(str),
+                school_name_lookup["school_name"].fillna("").astype(str),
+            )
+        )
+    summary["school_name"] = summary.index.map(name_map).fillna("")
+    for year in years:
+        summary[f"school_size_{year}"] = size_wide[year]
+        summary[f"metric_level_{year}"] = level_wide[year]
+        summary[f"metric_share_{year}"] = share_wide[year]
+    share_change_cols: list[str] = []
+    size_change_cols: list[str] = []
+    for year_prev, year_curr in zip(years, years[1:]):
+        share_col = f"metric_share_change_{year_prev}_{year_curr}"
+        size_col = f"school_size_pct_change_{year_prev}_{year_curr}"
+        summary[share_col] = summary[f"metric_share_{year_curr}"] - summary[f"metric_share_{year_prev}"]
+        prev_size = summary[f"school_size_{year_prev}"]
+        curr_size = summary[f"school_size_{year_curr}"]
+        summary[size_col] = curr_size / prev_size - 1.0
+        share_change_cols.append(share_col)
+        size_change_cols.append(size_col)
+    summary["has_full_window_coverage"] = (
+        size_wide.notna().all(axis=1) & share_wide.notna().all(axis=1)
+    ).astype("int8")
+    min_required_size = (
+        int(opt_share_min_school_f1_count)
+        if metric == "opt_share"
+        else int(min_school_size)
+    )
+    summary["min_required_size"] = min_required_size
+    summary["meets_min_size"] = (
+        size_wide.ge(float(min_required_size)).all(axis=1)
+    ).astype("int8")
+    positive_changes = summary[share_change_cols].clip(lower=0)
+    summary["max_positive_annual_change"] = positive_changes.max(axis=1, skipna=True)
+    summary["treated_score"] = positive_changes.max(axis=1, skipna=True)
+    summary["control_positive_cap"] = float(control_positive_cap)
+    summary["max_positive_yoy_size_change"] = summary[size_change_cols].max(axis=1, skipna=True)
+    if metric == "opt_share":
+        summary["max_negative_yoy_size_change"] = summary[size_change_cols].min(axis=1, skipna=True)
+        summary["fails_large_yoy_drop"] = (
+            summary["max_negative_yoy_size_change"] < -float(opt_share_max_yoy_drop)
+        ).astype("int8")
+    else:
+        summary["max_negative_yoy_size_change"] = pd.NA
+        summary["fails_large_yoy_drop"] = 0
+    if restrict_treated_to_no_large_enrollment_jump:
+        summary["fails_large_yoy_size_jump"] = (
+            summary["max_positive_yoy_size_change"] > float(max_yoy_size_jump)
+        ).astype("int8")
+    else:
+        summary["fails_large_yoy_size_jump"] = 0
+    base_eligible = (
+        (summary["has_full_window_coverage"] == 1)
+        & (summary["meets_min_size"] == 1)
+        & (summary["fails_large_yoy_drop"] == 0)
+    )
+    treated_base_eligible = (
+        base_eligible
+        if not restrict_treated_to_no_large_enrollment_jump
+        else (base_eligible & (summary["fails_large_yoy_size_jump"] == 0))
+    )
+    summary["control_eligible"] = (
+        base_eligible
+        & positive_changes.le(float(control_positive_cap)).all(axis=1)
+    ).astype("int8")
+    summary["treated_candidate"] = (
+        treated_base_eligible & summary["treated_score"].gt(0)
+    ).astype("int8")
+    size_cols = [f"school_size_{year}" for year in years]
+    summary["avg_size_window"] = summary[size_cols].mean(axis=1, skipna=True)
+    summary["log_avg_size_window"] = summary["avg_size_window"].apply(
+        lambda value: math.log(value) if pd.notna(value) and value > 0 else float("nan")
+    )
+    summary["selected_for_instrument"] = 0
+    summary["sample_role"] = pd.NA
+    summary["matched_school_k"] = pd.NA
+    summary["matched_school_name"] = pd.NA
+    summary["matched_pair_id"] = pd.Series(pd.NA, index=summary.index, dtype="Int64")
+    treated_candidates = (
+        summary.loc[summary["treated_candidate"] == 1]
+        .sort_values(["treated_score", "k"], ascending=[False, True])
+        .copy()
+    )
+    summary["treated_rank"] = pd.Series(pd.NA, index=summary.index, dtype="Int64")
+    if not treated_candidates.empty:
+        summary.loc[treated_candidates.index, "treated_rank"] = pd.Series(
+            range(1, len(treated_candidates) + 1),
+            index=treated_candidates.index,
+            dtype="Int64",
+        )
+    selected_treated = treated_candidates.head(int(n_shifted)).copy()
+    control_pool = summary.loc[
+        (summary["control_eligible"] == 1) & (~summary.index.isin(selected_treated.index))
+    ].copy()
+    assignments: list[dict[str, object]] = []
+    used_controls: set[str] = set()
+    pair_id = 0
+    for treated_k, treated_row in selected_treated.iterrows():
+        available = control_pool.loc[~control_pool.index.isin(used_controls)].copy()
+        if available.empty:
+            break
+        available["match_gap"] = (
+            available["log_avg_size_window"] - treated_row["log_avg_size_window"]
+        ).abs()
+        available = available.sort_values(["match_gap", "k"], ascending=[True, True])
+        chosen = available.iloc[0]
+        pair_id += 1
+        assignments.append(
+            {
+                "treated_k": treated_k,
+                "control_k": str(chosen["k"]),
+                "matched_pair_id": pair_id,
+            }
+        )
+        used_controls.add(str(chosen["k"]))
+    if pair_id == 0 and int(n_shifted) > 0:
+        raise ValueError(
+            "Matched-school sampling found no treat-control pairs. "
+            "Check metric thresholds and school-size requirements."
+        )
+    if pair_id < int(n_shifted):
+        print(
+            f"[warn] Requested {int(n_shifted)} shifted schools, "
+            f"but only matched {pair_id} treat-control pair(s)."
+        )
+    for assignment in assignments:
+        treated_k = str(assignment["treated_k"])
+        control_k = str(assignment["control_k"])
+        matched_pair_id = int(assignment["matched_pair_id"])
+        summary.loc[treated_k, "selected_for_instrument"] = 1
+        summary.loc[treated_k, "sample_role"] = "treated"
+        summary.loc[treated_k, "matched_school_k"] = control_k
+        summary.loc[treated_k, "matched_school_name"] = name_map.get(control_k, "")
+        summary.loc[treated_k, "matched_pair_id"] = matched_pair_id
+        summary.loc[control_k, "selected_for_instrument"] = 1
+        summary.loc[control_k, "sample_role"] = "control"
+        summary.loc[control_k, "matched_school_k"] = treated_k
+        summary.loc[control_k, "matched_school_name"] = name_map.get(treated_k, "")
+        summary.loc[control_k, "matched_pair_id"] = matched_pair_id
+    out = summary.reset_index(drop=True)
+    sort_cols = ["selected_for_instrument", "sample_role", "treated_rank", "k"]
+    ascending = [False, True, True, True]
+    out = out.sort_values(sort_cols, ascending=ascending, na_position="last").reset_index(drop=True)
+    return out
+
+
+def _register_school_metric_views(
+    con: ddb.DuckDBPyConnection,
+    *,
+    metric_panel: pd.DataFrame,
+    sample_summary: pd.DataFrame,
+) -> tuple[str, str]:
+    panel = metric_panel.copy()
+    if panel.empty:
+        panel = _empty_school_metric_panel()
+    if sample_summary.empty:
+        sample_summary = _empty_school_shift_sample()
+    sample_cols = ["k", "school_name", "selected_for_instrument", "sample_role", "matched_school_k", "matched_pair_id"]
+    panel = panel.merge(sample_summary[sample_cols], on="k", how="left")
+    con.register("school_shift_metric_panel_df", panel)
+    con.sql(
+        """
+        CREATE OR REPLACE TEMP VIEW school_shift_metric_panel AS
+        SELECT * FROM school_shift_metric_panel_df
+        """
+    )
+    con.register("school_shift_sample_df", sample_summary)
+    con.sql(
+        """
+        CREATE OR REPLACE TEMP VIEW school_shift_sample AS
+        SELECT * FROM school_shift_sample_df
+        """
+    )
+    return "school_shift_metric_panel", "school_shift_sample"
+
+
+def _matched_school_sample_preview_table(
+    sample_summary: pd.DataFrame,
+    *,
+    metric: str,
+    window_start: int,
+    window_end: int,
+) -> pd.DataFrame:
+    if sample_summary.empty:
+        return pd.DataFrame()
+    years = list(range(int(window_start), int(window_end) + 1))
+    preview = sample_summary.loc[
+        sample_summary["selected_for_instrument"] == 1
+    ].copy()
+    if preview.empty:
+        return pd.DataFrame()
+    role_order = pd.CategoricalDtype(["treated", "control"], ordered=True)
+    preview["sample_role"] = preview["sample_role"].astype(role_order)
+    preview["matched_pair_id_sort"] = pd.to_numeric(
+        preview["matched_pair_id"], errors="coerce"
+    )
+    preview = preview.sort_values(
+        ["matched_pair_id_sort", "sample_role", "school_name", "k"],
+        na_position="last",
+    )
+    cols = [
+        "matched_pair_id",
+        "sample_role",
+        "school_name",
+        "k",
+        "matched_school_name",
+        "matched_school_k",
+    ]
+    rename_map = {
+        "matched_pair_id": "pair_id",
+        "sample_role": "role",
+        "school_name": "school",
+        "k": "unitid",
+        "matched_school_name": "matched_school",
+        "matched_school_k": "matched_unitid",
+    }
+    for year in years:
+        share_col = f"metric_share_{year}"
+        size_col = f"school_size_{year}"
+        if share_col not in preview.columns:
+            preview[share_col] = pd.NA
+        if size_col not in preview.columns:
+            preview[size_col] = pd.NA
+        cols.append(share_col)
+        cols.append(size_col)
+        rename_map[share_col] = f"{metric}_share_{year}"
+        rename_map[size_col] = size_col
+    preview = preview[cols].rename(columns=rename_map).reset_index(drop=True)
+    return preview
+
+
+def _confirm_matched_school_sample(
+    sample_summary: pd.DataFrame,
+    *,
+    metric: str,
+    window_start: int,
+    window_end: int,
+) -> None:
+    preview = _matched_school_sample_preview_table(
+        sample_summary,
+        metric=metric,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    print(
+        "\n[confirm] Matched-school sample preview "
+        f"(metric={metric}; window={int(window_start)}-{int(window_end)}):"
+    )
+    if preview.empty:
+        print("[confirm] No selected treated/control schools to review.")
+        raise SystemExit(1)
+    print(preview.to_string(index=False))
+    try:
+        response = input("Continue with this matched-school sample? [y/N]: ")
+    except EOFError:
+        print("\n[confirm] No confirmation received. Exiting.")
+        raise SystemExit(1) from None
+    if response.strip().lower() not in {"y", "yes"}:
+        print("[confirm] User declined matched-school sample. Exiting.")
+        raise SystemExit(1)
+
+
+def _create_sampled_school_growth_view(con: ddb.DuckDBPyConnection) -> str:
+    view_name = "ipeds_unit_growth"
+    con.sql(
+        f"""
+        CREATE OR REPLACE TEMP VIEW {view_name} AS
+        WITH selected AS (
+            SELECT
+                m.k,
+                CAST(m.t AS INTEGER) AS t,
+                CAST(COALESCE(m.metric_level, 0) AS DOUBLE) AS metric_level
+            FROM school_shift_metric_panel AS m
+            JOIN school_shift_sample AS s
+              ON m.k = s.k
+            WHERE COALESCE(s.selected_for_instrument, 0) = 1
+              AND m.t IS NOT NULL
+        ),
+        bounds AS (
+            SELECT
+                k,
+                MIN(t) AS min_t,
+                MAX(t) AS max_t
+            FROM selected
+            GROUP BY k
+        ),
+        expanded AS (
+            SELECT
+                b.k,
+                gs.year AS t
+            FROM bounds AS b,
+            LATERAL generate_series(b.min_t, b.max_t) AS gs(year)
+        ),
+        filled AS (
+            SELECT
+                e.k,
+                e.t,
+                COALESCE(s.metric_level, 0) AS metric_level
+            FROM expanded AS e
+            LEFT JOIN selected AS s
+              ON e.k = s.k
+             AND e.t = s.t
+        )
+        SELECT
+            k,
+            t,
+            metric_level AS g_kt,
+            metric_level AS g_kt_all,
+            metric_level AS g_kt_intl
+        FROM filled
+        ORDER BY k, t
+        """
+    )
+    return view_name
+
+
+def _create_growth_view_for_pipeline(
+    con: ddb.DuckDBPyConnection,
+    *,
+    school_sample_mode: str,
+    school_shift_metric: str | None,
+    include_bachelors: bool,
+    use_changes: bool,
+    use_log_y: bool,
+    opt_shifts: bool,
+    opt_shifts_degree_scope: str,
+    opt_shifts_normalization: str,
+    opt_shifts_normalize_by_graduates: bool,
+    exclude_unitids: list[str] | None = None,
+    school_sample_n_shifted: int = 25,
+    school_sample_window_start: int = 2014,
+    school_sample_window_end: int = 2017,
+    school_sample_control_positive_cap: float = 0.02,
+    school_sample_min_size: int = 100,
+    opt_ihmp_ipeds_share_intl_threshold: float = 0.30,
+    opt_ihmp_foia_opt_share_threshold: float = 0.50,
+    opt_ihmp_min_program_f1_count: int = 10,
+    opt_share_min_school_f1_count: int = 50,
+    opt_share_max_yoy_drop: float = 0.50,
+    restrict_treated_to_no_large_enrollment_jump: bool = False,
+    school_sample_max_yoy_size_jump: float = 0.50,
+    confirm_matched_school_sample: bool = False,
+) -> tuple[str, str | None, str | None]:
+    school_sample_mode = _normalize_school_sample_mode(school_sample_mode)
+    if school_sample_mode == "all":
+        if opt_shifts:
+            growth_view = _create_opt_shift_growth_view(
+                con,
+                use_changes=use_changes,
+                demean_by_school=use_log_y,
+                degree_scope=opt_shifts_degree_scope,
+                normalization=opt_shifts_normalization,
+                normalize_by_graduates=opt_shifts_normalize_by_graduates,
+                exclude_unitids=exclude_unitids,
+            )
+        else:
+            growth_view = _create_ipeds_growth_view(
+                con,
+                use_changes=use_changes,
+                demean_by_school=use_log_y,
+                exclude_unitids=exclude_unitids,
+            )
+        return growth_view, None, None
+
+    metric = _normalize_school_shift_metric(
+        school_shift_metric if school_shift_metric is not None else ("opt_share" if opt_shifts else "ihmp_share")
+    )
+    degree_scope = _matched_school_metric_degree_scope(include_bachelors=include_bachelors)
+    metric_panel = _build_school_metric_panel(
+        con,
+        metric=metric,
+        degree_scope=degree_scope,
+        exclude_unitids=exclude_unitids,
+        opt_ihmp_ipeds_share_intl_threshold=opt_ihmp_ipeds_share_intl_threshold,
+        opt_ihmp_foia_opt_share_threshold=opt_ihmp_foia_opt_share_threshold,
+        opt_ihmp_min_program_f1_count=opt_ihmp_min_program_f1_count,
+    )
+    school_names = _school_name_lookup(con)
+    sample_summary = _build_school_shift_sample(
+        metric_panel,
+        metric=metric,
+        school_name_lookup=school_names,
+        n_shifted=school_sample_n_shifted,
+        window_start=school_sample_window_start,
+        window_end=school_sample_window_end,
+        control_positive_cap=school_sample_control_positive_cap,
+        min_school_size=school_sample_min_size,
+        opt_share_min_school_f1_count=opt_share_min_school_f1_count,
+        opt_share_max_yoy_drop=opt_share_max_yoy_drop,
+        restrict_treated_to_no_large_enrollment_jump=restrict_treated_to_no_large_enrollment_jump,
+        max_yoy_size_jump=school_sample_max_yoy_size_jump,
+    )
+    _register_school_metric_views(
+        con,
+        metric_panel=metric_panel,
+        sample_summary=sample_summary,
+    )
+    if use_changes:
+        print(
+            "[info] school_sample_mode=matched_shift_sample: school selection uses annual "
+            "share changes, but the instrument is built from school-level levels."
+        )
+    print(
+        "[info] matched-school sampling: "
+        f"metric={metric}, "
+        f"selected_schools={int(sample_summary.get('selected_for_instrument', pd.Series(dtype='int64')).sum())}"
+    )
+    if confirm_matched_school_sample:
+        _confirm_matched_school_sample(
+            sample_summary,
+            metric=metric,
+            window_start=school_sample_window_start,
+            window_end=school_sample_window_end,
+        )
+    growth_view = _create_sampled_school_growth_view(con)
+    return growth_view, "school_shift_metric_panel", "school_shift_sample"
 
 
 def _create_ipeds_growth_view(
@@ -867,7 +1896,7 @@ def _create_transition_share_view(
             FROM revelio_transitions AS t
             JOIN matched_rcids mr ON t.rcid = mr.rcid
             JOIN revelio_inst_cw AS cw
-              ON LOWER(TRIM(CAST(t.university_raw AS VARCHAR))) = cw.university_raw_norm
+              ON {sql_normalize_school_key('t.university_raw')} = cw.university_raw_norm
             WHERE t.n_transitions IS NOT NULL
               AND t.total_new_hires IS NOT NULL
               AND cw.unitid IS NOT NULL
@@ -884,7 +1913,7 @@ def _create_transition_share_view(
             FROM revelio_transitions AS t
             JOIN matched_rcids mr ON t.rcid = mr.rcid
             JOIN revelio_inst_cw AS cw
-              ON LOWER(TRIM(CAST(t.university_raw AS VARCHAR))) = cw.university_raw_norm
+              ON {sql_normalize_school_key('t.university_raw')} = cw.university_raw_norm
             WHERE t.n_transitions IS NOT NULL
               AND cw.unitid IS NOT NULL
               AND t.year IS NOT NULL
@@ -1771,6 +2800,8 @@ def run_diagnostics(
     include_non_masters: bool = False,
     include_bachelors: bool = False,
     opt_shifts: bool = False,
+    school_sample_mode: str = "all",
+    school_shift_metric: str | None = None,
     opt_shifts_degree_scope: str = "bachelors_masters",
     opt_shifts_normalization: str | None = None,
     opt_shifts_normalize_by_graduates: bool = True,
@@ -1784,9 +2815,16 @@ def run_diagnostics(
             "ipeds_graduates" if opt_shifts_normalize_by_graduates else "none"
         )
     opt_shifts_normalization = _normalize_opt_shift_normalization(opt_shifts_normalization)
+    school_sample_mode = _normalize_school_sample_mode(school_sample_mode)
+    active_metric = _resolve_active_shift_metric(
+        school_sample_mode=school_sample_mode,
+        school_shift_metric=school_shift_metric,
+        opt_shifts=opt_shifts,
+    )
     print(
         "[diagnostics] shift_source="
-        f"{'foia_opt' if opt_shifts else 'ipeds'}; "
+        f"{'matched_sample' if school_sample_mode == 'matched_shift_sample' else ('foia_opt' if opt_shifts else 'ipeds')}; "
+        f"active_metric={active_metric}; "
         f"opt_shifts_degree_scope={opt_shifts_degree_scope}; "
         f"opt_shifts_normalization={opt_shifts_normalization}; "
         f"include_bachelors={include_bachelors}; "
@@ -1798,7 +2836,18 @@ def run_diagnostics(
     print(f"---Number of unique universities: {con.sql('SELECT COUNT(DISTINCT k) FROM ipeds_unit_growth').fetchone()[0]}")
     print(f"---Year range: {con.sql('SELECT MIN(t), MAX(t) FROM ipeds_unit_growth').fetchone()}")
     print(f"---Average shifts (g_kt, g_kt_all, g_kt_intl) across all k in 2015: {con.sql('SELECT AVG(g_kt), AVG(g_kt_all), AVG(g_kt_intl) FROM ipeds_unit_growth WHERE t = 2015').fetchone()}")
-    if opt_shifts:
+    if school_sample_mode == "matched_shift_sample":
+        n_treated = con.sql(
+            "SELECT COUNT(*) FROM school_shift_sample WHERE sample_role = 'treated'"
+        ).fetchone()[0]
+        n_control = con.sql(
+            "SELECT COUNT(*) FROM school_shift_sample WHERE sample_role = 'control'"
+        ).fetchone()[0]
+        print(
+            "---Selected treated/control schools: "
+            f"{n_treated} treated, {n_control} control"
+        )
+    if opt_shifts or _school_metric_is_opt_family(active_metric):
         print(
             "---Share of school-years where g_kt = g_kt_all = g_kt_intl: "
             f"{con.sql('SELECT AVG(CASE WHEN g_kt = g_kt_all AND g_kt = g_kt_intl THEN 1.0 ELSE 0.0 END) FROM ipeds_unit_growth').fetchone()[0]}"
@@ -1887,12 +2936,28 @@ def build_pipeline(
     include_non_masters: bool = False,
     include_bachelors: bool = False,
     opt_shifts: bool = False,
+    school_sample_mode: str = "all",
+    school_shift_metric: str | None = None,
+    school_sample_n_shifted: int = 25,
+    school_sample_window_start: int = 2014,
+    school_sample_window_end: int = 2017,
+    school_sample_control_positive_cap: float = 0.02,
+    school_sample_min_size: int = 100,
+    opt_ihmp_ipeds_share_intl_threshold: float = 0.30,
+    opt_ihmp_foia_opt_share_threshold: float = 0.50,
+    opt_ihmp_min_program_f1_count: int = 10,
+    opt_share_min_school_f1_count: int = 50,
+    opt_share_max_yoy_drop: float = 0.50,
+    restrict_treated_to_no_large_enrollment_jump: bool = False,
+    school_sample_max_yoy_size_jump: float = 0.50,
+    confirm_matched_school_sample: bool = False,
     opt_shifts_degree_scope: str = "bachelors_masters",
     opt_shifts_normalization: str | None = None,
     opt_shifts_normalize_by_graduates: bool = True,
     exclude_unitids: list[str] | None = None,
 ) -> None:
     con = ddb.connect()
+    school_sample_mode = _normalize_school_sample_mode(school_sample_mode)
     opt_shifts_degree_scope = _normalize_degree_scope(opt_shifts_degree_scope)
     if opt_shifts_normalization is None:
         opt_shifts_normalization = (
@@ -1904,6 +2969,8 @@ def build_pipeline(
         paths,
         include_bachelors=include_bachelors,
         opt_shifts=opt_shifts,
+        school_sample_mode=school_sample_mode,
+        school_shift_metric=school_shift_metric,
         opt_shift_degree_scope=opt_shifts_degree_scope,
         opt_shifts_normalization=opt_shifts_normalization,
         opt_shifts_normalize_by_graduates=opt_shifts_normalize_by_graduates,
@@ -1914,23 +2981,32 @@ def build_pipeline(
     if include_non_masters and include_bachelors:
         print("[info] include_non_masters=true takes precedence; include_bachelors flag is ignored.")
 
-    if opt_shifts:
-        growth_view = _create_opt_shift_growth_view(
-            con,
-            use_changes=use_changes,
-            demean_by_school=use_log_y,
-            degree_scope=opt_shifts_degree_scope,
-            normalization=opt_shifts_normalization,
-            normalize_by_graduates=opt_shifts_normalize_by_graduates,
-            exclude_unitids=exclude_unitids,
-        )
-    else:
-        growth_view = _create_ipeds_growth_view(
-            con,
-            use_changes=use_changes,
-            demean_by_school=use_log_y,
-            exclude_unitids=exclude_unitids,
-        )
+    growth_view, school_metric_panel_view, school_shift_sample_view = _create_growth_view_for_pipeline(
+        con,
+        school_sample_mode=school_sample_mode,
+        school_shift_metric=school_shift_metric,
+        include_bachelors=include_bachelors,
+        use_changes=use_changes,
+        use_log_y=use_log_y,
+        opt_shifts=opt_shifts,
+        opt_shifts_degree_scope=opt_shifts_degree_scope,
+        opt_shifts_normalization=opt_shifts_normalization,
+        opt_shifts_normalize_by_graduates=opt_shifts_normalize_by_graduates,
+        exclude_unitids=exclude_unitids,
+        school_sample_n_shifted=school_sample_n_shifted,
+        school_sample_window_start=school_sample_window_start,
+        school_sample_window_end=school_sample_window_end,
+        school_sample_control_positive_cap=school_sample_control_positive_cap,
+        school_sample_min_size=school_sample_min_size,
+        opt_ihmp_ipeds_share_intl_threshold=opt_ihmp_ipeds_share_intl_threshold,
+        opt_ihmp_foia_opt_share_threshold=opt_ihmp_foia_opt_share_threshold,
+        opt_ihmp_min_program_f1_count=opt_ihmp_min_program_f1_count,
+        opt_share_min_school_f1_count=opt_share_min_school_f1_count,
+        opt_share_max_yoy_drop=opt_share_max_yoy_drop,
+        restrict_treated_to_no_large_enrollment_jump=restrict_treated_to_no_large_enrollment_jump,
+        school_sample_max_yoy_size_jump=school_sample_max_yoy_size_jump,
+        confirm_matched_school_sample=confirm_matched_school_sample,
+    )
     shares_view = _create_transition_share_view(con, share_base_year, exclude_unitids=exclude_unitids)
     _create_instrument_views(con, shares_view, growth_view)
     if outcome_lag_end < outcome_lag_start:
@@ -1958,6 +3034,10 @@ def build_pipeline(
     _write_view(con, "analysis_panel", paths.analysis_panel_out)
     if include_bachelors and paths.analysis_panel_out_ma_ba is not None:
         _write_view(con, "analysis_panel", paths.analysis_panel_out_ma_ba)
+    if school_metric_panel_view is not None and paths.school_shift_metric_panel_out is not None:
+        _write_view(con, school_metric_panel_view, paths.school_shift_metric_panel_out)
+    if school_shift_sample_view is not None and paths.school_shift_sample_out is not None:
+        _write_view(con, school_shift_sample_view, paths.school_shift_sample_out)
     
     if verbose:
         run_diagnostics(
@@ -1966,6 +3046,8 @@ def build_pipeline(
             include_non_masters=include_non_masters,
             include_bachelors=include_bachelors,
             opt_shifts=opt_shifts,
+            school_sample_mode=school_sample_mode,
+            school_shift_metric=school_shift_metric,
             opt_shifts_degree_scope=opt_shifts_degree_scope,
             opt_shifts_normalization=opt_shifts_normalization,
             opt_shifts_normalize_by_graduates=opt_shifts_normalize_by_graduates,
@@ -2073,6 +3155,15 @@ def _parse_args(args: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default="",
         help="Comma-separated UNITIDs to exclude from both growth and transition shares.",
     )
+    parser.add_argument(
+        "--confirm-matched-school-sample",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "When school_sample_mode=matched_shift_sample, print the selected treated/control "
+            "schools and wait for confirmation before continuing."
+        ),
+    )
     if args is None:
         # In IPython/Jupyter, sys.argv often contains kernel args like "-f ...".
         # Ignore unknown args only in that interactive context so main() is usable.
@@ -2122,6 +3213,52 @@ def main(cli_args: Optional[Iterable[str]] = None) -> None:
     use_changes = args.use_changes if args.use_changes is not None else pipeline_cfg.get("use_changes", False)
     use_log_y = args.use_log_y if args.use_log_y is not None else pipeline_cfg.get("use_log_y", pipeline_cfg.get("use_log_rate", False))
     opt_shifts = args.opt_shifts if args.opt_shifts is not None else pipeline_cfg.get("opt_shifts", False)
+    school_sample_mode = _normalize_school_sample_mode(
+        pipeline_cfg.get("school_sample_mode", "all")
+    )
+    school_shift_metric_raw = pipeline_cfg.get("school_shift_metric")
+    if school_shift_metric_raw is None and school_sample_mode == "matched_shift_sample":
+        school_shift_metric_raw = "opt_share" if opt_shifts else "ihmp_share"
+    school_shift_metric = (
+        _normalize_school_shift_metric(school_shift_metric_raw)
+        if school_shift_metric_raw is not None
+        else None
+    )
+    school_sample_n_shifted = int(pipeline_cfg.get("school_sample_n_shifted", 25))
+    school_sample_window_start = int(pipeline_cfg.get("school_sample_window_start", 2014))
+    school_sample_window_end = int(pipeline_cfg.get("school_sample_window_end", 2017))
+    school_sample_control_positive_cap = float(
+        pipeline_cfg.get("school_sample_control_positive_cap", 0.02)
+    )
+    school_sample_min_size = int(
+        pipeline_cfg.get("school_sample_min_size", 100)
+    )
+    opt_ihmp_ipeds_share_intl_threshold = float(
+        pipeline_cfg.get("opt_ihmp_ipeds_share_intl_threshold", 0.30)
+    )
+    opt_ihmp_foia_opt_share_threshold = float(
+        pipeline_cfg.get("opt_ihmp_foia_opt_share_threshold", 0.50)
+    )
+    opt_ihmp_min_program_f1_count = int(
+        pipeline_cfg.get("opt_ihmp_min_program_f1_count", 10)
+    )
+    opt_share_min_school_f1_count = int(
+        pipeline_cfg.get("opt_share_min_school_f1_count", 50)
+    )
+    opt_share_max_yoy_drop = float(
+        pipeline_cfg.get("opt_share_max_yoy_drop", 0.50)
+    )
+    restrict_treated_to_no_large_enrollment_jump = bool(
+        pipeline_cfg.get("restrict_treated_to_no_large_enrollment_jump", False)
+    )
+    school_sample_max_yoy_size_jump = float(
+        pipeline_cfg.get("school_sample_max_yoy_size_jump", 0.50)
+    )
+    confirm_matched_school_sample = (
+        args.confirm_matched_school_sample
+        if args.confirm_matched_school_sample is not None
+        else pipeline_cfg.get("confirm_matched_school_sample", False)
+    )
     opt_shifts_degree_scope = _normalize_degree_scope(
         args.opt_shifts_degree_scope
         if args.opt_shifts_degree_scope is not None
@@ -2158,14 +3295,28 @@ def main(cli_args: Optional[Iterable[str]] = None) -> None:
         outcome_lag_end=outcome_lag_end,
         share_base_year=share_base_year,
         save_outputs=save_outputs,
-        verbose = True,
-        #verbose=pipeline_cfg.get("verbose", True),
+        verbose=pipeline_cfg.get("verbose", True),
         plot_diagnostics=pipeline_cfg.get("plot_diagnostics", True),
         use_changes=use_changes,
         use_log_y=use_log_y,
         include_non_masters=include_non_masters,
         include_bachelors=include_bachelors,
         opt_shifts=opt_shifts,
+        school_sample_mode=school_sample_mode,
+        school_shift_metric=school_shift_metric,
+        school_sample_n_shifted=school_sample_n_shifted,
+        school_sample_window_start=school_sample_window_start,
+        school_sample_window_end=school_sample_window_end,
+        school_sample_control_positive_cap=school_sample_control_positive_cap,
+        school_sample_min_size=school_sample_min_size,
+        opt_ihmp_ipeds_share_intl_threshold=opt_ihmp_ipeds_share_intl_threshold,
+        opt_ihmp_foia_opt_share_threshold=opt_ihmp_foia_opt_share_threshold,
+        opt_ihmp_min_program_f1_count=opt_ihmp_min_program_f1_count,
+        opt_share_min_school_f1_count=opt_share_min_school_f1_count,
+        opt_share_max_yoy_drop=opt_share_max_yoy_drop,
+        restrict_treated_to_no_large_enrollment_jump=restrict_treated_to_no_large_enrollment_jump,
+        school_sample_max_yoy_size_jump=school_sample_max_yoy_size_jump,
+        confirm_matched_school_sample=confirm_matched_school_sample,
         opt_shifts_degree_scope=opt_shifts_degree_scope,
         opt_shifts_normalization=opt_shifts_normalization,
         opt_shifts_normalize_by_graduates=opt_shifts_normalize_by_graduates,

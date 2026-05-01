@@ -1,16 +1,8 @@
 """Build firm-level pre-period features for OPT exposure modeling.
 
-This module stays within the ``company_shift_share`` workflow. It combines
-existing company-shift-share outputs with direct WRDS Revelio aggregates to
-produce a firm-level feature frame over a configurable pre-period window.
-
-Primary entry points:
-    - ``load_or_build_company_features(...)``
-    - ``build_company_features(...)``
-
-The output is a firm-level frame keyed by ``c`` (RCID / preferred RCID) with
-pre-period level and growth features, plus universe flags used by the exposure
-model in ``exposure_event_study.py``.
+This module now builds the exposure-model feature frame directly from source
+FOIA and WRDS inputs. It does not depend on downstream outputs from
+build_company_shift_share.py.
 """
 
 from __future__ import annotations
@@ -18,7 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Iterable, Optional
@@ -28,18 +22,53 @@ import numpy as np
 import pandas as pd
 
 try:
-    import wrds
-except ImportError:  # pragma: no cover - WRDS is available in the real runtime.
-    wrds = None  # type: ignore[assignment]
-
-try:
-    from company_shift_share.config_loader import DEFAULT_CONFIG_PATH, get_cfg_section, load_config
+    from company_shift_share.config_loader import (
+        DEFAULT_CONFIG_PATH,
+        apply_testing_output_suffix,
+        get_cfg_section,
+        load_config,
+    )
+    from company_shift_share.institution_mapping import (
+        load_revelio_school_map,
+        sql_normalize_school_key,
+    )
+    from company_shift_share.source_exposure_data import (
+        ANALYSIS_UNIVERSE_METHOD,
+        DEGREE_GROUPS,
+        NEW_HIRE_ORIGIN_METHOD,
+        OPT_COUNT_METHOD,
+        SCHOOL_BENCHMARK_METHOD,
+        load_or_build_source_opt_counts,
+        load_or_build_source_school_opt_benchmark,
+        load_or_build_source_firm_universe,
+        load_or_build_wrds_company_year_workforce_cache,
+        load_or_build_wrds_school_flows_cache,
+        resolve_source_exposure_paths,
+    )
 except ModuleNotFoundError:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
     from company_shift_share.config_loader import (  # type: ignore[no-redef]
         DEFAULT_CONFIG_PATH,
+        apply_testing_output_suffix,
         get_cfg_section,
         load_config,
+    )
+    from company_shift_share.institution_mapping import (  # type: ignore[no-redef]
+        load_revelio_school_map,
+        sql_normalize_school_key,
+    )
+    from company_shift_share.source_exposure_data import (  # type: ignore[no-redef]
+        ANALYSIS_UNIVERSE_METHOD,
+        DEGREE_GROUPS,
+        NEW_HIRE_ORIGIN_METHOD,
+        OPT_COUNT_METHOD,
+        SCHOOL_BENCHMARK_METHOD,
+        load_or_build_source_opt_counts,
+        load_or_build_source_school_opt_benchmark,
+        load_or_build_source_firm_universe,
+        load_or_build_wrds_company_year_workforce_cache,
+        load_or_build_wrds_school_flows_cache,
+        resolve_source_exposure_paths,
     )
 
 
@@ -51,12 +80,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 @dataclass(frozen=True)
 class FeaturePaths:
-    analysis_panel: Path
-    instrument_components: Path
-    transitions: Path
-    headcounts: Path
     company_mapping: Path
-    preferred_rcids: Path
     revelio_inst_crosswalk: Path
     company_features_out: Path
     outside_negative_sample_out: Path
@@ -69,38 +93,40 @@ def _escape(path: Path) -> str:
     return str(path).replace("'", "''")
 
 
-def _resolve_path(paths_cfg: dict, key: str) -> Path:
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _validate_sql_identifier(name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise ValueError(f"Unsafe SQL identifier: {name}")
+    return name
+
+
+def _resolve_path(paths_cfg: dict, key: str, *, allow_missing: bool = False) -> Path:
     value = paths_cfg.get(key)
     if value is None or str(value).strip().lower() in {"", "none", "null"}:
         raise ValueError(f"Config paths.{key} must be set.")
-    return Path(str(value))
-
-
-def _resolve_optional_path(paths_cfg: dict, key: str) -> Optional[Path]:
-    value = paths_cfg.get(key)
-    if value is None or str(value).strip().lower() in {"", "none", "null"}:
-        return None
-    return Path(str(value))
+    root = str(Path(__file__).resolve().parents[2])
+    path = Path(str(value).replace("{root}", root))
+    if not allow_missing and not path.exists():
+        raise FileNotFoundError(f"Required path does not exist: {path}")
+    return path
 
 
 def _resolve_feature_paths(cfg: dict) -> FeaturePaths:
     paths_cfg = get_cfg_section(cfg, "paths")
-    company_features_out = _resolve_optional_path(paths_cfg, "company_features_out")
-    outside_negative_sample_out = _resolve_optional_path(paths_cfg, "outside_negative_sample_out")
-    if company_features_out is None:
-        raise ValueError("Config paths.company_features_out must be set.")
-    if outside_negative_sample_out is None:
-        raise ValueError("Config paths.outside_negative_sample_out must be set.")
     return FeaturePaths(
-        analysis_panel=_resolve_path(paths_cfg, "analysis_panel"),
-        instrument_components=_resolve_path(paths_cfg, "instrument_components"),
-        transitions=_resolve_path(paths_cfg, "transitions_out"),
-        headcounts=_resolve_path(paths_cfg, "headcounts_out"),
         company_mapping=_resolve_path(paths_cfg, "revelio_company_mapping"),
-        preferred_rcids=_resolve_path(paths_cfg, "preferred_rcids"),
         revelio_inst_crosswalk=_resolve_path(paths_cfg, "revelio_ipeds_foia_inst_crosswalk"),
-        company_features_out=company_features_out,
-        outside_negative_sample_out=outside_negative_sample_out,
+        company_features_out=apply_testing_output_suffix(
+            _resolve_path(paths_cfg, "company_features_out", allow_missing=True),
+            cfg,
+        ),
+        outside_negative_sample_out=apply_testing_output_suffix(
+            _resolve_path(paths_cfg, "outside_negative_sample_out", allow_missing=True),
+            cfg,
+        ),
     )
 
 
@@ -111,13 +137,36 @@ def validate_feature_window(feature_year_min: int, feature_year_max: int) -> Non
             f"{feature_year_min=} {feature_year_max=}."
         )
     if int(feature_year_max) >= 2016:
-        raise ValueError(
-            f"feature_year_max must be < 2016, got {feature_year_max}."
-        )
+        raise ValueError(f"feature_year_max must be < 2016, got {feature_year_max}.")
 
 
 def _metadata_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + _FEATURE_META_SUFFIX)
+
+
+def _legacy_cache_compat_mode() -> bool:
+    return os.getenv("EXPOSURE_EVENT_STUDY_LEGACY_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _legacy_cache_compat_ignore_keys() -> set[str]:
+    env = os.getenv("EXPOSURE_EVENT_STUDY_LEGACY_CACHE_IGNORE_KEYS", "").strip()
+    keys = {k.strip() for k in env.split(",") if k.strip()}
+    if not keys:
+        keys = {"wrds_workforce_include_education_features"}
+    return keys
+
+
+def _metadata_compatible(meta: dict, expected: dict) -> bool:
+    if not _legacy_cache_compat_mode():
+        return all(meta.get(k) == v for k, v in expected.items())
+    for key, expected_value in expected.items():
+        if key not in meta:
+            continue
+        if key in _legacy_cache_compat_ignore_keys():
+            continue
+        if meta.get(key) != expected_value:
+            return False
+    return True
 
 
 def _load_metadata(path: Path) -> dict:
@@ -133,29 +182,12 @@ def _write_metadata(path: Path, metadata: dict) -> None:
     meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
 
 
-def _require_paths(paths: FeaturePaths) -> None:
-    missing = [str(path) for path in paths.__dict__.values() if not Path(path).exists()]
-    # Output paths may not exist yet; only enforce inputs.
-    input_paths = [
-        paths.analysis_panel,
-        paths.instrument_components,
-        paths.transitions,
-        paths.headcounts,
-        paths.company_mapping,
-        paths.preferred_rcids,
-        paths.revelio_inst_crosswalk,
-    ]
-    missing = [str(path) for path in input_paths if not path.exists()]
-    if missing:
-        raise FileNotFoundError("Missing required inputs:\n" + "\n".join(missing))
-
-
 def classify_opt_intensive_schools(
     components: pd.DataFrame,
     year_min: int,
     year_max: int,
 ) -> pd.DataFrame:
-    """Classify schools as OPT-intensive using only the configured feature window."""
+    """Legacy helper kept for testing: classify schools above-window median g_kt."""
     validate_feature_window(year_min, year_max)
     required = {"k", "t", "g_kt"}
     missing = sorted(required - set(components.columns))
@@ -174,16 +206,6 @@ def classify_opt_intensive_schools(
     return school_rate
 
 
-def _ols_slope(years: np.ndarray, values: np.ndarray) -> float:
-    years_f = years.astype(float)
-    values_f = values.astype(float)
-    x = years_f - years_f.mean()
-    denom = float(np.square(x).sum())
-    if denom <= 0:
-        return np.nan
-    return float((x * (values_f - values_f.mean())).sum() / denom)
-
-
 def summarize_pre_period_features(
     annual_df: pd.DataFrame,
     feature_cols: list[str],
@@ -194,48 +216,99 @@ def summarize_pre_period_features(
     year_col: str = "t",
     growth_min_obs: int = 3,
 ) -> pd.DataFrame:
-    """Collapse annual firm-year features into configurable pre-period level/growth features."""
+    """Collapse annual firm-year features into pre-period level/growth features in DuckDB."""
     validate_feature_window(year_min, year_max)
-    work = annual_df.copy()
-    if year_col not in work.columns or firm_col not in work.columns:
+    if firm_col not in annual_df.columns or year_col not in annual_df.columns:
         raise ValueError(f"annual_df must contain '{firm_col}' and '{year_col}'.")
-    work = work[work[year_col].between(year_min, year_max)].copy()
-    firms = pd.Index(sorted(pd.Series(work[firm_col].dropna().unique()).astype(int).tolist()), name=firm_col)
-    out = pd.DataFrame({firm_col: firms})
 
-    for col in feature_cols:
-        if col not in work.columns:
-            continue
-        sub = work[[firm_col, year_col, col]].copy()
-        level = (
-            sub.groupby(firm_col, as_index=False)[col]
-            .mean()
-            .rename(columns={col: f"{col}_pre_level"})
+    available_cols = [col for col in feature_cols if col in annual_df.columns]
+    con = ddb.connect()
+    try:
+        con.register("annual_df", annual_df)
+        firm_ident = _quote_ident(firm_col)
+        year_ident = _quote_ident(year_col)
+        numeric_selects = ", ".join(
+            f"TRY_CAST({_quote_ident(col)} AS DOUBLE) AS {_quote_ident(col)}"
+            for col in available_cols
         )
-        support = (
-            sub.groupby(firm_col, as_index=False)[col]
-            .count()
-            .rename(columns={col: f"{col}_pre_n_years"})
+        work_select = (
+            f"""
+            SELECT
+                CAST({firm_ident} AS BIGINT) AS c,
+                CAST({year_ident} AS DOUBLE) AS t
+                {', ' + numeric_selects if numeric_selects else ''}
+            FROM annual_df
+            WHERE {firm_ident} IS NOT NULL
+              AND {year_ident} IS NOT NULL
+              AND TRY_CAST({year_ident} AS INTEGER) BETWEEN {int(year_min)} AND {int(year_max)}
+            """
         )
+        con.sql(f"CREATE OR REPLACE TEMP VIEW annual_work AS {work_select}")
+        if not available_cols:
+            return con.sql("SELECT DISTINCT c FROM annual_work ORDER BY c").df()
 
-        valid = sub.dropna(subset=[col])
-        growth_records: list[dict[str, float]] = []
-        for firm_id, g in valid.groupby(firm_col):
-            if len(g) < int(growth_min_obs):
-                growth_records.append({firm_col: int(firm_id), f"{col}_pre_growth": np.nan})
-                continue
-            slope = _ols_slope(g[year_col].to_numpy(), g[col].to_numpy())
-            growth_records.append({firm_col: int(firm_id), f"{col}_pre_growth": slope})
-        growth = pd.DataFrame(growth_records) if growth_records else pd.DataFrame(columns=[firm_col, f"{col}_pre_growth"])
-
-        out = out.merge(level, on=firm_col, how="left")
-        out = out.merge(support, on=firm_col, how="left")
-        out = out.merge(growth, on=firm_col, how="left")
-        out[f"{col}_pre_n_years"] = out[f"{col}_pre_n_years"].fillna(0).astype(int)
-        out[f"{col}_pre_level_missing_ind"] = out[f"{col}_pre_level"].isna().astype("int8")
-        out[f"{col}_pre_growth_missing_ind"] = out[f"{col}_pre_growth"].isna().astype("int8")
-
-    return out
+        aggregate_exprs: list[str] = []
+        final_exprs: list[str] = ["firms.c"]
+        for col in available_cols:
+            ident = _quote_ident(col)
+            level_alias = f"{col}_pre_level"
+            n_alias = f"{col}_pre_n_years"
+            growth_alias = f"{col}_pre_growth"
+            level_missing_alias = f"{col}_pre_level_missing_ind"
+            growth_missing_alias = f"{col}_pre_growth_missing_ind"
+            count_expr = f"COUNT({ident})"
+            sum_t_expr = f"SUM(CASE WHEN {ident} IS NOT NULL THEN t END)"
+            sum_tt_expr = f"SUM(CASE WHEN {ident} IS NOT NULL THEN t * t END)"
+            sum_y_expr = f"SUM({ident})"
+            sum_ty_expr = f"SUM(CASE WHEN {ident} IS NOT NULL THEN t * {ident} END)"
+            denom_expr = f"(({count_expr}) * ({sum_tt_expr}) - POWER(({sum_t_expr}), 2))"
+            aggregate_exprs.extend(
+                [
+                    f"AVG({ident}) AS {_quote_ident(level_alias)}",
+                    f"{count_expr} AS {_quote_ident(n_alias)}",
+                    (
+                        f"CASE WHEN ({count_expr}) >= {int(growth_min_obs)} "
+                        f"AND ({denom_expr}) > 0 "
+                        f"THEN (({count_expr}) * ({sum_ty_expr}) - ({sum_t_expr}) * ({sum_y_expr})) "
+                        f"/ ({denom_expr}) ELSE NULL END AS {_quote_ident(growth_alias)}"
+                    ),
+                ]
+            )
+            final_exprs.extend(
+                [
+                    f'agg.{_quote_ident(level_alias)}',
+                    f'COALESCE(agg.{_quote_ident(n_alias)}, 0)::BIGINT AS {_quote_ident(n_alias)}',
+                    f'agg.{_quote_ident(growth_alias)}',
+                    (
+                        f"CASE WHEN agg.{_quote_ident(level_alias)} IS NULL THEN 1 ELSE 0 END::TINYINT "
+                        f"AS {_quote_ident(level_missing_alias)}"
+                    ),
+                    (
+                        f"CASE WHEN agg.{_quote_ident(growth_alias)} IS NULL THEN 1 ELSE 0 END::TINYINT "
+                        f"AS {_quote_ident(growth_missing_alias)}"
+                    ),
+                ]
+            )
+        sql = f"""
+        WITH firms AS (
+            SELECT DISTINCT c FROM annual_work
+        ),
+        agg AS (
+            SELECT
+                c,
+                {", ".join(aggregate_exprs)}
+            FROM annual_work
+            GROUP BY 1
+        )
+        SELECT
+            {", ".join(final_exprs)}
+        FROM firms
+        LEFT JOIN agg USING (c)
+        ORDER BY firms.c
+        """
+        return con.sql(sql).df()
+    finally:
+        con.close()
 
 
 def _naics_digits(series: pd.Series, n_digits: int) -> pd.Series:
@@ -259,30 +332,58 @@ def _size_bucket(n_users: pd.Series) -> pd.Series:
         values.between(250, 999),
         values >= 1000,
     ]
-    labels = [
-        "lt10",
-        "10_49",
-        "50_249",
-        "250_999",
-        "1000p",
-    ]
+    labels = ["lt10", "10_49", "50_249", "250_999", "1000p"]
     out = np.select(conditions, labels, default="unknown")
     return pd.Series(out, index=n_users.index, dtype="string")
 
 
-def _load_company_meta(path: Path) -> pd.DataFrame:
-    cols = [
-        "rcid",
-        "n_users",
-        "top_state",
-        "top_metro_area",
-        "hq_state",
-        "hq_region",
-        "naics_code",
-        "year_founded",
-    ]
-    meta = pd.read_parquet(path, columns=cols)
-    meta = meta.rename(columns={"rcid": "c"}).copy()
+def _load_company_meta_subset(
+    path: Path,
+    *,
+    selected_firms: Optional[pd.DataFrame] = None,
+    min_n_users: Optional[int] = None,
+    eligible_only: bool = False,
+) -> pd.DataFrame:
+    con = ddb.connect()
+    try:
+        if selected_firms is not None:
+            con.register("selected_firms_df", selected_firms[["c"]].drop_duplicates())
+            con.sql(
+                "CREATE OR REPLACE TEMP VIEW selected_firms AS "
+                "SELECT CAST(c AS BIGINT) AS c FROM selected_firms_df"
+            )
+            join_sql = "JOIN selected_firms sf ON CAST(cm.rcid AS BIGINT) = sf.c"
+        else:
+            join_sql = ""
+
+        filters = ["cm.rcid IS NOT NULL"]
+        if min_n_users is not None:
+            filters.append(f"COALESCE(cm.n_users, 0) >= {int(min_n_users)}")
+        if eligible_only:
+            filters.extend(
+                [
+                    "(cm.top_state IS NOT NULL OR cm.hq_state IS NOT NULL)",
+                    "cm.naics_code IS NOT NULL",
+                ]
+            )
+        sql = f"""
+        SELECT
+            CAST(cm.rcid AS BIGINT) AS c,
+            CAST(cm.n_users AS DOUBLE) AS n_users,
+            CAST(cm.top_state AS VARCHAR) AS top_state,
+            CAST(cm.top_metro_area AS VARCHAR) AS top_metro_area,
+            CAST(cm.hq_state AS VARCHAR) AS hq_state,
+            CAST(cm.hq_region AS VARCHAR) AS hq_region,
+            CAST(cm.naics_code AS VARCHAR) AS naics_code,
+            CAST(cm.year_founded AS DOUBLE) AS year_founded
+        FROM read_parquet('{_escape(path)}') cm
+        {join_sql}
+        WHERE {" AND ".join(filters)}
+        """
+        meta = con.sql(sql).df()
+    finally:
+        con.close()
+
     meta["c"] = pd.to_numeric(meta["c"], errors="coerce")
     meta = meta.dropna(subset=["c"]).copy()
     meta["c"] = meta["c"].astype(int)
@@ -313,8 +414,7 @@ def _sample_stage(
         n_target = int(group["n_target"].iloc[0])
         if n_target <= 0:
             continue
-        n_take = min(n_target, len(group))
-        sampled = group.sample(n=n_take, random_state=int(seed) + idx)
+        sampled = group.sample(n=min(n_target, len(group)), random_state=int(seed) + idx)
         parts.append(sampled)
     if not parts:
         return merged.iloc[0:0].copy()
@@ -330,9 +430,12 @@ def sample_outside_negative_firms(
     seed: int,
     min_n_users: int,
 ) -> pd.DataFrame:
-    """Sample outside-universe negative firms with deterministic fallback relaxation."""
-    analysis_ids = pd.Series(pd.to_numeric(analysis_firms, errors="coerce")).dropna().astype(int).unique()
-    preferred_ids = set(pd.Series(pd.to_numeric(preferred_rcids, errors="coerce")).dropna().astype(int).tolist())
+    analysis_ids = (
+        pd.Series(pd.to_numeric(analysis_firms, errors="coerce")).dropna().astype(int).unique()
+    )
+    preferred_ids = set(
+        pd.Series(pd.to_numeric(preferred_rcids, errors="coerce")).dropna().astype(int).tolist()
+    )
     analysis_meta = company_meta[company_meta["c"].isin(analysis_ids)].copy()
     eligible = company_meta[
         (~company_meta["c"].isin(preferred_ids))
@@ -363,8 +466,8 @@ def sample_outside_negative_firms(
     if not pick.empty:
         chosen_frames.append(pick)
     chosen_ids = set(pick["c"].tolist())
-
     remaining = eligible[~eligible["c"].isin(chosen_ids)].copy()
+
     if len(chosen_ids) < target_total and not remaining.empty:
         coarse_targets = (
             analysis_meta.groupby(["size_bucket", "company_state_feature"], dropna=False)
@@ -378,7 +481,9 @@ def sample_outside_negative_firms(
             if not pick.empty
             else pd.DataFrame(columns=["size_bucket", "company_state_feature", "n_selected"])
         )
-        coarse_targets = coarse_targets.merge(already, on=["size_bucket", "company_state_feature"], how="left")
+        coarse_targets = coarse_targets.merge(
+            already, on=["size_bucket", "company_state_feature"], how="left"
+        )
         coarse_targets["n_selected"] = coarse_targets["n_selected"].fillna(0)
         coarse_targets["n_target"] = (
             np.ceil(coarse_targets["n_analysis"] * float(ratio)) - coarse_targets["n_selected"]
@@ -426,611 +531,47 @@ def sample_outside_negative_firms(
 
     if len(chosen_ids) < target_total and not remaining.empty:
         need = target_total - len(chosen_ids)
-        pick4 = remaining.sample(n=min(need, len(remaining)), random_state=seed + 3_000)
-        chosen_frames.append(pick4)
+        chosen_frames.append(remaining.sample(n=min(need, len(remaining)), random_state=seed + 3_000))
 
-    if not chosen_frames:
-        return eligible.iloc[0:0].copy()
-    sampled = pd.concat(chosen_frames, ignore_index=True)
+    sampled = pd.concat(chosen_frames, ignore_index=True) if chosen_frames else eligible.iloc[0:0].copy()
     sampled = sampled.drop_duplicates(subset=["c"], keep="first").reset_index(drop=True)
     sampled["outside_negative_candidate"] = 1
     return sampled
 
 
-def _duckdb_selected_filter(con: ddb.DuckDBPyConnection, selected_firms: Optional[pd.DataFrame]) -> str:
-    if selected_firms is None:
-        return ""
-    con.register("selected_firms_df", selected_firms[["c"]].drop_duplicates())
-    con.sql("CREATE OR REPLACE TEMP VIEW selected_firms AS SELECT CAST(c AS BIGINT) AS c FROM selected_firms_df")
-    return "JOIN selected_firms sf ON base.c = sf.c"
-
-
-def _build_local_company_year_features(
+def _prepare_feature_firms(
     paths: FeaturePaths,
     *,
-    year_min: int,
-    year_max: int,
-    selected_firms: Optional[pd.DataFrame],
-) -> pd.DataFrame:
-    con = ddb.connect()
-    try:
-        con.sql(f"CREATE OR REPLACE TEMP VIEW analysis_panel AS SELECT * FROM read_parquet('{_escape(paths.analysis_panel)}')")
-        con.sql(f"CREATE OR REPLACE TEMP VIEW instrument_components AS SELECT * FROM read_parquet('{_escape(paths.instrument_components)}')")
-        con.sql(f"CREATE OR REPLACE TEMP VIEW transitions AS SELECT * FROM read_parquet('{_escape(paths.transitions)}')")
-        con.sql(f"CREATE OR REPLACE TEMP VIEW headcounts AS SELECT * FROM read_parquet('{_escape(paths.headcounts)}')")
-        con.sql(
-            f"""
-            CREATE OR REPLACE TEMP VIEW inst_map AS
-            WITH base AS (
-                SELECT
-                    LOWER(TRIM(CAST(university_raw AS VARCHAR))) AS university_raw_key,
-                    CAST(CAST(UNITID AS BIGINT) AS VARCHAR) AS k
-                FROM read_parquet('{_escape(paths.revelio_inst_crosswalk)}')
-                WHERE university_raw IS NOT NULL
-                  AND UNITID IS NOT NULL
-            )
-            SELECT university_raw_key, MIN(k) AS k
-            FROM base
-            GROUP BY 1
-            """
-        )
-
-        selected_join = _duckdb_selected_filter(con, selected_firms)
-
-        panel_sql = f"""
-        WITH base AS (
-            SELECT
-                CAST(c AS BIGINT) AS c,
-                CAST(t AS INTEGER) AS t,
-                CAST(masters_opt_hires_correction_aware AS DOUBLE) AS opt_hire_count_annual,
-                CASE
-                    WHEN y_new_hires_lag0 IS NULL OR y_new_hires_lag0 <= 0 THEN NULL
-                    ELSE CAST(masters_opt_hires_correction_aware AS DOUBLE) / CAST(y_new_hires_lag0 AS DOUBLE)
-                END AS opt_hire_rate_annual,
-                CAST(y_new_hires_lag0 AS DOUBLE) AS n_new_hires_panel_annual,
-                CAST(y_cst_lag0 AS DOUBLE) AS firm_size_panel_annual
-            FROM analysis_panel
-            WHERE t BETWEEN {int(year_min)} AND {int(year_max)}
-        )
-        SELECT *
-        FROM base
-        {selected_join}
-        """
-        panel_features = con.sql(panel_sql).df()
-
-        school_sql = f"""
-        WITH school_rates AS (
-            SELECT
-                k,
-                AVG(CAST(g_kt AS DOUBLE)) AS school_opt_rate
-            FROM instrument_components
-            WHERE t BETWEEN {int(year_min)} AND {int(year_max)}
-            GROUP BY 1
-        ),
-        school_cut AS (
-            SELECT MEDIAN(school_opt_rate) AS med
-            FROM school_rates
-        ),
-        intensive AS (
-            SELECT
-                sr.k,
-                CASE WHEN sr.school_opt_rate > sc.med THEN 1 ELSE 0 END AS opt_intensive
-            FROM school_rates sr
-            CROSS JOIN school_cut sc
-        ),
-        base AS (
-            SELECT
-                CAST(ic.c AS BIGINT) AS c,
-                CAST(ic.t AS INTEGER) AS t,
-                SUM(CASE WHEN COALESCE(i.opt_intensive, 0) = 1 THEN CAST(ic.n_transitions AS DOUBLE) ELSE 0 END)
-                    AS intensive_transitions,
-                MAX(CAST(ic.total_new_hires AS DOUBLE)) AS total_new_hires_components,
-                COUNT(DISTINCT CASE WHEN COALESCE(ic.n_transitions, 0) > 0 THEN ic.k END) AS n_schools_new_hire_annual
-            FROM instrument_components ic
-            LEFT JOIN intensive i USING (k)
-            WHERE ic.t BETWEEN {int(year_min)} AND {int(year_max)}
-            GROUP BY 1, 2
-        )
-        SELECT
-            c,
-            t,
-            CASE
-                WHEN total_new_hires_components IS NULL OR total_new_hires_components <= 0 THEN NULL
-                ELSE intensive_transitions / total_new_hires_components
-            END AS school_opt_share_new_hire_annual,
-            total_new_hires_components,
-            n_schools_new_hire_annual
-        FROM base
-        {selected_join}
-        """
-        school_features = con.sql(school_sql).df()
-
-        tenured_sql = f"""
-        WITH school_rates AS (
-            SELECT
-                k,
-                AVG(CAST(g_kt AS DOUBLE)) AS school_opt_rate
-            FROM instrument_components
-            WHERE t BETWEEN {int(year_min)} AND {int(year_max)}
-            GROUP BY 1
-        ),
-        school_cut AS (
-            SELECT MEDIAN(school_opt_rate) AS med
-            FROM school_rates
-        ),
-        intensive AS (
-            SELECT
-                sr.k,
-                CASE WHEN sr.school_opt_rate > sc.med THEN 1 ELSE 0 END AS opt_intensive
-            FROM school_rates sr
-            CROSS JOIN school_cut sc
-        ),
-        mapped AS (
-            SELECT
-                CAST(tr.rcid AS BIGINT) AS c,
-                CAST(tr.year AS INTEGER) AS t,
-                im.k,
-                SUM(CAST(tr.n_emp AS DOUBLE)) AS n_emp
-            FROM transitions tr
-            JOIN inst_map im
-              ON LOWER(TRIM(CAST(tr.university_raw AS VARCHAR))) = im.university_raw_key
-            WHERE tr.year BETWEEN {int(year_min)} AND {int(year_max)}
-            GROUP BY 1, 2, 3
-        ),
-        base AS (
-            SELECT
-                m.c,
-                m.t,
-                SUM(CASE WHEN COALESCE(i.opt_intensive, 0) = 1 THEN m.n_emp ELSE 0 END) AS intensive_emp,
-                SUM(m.n_emp) AS total_emp_mapped,
-                COUNT(DISTINCT CASE WHEN m.n_emp > 0 THEN m.k END) AS n_schools_tenured_annual
-            FROM mapped m
-            LEFT JOIN intensive i USING (k)
-            GROUP BY 1, 2
-        )
-        SELECT
-            c,
-            t,
-            CASE WHEN total_emp_mapped IS NULL OR total_emp_mapped <= 0 THEN NULL ELSE intensive_emp / total_emp_mapped END
-                AS school_opt_share_tenured_annual,
-            n_schools_tenured_annual
-        FROM base
-        {selected_join}
-        """
-        tenured_features = con.sql(tenured_sql).df()
-
-        headcount_sql = f"""
-        WITH base AS (
-            SELECT
-                CAST(rcid AS BIGINT) AS c,
-                CAST(year AS INTEGER) AS t,
-                CAST(total_headcount AS DOUBLE) AS total_headcount_annual,
-                CAST(long_term_headcount AS DOUBLE) AS long_term_headcount_annual
-            FROM headcounts
-            WHERE year BETWEEN {int(year_min)} AND {int(year_max)}
-        )
-        SELECT *
-        FROM base
-        {selected_join}
-        """
-        headcount_features = con.sql(headcount_sql).df()
-    finally:
-        con.close()
-
-    annual = panel_features.merge(school_features, on=["c", "t"], how="outer")
-    annual = annual.merge(tenured_features, on=["c", "t"], how="outer")
-    annual = annual.merge(headcount_features, on=["c", "t"], how="outer")
-    return annual
-
-
-def _set_statement_timeout(db: wrds.Connection, timeout_ms: Optional[int]) -> None:
-    if timeout_ms is None or int(timeout_ms) <= 0:
-        return
-    timeout_ms_int = int(timeout_ms)
-    try:
-        db.raw_sql(f"SELECT set_config('statement_timeout', '{timeout_ms_int}', false)")
-    except Exception:
-        return
-
-
-def _wrds_connect_args(query_timeout_ms: Optional[int]) -> dict:
-    if query_timeout_ms is None or int(query_timeout_ms) <= 0:
-        return {}
-    timeout_ms_int = int(query_timeout_ms)
-    return {
-        "wrds_connect_args": {
-            "options": f"-c statement_timeout={timeout_ms_int} -c lock_timeout={timeout_ms_int}",
-        }
-    }
-
-
-def _open_wrds_connection(wrds_username: str, query_timeout_ms: Optional[int]) -> wrds.Connection:
-    if wrds is None:  # pragma: no cover
-        raise ImportError("wrds is not installed.")
-    return wrds.Connection(wrds_username=wrds_username, **_wrds_connect_args(query_timeout_ms))
-
-
-def _run_sql_with_retries(
-    db: wrds.Connection,
-    sql: str,
-    *,
-    wrds_username: str,
-    query_timeout_ms: Optional[int],
-    max_retries: int,
-    label: str,
-) -> tuple[pd.DataFrame, wrds.Connection]:
-    attempts = max(1, int(max_retries) + 1)
-    last_exc: Optional[Exception] = None
-    for attempt in range(1, attempts + 1):
-        try:
-            _set_statement_timeout(db, query_timeout_ms)
-            return db.raw_sql(sql), db
-        except Exception as exc:
-            last_exc = exc
-            print(f"[wrds] {label} failed on attempt {attempt}/{attempts}: {exc}")
-            if attempt < attempts:
-                try:
-                    db.close()
-                except Exception:
-                    pass
-                db = _open_wrds_connection(wrds_username=wrds_username, query_timeout_ms=query_timeout_ms)
-    assert last_exc is not None
-    raise last_exc
-
-
-def _rcid_chunks(rcids: list[int], batch_size: int) -> list[list[int]]:
-    if batch_size <= 0 or len(rcids) <= batch_size:
-        return [rcids]
-    return [rcids[i : i + batch_size] for i in range(0, len(rcids), batch_size)]
-
-
-def _detect_user_race_column(db: wrds.Connection) -> Optional[str]:
-    candidate_order = [
-        "race_ethnicity",
-        "race_ethnicity_raw",
-        "race",
-        "ethnicity",
-        "demographic_race",
-    ]
-    try:
-        cols = db.raw_sql(
-            """
-            SELECT table_name, column_name
-            FROM information_schema.columns
-            WHERE table_schema = 'revelio'
-              AND table_name IN ('individual_user', 'individual_user_raw')
-            """
-        )
-    except Exception:
-        return None
-    available = {(str(r["table_name"]).lower(), str(r["column_name"]).lower()): str(r["column_name"]) for _, r in cols.iterrows()}
-    for candidate in candidate_order:
-        for table in ("individual_user", "individual_user_raw"):
-            key = (table.lower(), candidate.lower())
-            if key in available:
-                return f"{table}.{available[key]}"
-    return None
-
-
-def _build_wrds_company_year_features_query(
-    rcids: list[int],
-    *,
-    year_min: int,
-    year_max: int,
-    race_ref: Optional[str],
-) -> str:
-    rcid_sql = ", ".join(str(int(v)) for v in rcids)
-    race_cte = ""
-    race_join = ""
-    race_cols = (
-        "NULL::DOUBLE PRECISION AS race_share_asian_annual,"
-        "NULL::DOUBLE PRECISION AS race_share_black_annual,"
-        "NULL::DOUBLE PRECISION AS race_share_hispanic_annual,"
-        "NULL::DOUBLE PRECISION AS race_share_white_annual,"
-        "NULL::DOUBLE PRECISION AS race_share_other_annual"
-    )
-    if race_ref:
-        table_name, col_name = race_ref.split(".", 1)
-        race_cte = f"""
-        ,
-        user_race AS MATERIALIZED (
-            SELECT
-                user_id,
-                CAST({col_name} AS VARCHAR) AS race_raw
-            FROM revelio.{table_name}
-            WHERE user_id IN (SELECT DISTINCT user_id FROM us_positions)
-        )
-        """
-        race_join = "LEFT JOIN user_race ur ON ur.user_id = p.user_id"
-        race_cols = """
-        AVG(CASE
-                WHEN race_raw IS NULL OR TRIM(race_raw) = '' THEN NULL
-                WHEN race_raw ~* '(asian|aapi|pacific islander)' THEN 1
-                ELSE 0
-            END) AS race_share_asian_annual,
-        AVG(CASE
-                WHEN race_raw IS NULL OR TRIM(race_raw) = '' THEN NULL
-                WHEN race_raw ~* '(black|african)' THEN 1
-                ELSE 0
-            END) AS race_share_black_annual,
-        AVG(CASE
-                WHEN race_raw IS NULL OR TRIM(race_raw) = '' THEN NULL
-                WHEN race_raw ~* '(hispanic|latino)' THEN 1
-                ELSE 0
-            END) AS race_share_hispanic_annual,
-        AVG(CASE
-                WHEN race_raw IS NULL OR TRIM(race_raw) = '' THEN NULL
-                WHEN race_raw ~* 'white' THEN 1
-                ELSE 0
-            END) AS race_share_white_annual,
-        AVG(CASE
-                WHEN race_raw IS NULL OR TRIM(race_raw) = '' THEN NULL
-                WHEN race_raw ~* '(asian|aapi|pacific islander|black|african|hispanic|latino|white)' THEN 0
-                ELSE 1
-            END) AS race_share_other_annual
-        """
-
-    return f"""
-    WITH us_positions AS MATERIALIZED (
-        SELECT
-            user_id,
-            rcid,
-            startdate::DATE AS startdate,
-            COALESCE(enddate::DATE, DATE '2025-12-31') AS enddate,
-            role_k17000_v3,
-            salary,
-            total_compensation
-        FROM revelio.individual_positions
-        WHERE country = 'United States'
-          AND rcid IN ({rcid_sql})
-          AND startdate IS NOT NULL
-    ),
-    user_educ AS MATERIALIZED (
-        SELECT
-            e.user_id,
-            MAX(CASE
-                    WHEN e.university_country IS NOT NULL AND e.university_country <> 'United States' THEN 1
-                    ELSE 0
-                END) AS has_nonus_educ,
-            MIN(
-                CASE
-                    WHEN e.enddate IS NULL THEN NULL
-                    ELSE EXTRACT(YEAR FROM e.enddate)::INT
-                         - CASE
-                               WHEN LOWER(COALESCE(e.degree, '')) LIKE '%doctor%' OR LOWER(COALESCE(e.degree, '')) LIKE '%phd%' THEN 30
-                               WHEN LOWER(COALESCE(e.degree, '')) LIKE '%master%' OR LOWER(COALESCE(e.degree, '')) LIKE '%mba%' THEN 26
-                               WHEN LOWER(COALESCE(e.degree, '')) LIKE '%bachelor%' THEN 22
-                               WHEN LOWER(COALESCE(e.degree, '')) LIKE '%associate%' THEN 20
-                               WHEN LOWER(COALESCE(e.degree, '')) LIKE '%high school%' THEN 18
-                               ELSE 22
-                           END
-                END
-            ) AS est_yob
-        FROM revelio.individual_user_education e
-        WHERE e.user_id IN (SELECT DISTINCT user_id FROM us_positions)
-        GROUP BY 1
-    ),
-    company_user_first_start AS MATERIALIZED (
-        SELECT
-            user_id,
-            rcid,
-            MIN(startdate) AS first_start
-        FROM us_positions
-        GROUP BY 1, 2
-    ),
-    new_hires AS (
-        SELECT
-            rcid,
-            EXTRACT(YEAR FROM first_start)::INT AS year,
-            COUNT(DISTINCT user_id) AS n_new_hires_wrds_annual
-        FROM company_user_first_start
-        WHERE EXTRACT(YEAR FROM first_start)::INT BETWEEN {int(year_min)} AND {int(year_max)}
-        GROUP BY 1, 2
-    )
-    {race_cte},
-    active_user_year AS (
-        SELECT
-            p.rcid,
-            gs.year::INT AS year,
-            p.user_id,
-            MAX(NULLIF(TRIM(CAST(p.salary AS VARCHAR)), '')::DOUBLE PRECISION) AS salary,
-            MAX(NULLIF(TRIM(CAST(p.total_compensation AS VARCHAR)), '')::DOUBLE PRECISION) AS total_compensation,
-            MAX(COALESCE(ue.has_nonus_educ, 0)) AS has_nonus_educ,
-            MAX(ue.est_yob) AS est_yob,
-            MAX(cufs.first_start) AS first_start,
-            MAX(CASE WHEN p.role_k17000_v3 IS NULL OR TRIM(CAST(p.role_k17000_v3 AS VARCHAR)) = '' THEN 1 ELSE 0 END) AS role_unknown,
-            MAX(CASE WHEN p.role_k17000_v3 ~* '(engineer|software|developer|programmer|data scientist|machine learning|scientist)' THEN 1 ELSE 0 END) AS role_engineering,
-            MAX(CASE WHEN p.role_k17000_v3 ~* '(manager|director|vice president|vp|chief|head|lead)' THEN 1 ELSE 0 END) AS role_management,
-            MAX(CASE WHEN p.role_k17000_v3 ~* '(finance|account|auditor|controller|treasury)' THEN 1 ELSE 0 END) AS role_finance,
-            MAX(CASE WHEN p.role_k17000_v3 ~* '(operations|project|program|product|consultant|analyst)' THEN 1 ELSE 0 END) AS role_operations,
-            MAX(COALESCE(ur.race_raw, NULL)) AS race_raw
-        FROM us_positions p
-        JOIN company_user_first_start cufs
-          ON cufs.user_id = p.user_id
-         AND cufs.rcid = p.rcid
-        JOIN LATERAL generate_series(
-            GREATEST(EXTRACT(YEAR FROM p.startdate)::INT, {int(year_min)}),
-            LEAST(EXTRACT(YEAR FROM p.enddate)::INT, {int(year_max)})
-        ) AS gs(year) ON TRUE
-        LEFT JOIN user_educ ue
-          ON ue.user_id = p.user_id
-        {race_join}
-        GROUP BY 1, 2, 3
-    )
-    SELECT
-        CAST(ay.rcid AS BIGINT) AS c,
-        CAST(ay.year AS INTEGER) AS t,
-        COUNT(DISTINCT ay.user_id) AS total_headcount_wrds_annual,
-        COUNT(DISTINCT CASE WHEN make_date(ay.year, 12, 31) >= ay.first_start + INTERVAL '365 days' THEN ay.user_id END)
-            AS long_term_headcount_wrds_annual,
-        AVG(ay.salary) AS salary_mean_annual,
-        VAR_SAMP(ay.salary) AS salary_var_annual,
-        AVG(ay.total_compensation) AS total_comp_mean_annual,
-        VAR_SAMP(ay.total_compensation) AS total_comp_var_annual,
-        AVG(CASE WHEN ay.salary IS NULL AND ay.total_compensation IS NULL THEN 1 ELSE 0 END)
-            AS compensation_missing_share_annual,
-        AVG(CASE WHEN ay.has_nonus_educ = 1 THEN 1 ELSE 0 END) AS nonus_educ_share_annual,
-        AVG(CASE
-                WHEN ay.est_yob IS NULL THEN NULL
-                WHEN (ay.year - ay.est_yob) < 30 THEN 1
-                ELSE 0
-            END) AS age_share_lt30_annual,
-        AVG(CASE
-                WHEN ay.est_yob IS NULL THEN NULL
-                WHEN (ay.year - ay.est_yob) BETWEEN 30 AND 39 THEN 1
-                ELSE 0
-            END) AS age_share_30_39_annual,
-        AVG(CASE
-                WHEN ay.est_yob IS NULL THEN NULL
-                WHEN (ay.year - ay.est_yob) BETWEEN 40 AND 49 THEN 1
-                ELSE 0
-            END) AS age_share_40_49_annual,
-        AVG(CASE
-                WHEN ay.est_yob IS NULL THEN NULL
-                WHEN (ay.year - ay.est_yob) BETWEEN 50 AND 59 THEN 1
-                ELSE 0
-            END) AS age_share_50_59_annual,
-        AVG(CASE
-                WHEN ay.est_yob IS NULL THEN NULL
-                WHEN (ay.year - ay.est_yob) >= 60 THEN 1
-                ELSE 0
-            END) AS age_share_60p_annual,
-        AVG(CASE WHEN ay.role_unknown = 1 THEN 1 ELSE 0 END) AS role_share_unknown_annual,
-        AVG(CASE WHEN ay.role_engineering = 1 THEN 1 ELSE 0 END) AS role_share_engineering_annual,
-        AVG(CASE WHEN ay.role_management = 1 THEN 1 ELSE 0 END) AS role_share_management_annual,
-        AVG(CASE WHEN ay.role_finance = 1 THEN 1 ELSE 0 END) AS role_share_finance_annual,
-        AVG(CASE WHEN ay.role_operations = 1 THEN 1 ELSE 0 END) AS role_share_operations_annual,
-        {race_cols},
-        MAX(nh.n_new_hires_wrds_annual)::DOUBLE PRECISION AS n_new_hires_wrds_annual
-    FROM active_user_year ay
-    LEFT JOIN new_hires nh
-      ON nh.rcid = ay.rcid
-     AND nh.year = ay.year
-    GROUP BY 1, 2
-    ORDER BY 1, 2
-    """
-
-
-def _build_wrds_company_year_features(
-    rcids: list[int],
-    *,
-    wrds_username: str,
-    year_min: int,
-    year_max: int,
-    rcid_batch_size: int,
-    query_timeout_ms: Optional[int],
-    query_max_retries: int,
-) -> pd.DataFrame:
-    if not rcids:
-        return pd.DataFrame(columns=["c", "t"])
-    if wrds is None:  # pragma: no cover
-        raise ImportError("wrds is not installed.")
-
-    db = _open_wrds_connection(wrds_username=wrds_username, query_timeout_ms=query_timeout_ms)
-    race_ref = _detect_user_race_column(db)
-    batches = _rcid_chunks(sorted({int(v) for v in rcids}), int(rcid_batch_size))
-    frames: list[pd.DataFrame] = []
-    try:
-        for idx, batch in enumerate(batches, start=1):
-            sql = _build_wrds_company_year_features_query(
-                batch,
-                year_min=year_min,
-                year_max=year_max,
-                race_ref=race_ref,
-            )
-            label = f"company-year WRDS enrichment batch {idx}/{len(batches)}"
-            df, db = _run_sql_with_retries(
-                db,
-                sql,
-                wrds_username=wrds_username,
-                query_timeout_ms=query_timeout_ms,
-                max_retries=query_max_retries,
-                label=label,
-            )
-            if not df.empty:
-                df["c"] = pd.to_numeric(df["c"], errors="coerce").astype("Int64")
-                df["t"] = pd.to_numeric(df["t"], errors="coerce").astype("Int64")
-                df = df.dropna(subset=["c", "t"]).copy()
-                df["c"] = df["c"].astype(int)
-                df["t"] = df["t"].astype(int)
-            frames.append(df)
-            print(f"[company_features] {label}: {len(df):,} rows")
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass
-    if not frames:
-        return pd.DataFrame(columns=["c", "t"])
-    return pd.concat(frames, ignore_index=True).drop_duplicates(subset=["c", "t"], keep="first")
-
-
-def _merge_annual_features(local_annual: pd.DataFrame, wrds_annual: pd.DataFrame) -> pd.DataFrame:
-    annual = local_annual.merge(wrds_annual, on=["c", "t"], how="outer")
-    coalesce_pairs = [
-        ("n_new_hires_wrds_annual", "n_new_hires_panel_annual", "n_new_hires_annual"),
-        ("total_headcount_annual", "total_headcount_wrds_annual", "firm_size_annual"),
-        ("long_term_headcount_annual", "long_term_headcount_wrds_annual", "long_term_headcount_combined_annual"),
-    ]
-    for left, right, out_col in coalesce_pairs:
-        left_vals = annual[left] if left in annual.columns else pd.Series(np.nan, index=annual.index)
-        right_vals = annual[right] if right in annual.columns else pd.Series(np.nan, index=annual.index)
-        annual[out_col] = left_vals.where(left_vals.notna(), right_vals)
-    return annual
-
-
-def _build_static_feature_frame(company_meta: pd.DataFrame, firms: pd.DataFrame, *, feature_year_max: int) -> pd.DataFrame:
-    static = firms.merge(company_meta, on="c", how="left")
-    static["company_age_feature"] = np.where(
-        pd.to_numeric(static["year_founded"], errors="coerce").notna(),
-        np.maximum(0, int(feature_year_max) - pd.to_numeric(static["year_founded"], errors="coerce")),
-        np.nan,
-    )
-    static["company_n_users_log1p"] = np.log1p(pd.to_numeric(static["n_users"], errors="coerce"))
-    static_cols = [
-        "c",
-        "in_analysis_universe",
-        "outside_negative_candidate",
-        "naics2",
-        "naics4",
-        "company_state_feature",
-        "company_metro_feature",
-        "company_hq_region",
-        "company_age_feature",
-        "company_n_users_log1p",
-    ]
-    return static[static_cols].drop_duplicates(subset=["c"], keep="first")
-
-
-def _prepare_feature_firms(
-    company_meta: pd.DataFrame,
-    analysis_panel_path: Path,
-    preferred_rcids_path: Path,
-    *,
+    cfg_full: dict,
     ratio: float,
     seed: int,
     min_n_users: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    analysis_firms = pd.read_parquet(analysis_panel_path, columns=["c"])
-    analysis_firms["c"] = pd.to_numeric(analysis_firms["c"], errors="coerce")
-    analysis_firms = analysis_firms.dropna(subset=["c"]).copy()
-    analysis_firms["c"] = analysis_firms["c"].astype(int)
-    analysis_firms = analysis_firms[["c"]].drop_duplicates().copy()
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    analysis_firms = load_preferred_rcids(cfg=cfg_full)
     analysis_firms["in_analysis_universe"] = 1
+    analysis_firms["outside_negative_candidate"] = 0
 
-    preferred = pd.read_parquet(preferred_rcids_path, columns=["preferred_rcid"]).rename(columns={"preferred_rcid": "c"})
+    analysis_meta = _load_company_meta_subset(
+        paths.company_mapping,
+        selected_firms=analysis_firms[["c"]],
+    )
+    candidate_meta = _load_company_meta_subset(
+        paths.company_mapping,
+        min_n_users=min_n_users,
+        eligible_only=True,
+    )
     outside = sample_outside_negative_firms(
-        company_meta,
+        candidate_meta,
         analysis_firms["c"],
-        preferred["c"],
+        analysis_firms["c"],
         ratio=ratio,
         seed=seed,
         min_n_users=min_n_users,
     )
-    analysis_firms["outside_negative_candidate"] = 0
     if outside.empty:
         outside = pd.DataFrame(columns=["c", "outside_negative_candidate"])
     outside["in_analysis_universe"] = 0
+
     firms = pd.concat(
         [
             analysis_firms[["c", "in_analysis_universe", "outside_negative_candidate"]],
@@ -1038,7 +579,569 @@ def _prepare_feature_firms(
         ],
         ignore_index=True,
     ).drop_duplicates(subset=["c"], keep="first")
-    return firms, outside
+
+    selected_meta = _load_company_meta_subset(
+        paths.company_mapping,
+        selected_firms=firms[["c"]],
+    )
+    return firms, outside, selected_meta
+
+
+def _aggregate_school_features(
+    school_flows: pd.DataFrame,
+    school_benchmark: pd.DataFrame,
+    school_map: pd.DataFrame,
+) -> pd.DataFrame:
+    if school_flows.empty:
+        return pd.DataFrame(columns=["c", "t"])
+    con = ddb.connect()
+    try:
+        con.register("school_flows_df", school_flows)
+        con.register("school_map_df", school_map)
+        con.register("school_benchmark_df", school_benchmark)
+        bench_exprs = []
+        for degree in DEGREE_GROUPS:
+            col = f"opt_intensive_{degree}"
+            if col in school_benchmark.columns:
+                bench_exprs.append(f"COALESCE(TRY_CAST({_quote_ident(col)} AS INTEGER), 0) AS {_quote_ident(col)}")
+            else:
+                bench_exprs.append(f"0 AS {_quote_ident(col)}")
+        grouped_degree_exprs: list[str] = []
+        final_degree_exprs: list[str] = []
+        for degree in DEGREE_GROUPS:
+            grouped_degree_exprs.extend(
+                [
+                    (
+                        f"SUM(CASE WHEN opt_intensive_{degree} = 1 "
+                        f"THEN COALESCE(n_transitions, 0.0) ELSE 0.0 END) "
+                        f"AS intensive_transitions_{degree}"
+                    ),
+                    (
+                        f"SUM(CASE WHEN opt_intensive_{degree} = 1 "
+                        f"THEN COALESCE(n_emp, 0.0) ELSE 0.0 END) "
+                        f"AS intensive_emp_{degree}"
+                    ),
+                ]
+            )
+            final_degree_exprs.extend(
+                [
+                    (
+                        f"CASE WHEN total_new_hires > 0 "
+                        f"THEN intensive_transitions_{degree} / total_new_hires "
+                        f"ELSE NULL END AS school_opt_share_new_hire_{degree}_annual"
+                    ),
+                    (
+                        f"CASE WHEN total_emp > 0 "
+                        f"THEN intensive_emp_{degree} / total_emp "
+                        f"ELSE NULL END AS school_opt_share_tenured_{degree}_annual"
+                    ),
+                ]
+            )
+        sql = f"""
+        WITH flows AS (
+            SELECT
+                CAST(c AS BIGINT) AS c,
+                CAST(t AS INTEGER) AS t,
+                CAST(university_raw AS VARCHAR) AS university_raw,
+                TRY_CAST(n_transitions AS DOUBLE) AS n_transitions,
+                TRY_CAST(n_emp AS DOUBLE) AS n_emp,
+                TRY_CAST(total_new_hires AS DOUBLE) AS total_new_hires,
+                NULLIF({sql_normalize_school_key('university_raw')}, '') AS university_raw_key
+            FROM school_flows_df
+        ),
+        school_map AS (
+            SELECT
+                CAST(university_raw_key AS VARCHAR) AS university_raw_key,
+                CAST(unitid AS VARCHAR) AS unitid
+            FROM school_map_df
+        ),
+        school_benchmark AS (
+            SELECT
+                CAST(unitid AS VARCHAR) AS unitid,
+                {", ".join(bench_exprs)}
+            FROM school_benchmark_df
+        ),
+        mapped AS (
+            SELECT
+                f.c,
+                f.t,
+                f.n_transitions,
+                f.n_emp,
+                f.total_new_hires,
+                f.university_raw_key,
+                sm.unitid,
+                COALESCE(sm.unitid, f.university_raw_key) AS school_key,
+                {", ".join(f"sb.opt_intensive_{degree}" for degree in DEGREE_GROUPS)}
+            FROM flows AS f
+            LEFT JOIN school_map AS sm
+              ON f.university_raw_key = sm.university_raw_key
+            LEFT JOIN school_benchmark AS sb
+              ON sm.unitid = sb.unitid
+        ),
+        grouped AS (
+            SELECT
+                c,
+                t,
+                MAX(total_new_hires) AS total_new_hires,
+                SUM(COALESCE(n_emp, 0.0)) AS total_emp,
+                COUNT(DISTINCT CASE WHEN COALESCE(n_transitions, 0.0) > 0 THEN school_key END) AS n_schools_new_hire_annual,
+                COUNT(DISTINCT CASE WHEN COALESCE(n_emp, 0.0) > 0 THEN school_key END) AS n_schools_tenured_annual,
+                {", ".join(grouped_degree_exprs)}
+            FROM mapped
+            GROUP BY 1, 2
+        )
+        SELECT
+            c,
+            t,
+            total_new_hires,
+            total_emp,
+            CASE WHEN total_new_hires > 0 THEN intensive_transitions_masters / total_new_hires ELSE NULL END AS school_opt_share_new_hire_annual,
+            CASE WHEN total_emp > 0 THEN intensive_emp_masters / total_emp ELSE NULL END AS school_opt_share_tenured_annual,
+            n_schools_new_hire_annual,
+            n_schools_tenured_annual,
+            {", ".join(final_degree_exprs)}
+        FROM grouped
+        ORDER BY c, t
+        """
+        return con.sql(sql).df()
+    finally:
+        con.close()
+
+
+def _build_static_feature_frame(company_meta: pd.DataFrame, firms: pd.DataFrame, *, feature_year_max: int) -> pd.DataFrame:
+    company_age_ref_year = int(feature_year_max) + 1
+    con = ddb.connect()
+    try:
+        con.register("company_meta_df", company_meta)
+        con.register("firms_df", firms)
+        sql = f"""
+        WITH firms AS (
+            SELECT
+                CAST(c AS BIGINT) AS c,
+                TRY_CAST(in_analysis_universe AS BIGINT) AS in_analysis_universe,
+                TRY_CAST(preferred_rcid_source AS BIGINT) AS preferred_rcid_source,
+                TRY_CAST(outside_negative_candidate AS BIGINT) AS outside_negative_candidate
+            FROM firms_df
+        ),
+        meta AS (
+            SELECT
+                CAST(c AS BIGINT) AS c,
+                CAST(naics2 AS VARCHAR) AS naics2,
+                CAST(naics4 AS VARCHAR) AS naics4,
+                CAST(company_state_feature AS VARCHAR) AS company_state_feature,
+                CAST(company_metro_feature AS VARCHAR) AS company_metro_feature,
+                CAST(company_hq_region AS VARCHAR) AS company_hq_region,
+                TRY_CAST(year_founded AS DOUBLE) AS year_founded,
+                TRY_CAST(n_users AS DOUBLE) AS n_users
+            FROM company_meta_df
+        )
+        SELECT
+            f.c,
+            COALESCE(f.in_analysis_universe, 0) AS in_analysis_universe,
+            COALESCE(f.preferred_rcid_source, 0) AS preferred_rcid_source,
+            COALESCE(f.outside_negative_candidate, 0) AS outside_negative_candidate,
+            m.naics2,
+            m.naics4,
+            m.company_state_feature,
+            m.company_metro_feature,
+            m.company_hq_region,
+            CASE
+                WHEN m.year_founded IS NOT NULL
+                THEN GREATEST(0.0, {company_age_ref_year}.0 - m.year_founded)
+                ELSE NULL
+            END AS company_age_feature,
+            CASE
+                WHEN m.n_users IS NOT NULL THEN LN(1.0 + m.n_users)
+                ELSE NULL
+            END AS company_n_users_log1p
+        FROM firms AS f
+        LEFT JOIN meta AS m
+          ON f.c = m.c
+        ORDER BY f.c
+        """
+        return con.sql(sql).df()
+    finally:
+        con.close()
+
+
+def _build_annual_feature_frame(
+    wrds_annual: pd.DataFrame,
+    school_annual: pd.DataFrame,
+    opt_counts: pd.DataFrame,
+    *,
+    year_min: int,
+    year_max: int,
+) -> pd.DataFrame:
+    wrds_available = set(wrds_annual.columns)
+    school_available = set(school_annual.columns)
+    opt_available = set(opt_counts.columns)
+
+    def _maybe_double(available: set[str], src: str, alias: str) -> str:
+        if src in available:
+            return f"TRY_CAST({_quote_ident(src)} AS DOUBLE) AS {_quote_ident(alias)}"
+        return f"NULL::DOUBLE AS {_quote_ident(alias)}"
+
+    wrds_fields = [
+        ("total_headcount_wrds_annual", "total_headcount_annual"),
+        ("total_headcount_wrds_annual", "firm_size_annual"),
+        ("total_headcount_foreign_weighted_annual", "total_headcount_foreign_weighted_annual"),
+        ("total_headcount_native_weighted_annual", "total_headcount_native_weighted_annual"),
+        ("total_headcount_foreign_hard_annual", "total_headcount_foreign_hard_annual"),
+        ("total_headcount_native_hard_annual", "total_headcount_native_hard_annual"),
+        ("long_term_headcount_wrds_annual", "long_term_headcount_annual"),
+        ("n_new_hires_wrds_annual", "n_new_hires_annual"),
+        ("n_new_hires_foreign_weighted_annual", "n_new_hires_foreign_weighted_annual"),
+        ("n_new_hires_native_weighted_annual", "n_new_hires_native_weighted_annual"),
+        ("n_new_hires_foreign_hard_annual", "n_new_hires_foreign_hard_annual"),
+        ("n_new_hires_native_hard_annual", "n_new_hires_native_hard_annual"),
+        ("salary_mean_annual", "salary_mean_annual"),
+        ("salary_var_annual", "salary_var_annual"),
+        ("total_comp_mean_annual", "total_comp_mean_annual"),
+        ("total_comp_var_annual", "total_comp_var_annual"),
+        ("compensation_missing_share_annual", "compensation_missing_share_annual"),
+        ("nonus_educ_share_annual", "nonus_educ_share_annual"),
+        ("age_share_lt30_annual", "age_share_lt30_annual"),
+        ("age_share_30_39_annual", "age_share_30_39_annual"),
+        ("age_share_40_49_annual", "age_share_40_49_annual"),
+        ("age_share_50_59_annual", "age_share_50_59_annual"),
+        ("age_share_60p_annual", "age_share_60p_annual"),
+        ("female_share_annual", "female_share_annual"),
+        ("race_share_white_annual", "race_share_white_annual"),
+        ("race_share_black_annual", "race_share_black_annual"),
+        ("race_share_api_annual", "race_share_api_annual"),
+        ("race_share_api_annual", "race_share_asian_annual"),
+        ("race_share_hispanic_annual", "race_share_hispanic_annual"),
+        ("race_share_native_annual", "race_share_native_annual"),
+        ("race_share_multiple_annual", "race_share_multiple_annual"),
+        ("seniority_mean_annual", "seniority_mean_annual"),
+        ("avg_tenure_years_annual", "avg_tenure_years_annual"),
+        ("occ_share_mgmt_annual", "occ_share_mgmt_annual"),
+        ("occ_share_business_finance_annual", "occ_share_business_finance_annual"),
+        ("occ_share_computing_math_annual", "occ_share_computing_math_annual"),
+        ("occ_share_engineering_annual", "occ_share_engineering_annual"),
+        ("occ_share_science_annual", "occ_share_science_annual"),
+        ("occ_share_community_legal_education_annual", "occ_share_community_legal_education_annual"),
+        ("occ_share_arts_media_annual", "occ_share_arts_media_annual"),
+        ("occ_share_healthcare_annual", "occ_share_healthcare_annual"),
+        ("occ_share_sales_office_annual", "occ_share_sales_office_annual"),
+        ("occ_share_manual_annual", "occ_share_manual_annual"),
+    ]
+    school_fields = [
+        ("total_new_hires", "total_new_hires"),
+        ("total_emp", "total_emp"),
+        ("school_opt_share_new_hire_annual", "school_opt_share_new_hire_annual"),
+        ("school_opt_share_tenured_annual", "school_opt_share_tenured_annual"),
+        ("n_schools_new_hire_annual", "n_schools_new_hire_annual"),
+        ("n_schools_tenured_annual", "n_schools_tenured_annual"),
+        ("school_opt_share_new_hire_bachelors_annual", "school_opt_share_new_hire_bachelors_annual"),
+        ("school_opt_share_new_hire_masters_annual", "school_opt_share_new_hire_masters_annual"),
+        ("school_opt_share_new_hire_phd_annual", "school_opt_share_new_hire_phd_annual"),
+        ("school_opt_share_tenured_bachelors_annual", "school_opt_share_tenured_bachelors_annual"),
+        ("school_opt_share_tenured_masters_annual", "school_opt_share_tenured_masters_annual"),
+        ("school_opt_share_tenured_phd_annual", "school_opt_share_tenured_phd_annual"),
+    ]
+    opt_fields = [
+        ("bachelors_opt_hire_count_annual", "bachelors_opt_hire_count_annual"),
+        ("masters_opt_hire_count_annual", "masters_opt_hire_count_annual"),
+        ("phd_opt_hire_count_annual", "phd_opt_hire_count_annual"),
+        ("any_opt_hire_count_annual", "any_opt_hire_count_annual"),
+    ]
+    wrds_exprs = ",\n                ".join(
+        _maybe_double(wrds_available, src, alias) for src, alias in wrds_fields
+    )
+    school_exprs = ",\n                ".join(
+        _maybe_double(school_available, src, alias) for src, alias in school_fields
+    )
+    opt_exprs = ",\n                ".join(
+        _maybe_double(opt_available, src, alias) for src, alias in opt_fields
+    )
+
+    con = ddb.connect()
+    try:
+        con.register("wrds_annual_df", wrds_annual)
+        con.register("school_annual_df", school_annual)
+        con.register("opt_counts_df", opt_counts)
+        sql = f"""
+        WITH wrds AS (
+            SELECT
+                CAST(c AS BIGINT) AS c,
+                CAST(t AS INTEGER) AS t,
+                {wrds_exprs}
+            FROM wrds_annual_df
+            WHERE TRY_CAST(t AS INTEGER) BETWEEN {int(year_min)} AND {int(year_max)}
+        ),
+        school AS (
+            SELECT
+                CAST(c AS BIGINT) AS c,
+                CAST(t AS INTEGER) AS t,
+                {school_exprs}
+            FROM school_annual_df
+        ),
+        opt AS (
+            SELECT
+                CAST(c AS BIGINT) AS c,
+                CAST(t AS INTEGER) AS t,
+                {opt_exprs}
+            FROM opt_counts_df
+        ),
+        annual AS (
+            SELECT
+                COALESCE(w.c, s.c, o.c) AS c,
+                COALESCE(w.t, s.t, o.t) AS t,
+                w.total_headcount_annual,
+                w.firm_size_annual,
+                w.total_headcount_foreign_weighted_annual,
+                w.total_headcount_native_weighted_annual,
+                w.total_headcount_foreign_hard_annual,
+                w.total_headcount_native_hard_annual,
+                w.long_term_headcount_annual,
+                w.n_new_hires_annual,
+                w.n_new_hires_foreign_weighted_annual,
+                w.n_new_hires_native_weighted_annual,
+                w.n_new_hires_foreign_hard_annual,
+                w.n_new_hires_native_hard_annual,
+                w.salary_mean_annual,
+                w.salary_var_annual,
+                w.total_comp_mean_annual,
+                w.total_comp_var_annual,
+                w.compensation_missing_share_annual,
+                w.nonus_educ_share_annual,
+                w.age_share_lt30_annual,
+                w.age_share_30_39_annual,
+                w.age_share_40_49_annual,
+                w.age_share_50_59_annual,
+                w.age_share_60p_annual,
+                w.female_share_annual,
+                w.race_share_white_annual,
+                w.race_share_black_annual,
+                w.race_share_api_annual,
+                w.race_share_asian_annual,
+                w.race_share_hispanic_annual,
+                w.race_share_native_annual,
+                w.race_share_multiple_annual,
+                w.seniority_mean_annual,
+                w.avg_tenure_years_annual,
+                w.occ_share_mgmt_annual,
+                w.occ_share_business_finance_annual,
+                w.occ_share_computing_math_annual,
+                w.occ_share_engineering_annual,
+                w.occ_share_science_annual,
+                w.occ_share_community_legal_education_annual,
+                w.occ_share_arts_media_annual,
+                w.occ_share_healthcare_annual,
+                w.occ_share_sales_office_annual,
+                w.occ_share_manual_annual,
+                s.total_new_hires,
+                s.total_emp,
+                s.school_opt_share_new_hire_annual,
+                s.school_opt_share_tenured_annual,
+                s.n_schools_new_hire_annual,
+                s.n_schools_tenured_annual,
+                s.school_opt_share_new_hire_bachelors_annual,
+                s.school_opt_share_new_hire_masters_annual,
+                s.school_opt_share_new_hire_phd_annual,
+                s.school_opt_share_tenured_bachelors_annual,
+                s.school_opt_share_tenured_masters_annual,
+                s.school_opt_share_tenured_phd_annual,
+                o.bachelors_opt_hire_count_annual,
+                o.masters_opt_hire_count_annual,
+                o.phd_opt_hire_count_annual,
+                o.any_opt_hire_count_annual
+            FROM wrds AS w
+            FULL OUTER JOIN school AS s
+              ON w.c = s.c AND w.t = s.t
+            FULL OUTER JOIN opt AS o
+              ON COALESCE(w.c, s.c) = o.c AND COALESCE(w.t, s.t) = o.t
+        ),
+        annual_filled AS (
+            SELECT
+                a.c,
+                a.t,
+                a.total_headcount_annual,
+                a.firm_size_annual,
+                a.total_headcount_foreign_weighted_annual,
+                a.total_headcount_native_weighted_annual,
+                a.total_headcount_foreign_hard_annual,
+                a.total_headcount_native_hard_annual,
+                a.long_term_headcount_annual,
+                a.n_new_hires_annual,
+                a.n_new_hires_foreign_weighted_annual,
+                a.n_new_hires_native_weighted_annual,
+                a.n_new_hires_foreign_hard_annual,
+                a.n_new_hires_native_hard_annual,
+                a.salary_mean_annual,
+                a.salary_var_annual,
+                a.total_comp_mean_annual,
+                a.total_comp_var_annual,
+                a.compensation_missing_share_annual,
+                a.nonus_educ_share_annual,
+                a.age_share_lt30_annual,
+                a.age_share_30_39_annual,
+                a.age_share_40_49_annual,
+                a.age_share_50_59_annual,
+                a.age_share_60p_annual,
+                a.female_share_annual,
+                a.race_share_white_annual,
+                a.race_share_black_annual,
+                a.race_share_api_annual,
+                a.race_share_asian_annual,
+                a.race_share_hispanic_annual,
+                a.race_share_native_annual,
+                a.race_share_multiple_annual,
+                a.seniority_mean_annual,
+                a.avg_tenure_years_annual,
+                a.occ_share_mgmt_annual,
+                a.occ_share_business_finance_annual,
+                a.occ_share_computing_math_annual,
+                a.occ_share_engineering_annual,
+                a.occ_share_science_annual,
+                a.occ_share_community_legal_education_annual,
+                a.occ_share_arts_media_annual,
+                a.occ_share_healthcare_annual,
+                a.occ_share_sales_office_annual,
+                a.occ_share_manual_annual,
+                a.total_new_hires,
+                a.total_emp,
+                a.school_opt_share_new_hire_annual,
+                a.school_opt_share_tenured_annual,
+                a.n_schools_new_hire_annual,
+                a.n_schools_tenured_annual,
+                a.school_opt_share_new_hire_bachelors_annual,
+                a.school_opt_share_new_hire_masters_annual,
+                a.school_opt_share_new_hire_phd_annual,
+                a.school_opt_share_tenured_bachelors_annual,
+                a.school_opt_share_tenured_masters_annual,
+                a.school_opt_share_tenured_phd_annual,
+                a.bachelors_opt_hire_count_annual,
+                a.masters_opt_hire_count_annual,
+                a.phd_opt_hire_count_annual,
+                a.any_opt_hire_count_annual,
+                COALESCE(a.total_headcount_annual, a.total_emp) AS total_headcount_filled,
+                COALESCE(a.firm_size_annual, COALESCE(a.total_headcount_annual, a.total_emp)) AS firm_size_filled,
+                COALESCE(a.n_new_hires_annual, a.total_new_hires) AS n_new_hires_filled
+            FROM annual AS a
+        ),
+        annual_ready AS (
+            SELECT
+                a.c,
+                a.t,
+                a.total_headcount_filled AS total_headcount_annual,
+                a.firm_size_filled AS firm_size_annual,
+                a.total_headcount_foreign_weighted_annual,
+                a.total_headcount_native_weighted_annual,
+                a.total_headcount_foreign_hard_annual,
+                a.total_headcount_native_hard_annual,
+                a.long_term_headcount_annual,
+                a.n_new_hires_filled AS n_new_hires_annual,
+                a.n_new_hires_foreign_weighted_annual,
+                a.n_new_hires_native_weighted_annual,
+                a.n_new_hires_foreign_hard_annual,
+                a.n_new_hires_native_hard_annual,
+                a.salary_mean_annual,
+                a.salary_var_annual,
+                a.total_comp_mean_annual,
+                a.total_comp_var_annual,
+                a.compensation_missing_share_annual,
+                a.nonus_educ_share_annual,
+                a.age_share_lt30_annual,
+                a.age_share_30_39_annual,
+                a.age_share_40_49_annual,
+                a.age_share_50_59_annual,
+                a.age_share_60p_annual,
+                a.female_share_annual,
+                a.race_share_white_annual,
+                a.race_share_black_annual,
+                a.race_share_api_annual,
+                a.race_share_asian_annual,
+                a.race_share_hispanic_annual,
+                a.race_share_native_annual,
+                a.race_share_multiple_annual,
+                a.seniority_mean_annual,
+                a.avg_tenure_years_annual,
+                a.occ_share_mgmt_annual,
+                a.occ_share_business_finance_annual,
+                a.occ_share_computing_math_annual,
+                a.occ_share_engineering_annual,
+                a.occ_share_science_annual,
+                a.occ_share_community_legal_education_annual,
+                a.occ_share_arts_media_annual,
+                a.occ_share_healthcare_annual,
+                a.occ_share_sales_office_annual,
+                a.occ_share_manual_annual,
+                a.total_new_hires,
+                a.total_emp,
+                a.school_opt_share_new_hire_annual,
+                a.school_opt_share_tenured_annual,
+                a.n_schools_new_hire_annual,
+                a.n_schools_tenured_annual,
+                a.school_opt_share_new_hire_bachelors_annual,
+                a.school_opt_share_new_hire_masters_annual,
+                a.school_opt_share_new_hire_phd_annual,
+                a.school_opt_share_tenured_bachelors_annual,
+                a.school_opt_share_tenured_masters_annual,
+                a.school_opt_share_tenured_phd_annual,
+                COALESCE(a.bachelors_opt_hire_count_annual, 0.0) AS bachelors_opt_hire_count_annual,
+                COALESCE(a.masters_opt_hire_count_annual, 0.0) AS masters_opt_hire_count_annual,
+                COALESCE(a.phd_opt_hire_count_annual, 0.0) AS phd_opt_hire_count_annual,
+                COALESCE(a.any_opt_hire_count_annual, 0.0) AS any_opt_hire_count_annual
+            FROM annual_filled AS a
+        )
+        SELECT
+            a.*,
+            CASE
+                WHEN a.n_new_hires_annual > 0
+                THEN a.bachelors_opt_hire_count_annual / a.n_new_hires_annual
+                ELSE NULL
+            END AS bachelors_opt_hire_rate_annual,
+            CASE
+                WHEN a.n_new_hires_annual > 0
+                THEN a.masters_opt_hire_count_annual / a.n_new_hires_annual
+                ELSE NULL
+            END AS masters_opt_hire_rate_annual,
+            CASE
+                WHEN a.n_new_hires_annual > 0
+                THEN a.phd_opt_hire_count_annual / a.n_new_hires_annual
+                ELSE NULL
+            END AS phd_opt_hire_rate_annual,
+            CASE
+                WHEN a.n_new_hires_annual > 0
+                THEN a.any_opt_hire_count_annual / a.n_new_hires_annual
+                ELSE NULL
+            END AS any_opt_hire_rate_annual,
+            a.masters_opt_hire_count_annual AS opt_hire_count_annual,
+            CASE
+                WHEN a.n_new_hires_annual > 0
+                THEN a.masters_opt_hire_count_annual / a.n_new_hires_annual
+                ELSE NULL
+            END AS opt_hire_rate_annual
+        FROM annual_ready AS a
+        ORDER BY a.c, a.t
+        """
+        annual_df = con.sql(sql).df()
+    finally:
+        con.close()
+    annual_df = annual_df.loc[:, ~annual_df.columns.duplicated()].copy()
+    return annual_df
+
+
+def _merge_feature_frames(static: pd.DataFrame, summarized: pd.DataFrame) -> pd.DataFrame:
+    con = ddb.connect()
+    try:
+        con.register("static_df", static)
+        con.register("summarized_df", summarized)
+        return con.sql(
+            """
+            SELECT
+                s.*,
+                sm.* EXCLUDE (c)
+            FROM static_df AS s
+            LEFT JOIN summarized_df AS sm
+              ON s.c = sm.c
+            ORDER BY s.c
+            """
+        ).df()
+    finally:
+        con.close()
 
 
 def build_company_features(
@@ -1051,80 +1154,149 @@ def build_company_features(
 ) -> pd.DataFrame:
     cfg_full = cfg or load_config(config_path or DEFAULT_CONFIG_PATH)
     paths = _resolve_feature_paths(cfg_full)
-    _require_paths(paths)
-
+    source_paths = resolve_source_exposure_paths(cfg_full)
     feature_cfg = get_cfg_section(cfg_full, "revelio_company_features")
     year_min = int(feature_year_min if feature_year_min is not None else feature_cfg.get("feature_year_min", 2010))
     year_max = int(feature_year_max if feature_year_max is not None else feature_cfg.get("feature_year_max", 2015))
     validate_feature_window(year_min, year_max)
+    school_map, school_map_meta = load_revelio_school_map(
+        legacy_crosswalk=source_paths.revelio_inst_crosswalk,
+        deterministic_triple_map=source_paths.revelio_inst_deterministic_map,
+        ref_inst_catalog=source_paths.revelio_ref_inst_catalog,
+    )
+    firms, outside, selected_meta, universe_meta = load_or_build_source_firm_universe(
+        cfg=cfg_full,
+        force_rebuild=force_rebuild,
+    )
 
     out_path = paths.company_features_out
     metadata = {
         "feature_year_min": year_min,
         "feature_year_max": year_max,
+        "analysis_universe_method": ANALYSIS_UNIVERSE_METHOD,
+        "opt_count_method": OPT_COUNT_METHOD,
+        "school_benchmark_method": SCHOOL_BENCHMARK_METHOD,
+        "degree_groups": list(DEGREE_GROUPS),
         "outside_negative_ratio": float(feature_cfg.get("outside_negative_ratio", 2.0)),
         "outside_negative_seed": int(feature_cfg.get("outside_negative_seed", 42)),
+        "outside_negative_min_n_users": int(feature_cfg.get("outside_negative_min_n_users", 10)),
+        "min_position_days": int(feature_cfg.get("min_position_days", 365)),
+        "tenure_min_days": int(feature_cfg.get("tenure_min_days", 365)),
+        "wrds_workforce_include_education_features": bool(
+            feature_cfg.get("wrds_workforce_include_education_features", True)
+        ),
+        "new_hire_origin_method": NEW_HIRE_ORIGIN_METHOD,
+        "revelio_school_map_method": school_map_meta["mapping_method"],
+        "revelio_school_map_paths": {
+            "deterministic_triple_map": school_map_meta.get("deterministic_triple_map"),
+            "ref_inst_catalog": school_map_meta.get("ref_inst_catalog"),
+            "legacy_crosswalk": school_map_meta.get("legacy_crosswalk"),
+        },
+        "shared_universe_meta": universe_meta,
     }
     if out_path.exists() and not force_rebuild:
         current_meta = _load_metadata(out_path)
         if (
-            current_meta.get("feature_year_min") == year_min
-            and current_meta.get("feature_year_max") == year_max
+            current_meta.get("feature_year_min") == metadata["feature_year_min"]
+            and current_meta.get("feature_year_max") == metadata["feature_year_max"]
+            and current_meta.get("analysis_universe_method") == metadata["analysis_universe_method"]
+            and current_meta.get("opt_count_method") == metadata["opt_count_method"]
+            and current_meta.get("school_benchmark_method") == metadata["school_benchmark_method"]
             and current_meta.get("outside_negative_ratio") == metadata["outside_negative_ratio"]
             and current_meta.get("outside_negative_seed") == metadata["outside_negative_seed"]
+            and current_meta.get("outside_negative_min_n_users") == metadata["outside_negative_min_n_users"]
+            and current_meta.get("min_position_days") == metadata["min_position_days"]
+            and current_meta.get("tenure_min_days") == metadata["tenure_min_days"]
+            and current_meta.get("wrds_workforce_include_education_features")
+            == metadata["wrds_workforce_include_education_features"]
+            and current_meta.get("new_hire_origin_method") == metadata["new_hire_origin_method"]
+            and current_meta.get("revelio_school_map_method") == metadata["revelio_school_map_method"]
+            and current_meta.get("revelio_school_map_paths") == metadata["revelio_school_map_paths"]
+            and current_meta.get("shared_universe_meta") == metadata["shared_universe_meta"]
         ):
             print(f"[company_features] Reusing cached features from {out_path}")
             return pd.read_parquet(out_path)
 
     t0 = time.time()
-    print(
-        f"[company_features] Building firm features for "
-        f"{year_min}–{year_max}"
-    )
+    print(f"[company_features] Building source-based firm features for {year_min}–{year_max}")
 
-    company_meta = _load_company_meta(paths.company_mapping)
-    firms, outside = _prepare_feature_firms(
-        company_meta,
-        paths.analysis_panel,
-        paths.preferred_rcids,
-        ratio=float(feature_cfg.get("outside_negative_ratio", 2.0)),
-        seed=int(feature_cfg.get("outside_negative_seed", 42)),
-        min_n_users=int(feature_cfg.get("outside_negative_min_n_users", 10)),
-    )
-    selected_firms = firms[["c"]].copy()
-
-    local_annual = _build_local_company_year_features(
-        paths,
+    school_benchmark, school_meta = load_or_build_source_school_opt_benchmark(
+        cfg=cfg_full,
         year_min=year_min,
         year_max=year_max,
-        selected_firms=selected_firms,
+        force_rebuild=force_rebuild,
     )
+    print(f"[company_features] School benchmark metadata: {school_meta}")
+    print(f"[company_features] Revelio school map metadata: {school_map_meta}")
 
-    wrds_annual = _build_wrds_company_year_features(
-        firms["c"].tolist(),
-        wrds_username=str(feature_cfg.get("wrds_username", "")).strip(),
+    opt_counts, _ = load_or_build_source_opt_counts(
+        cfg=cfg_full,
         year_min=year_min,
         year_max=year_max,
-        rcid_batch_size=int(feature_cfg.get("wrds_rcid_batch_size", 100)),
-        query_timeout_ms=int(float(feature_cfg.get("query_timeout_minutes", 5)) * 60_000),
-        query_max_retries=int(feature_cfg.get("query_max_retries", 1)),
+        force_rebuild=force_rebuild,
+    )
+    opt_counts = opt_counts.rename(
+        columns={
+            "bachelors_opt_hires_correction_aware": "bachelors_opt_hire_count_annual",
+            "masters_opt_hires_correction_aware": "masters_opt_hire_count_annual",
+            "phd_opt_hires_correction_aware": "phd_opt_hire_count_annual",
+            "any_opt_hires_correction_aware": "any_opt_hire_count_annual",
+        }
     )
 
-    annual = _merge_annual_features(local_annual, wrds_annual)
-    annual = annual.merge(firms[["c", "in_analysis_universe", "outside_negative_candidate"]], on="c", how="left")
+    wrds_annual, workforce_meta = load_or_build_wrds_company_year_workforce_cache(
+        cfg=cfg_full,
+        year_min=year_min,
+        year_max=year_max,
+        force_rebuild=force_rebuild,
+    )
+
+    school_flows, school_flows_meta = load_or_build_wrds_school_flows_cache(
+        cfg=cfg_full,
+        year_min=year_min,
+        year_max=year_max,
+        force_rebuild=force_rebuild,
+    )
+    print("[company_features] Aggregating school flows in DuckDB")
+    school_annual = _aggregate_school_features(school_flows, school_benchmark, school_map)
+    print("[company_features] Building annual feature panel in DuckDB")
+    annual = _build_annual_feature_frame(
+        wrds_annual,
+        school_annual,
+        opt_counts,
+        year_min=year_min,
+        year_max=year_max,
+    )
 
     feature_cols = [
         "opt_hire_count_annual",
         "opt_hire_rate_annual",
         "school_opt_share_new_hire_annual",
         "school_opt_share_tenured_annual",
+        "bachelors_opt_hire_count_annual",
+        "masters_opt_hire_count_annual",
+        "phd_opt_hire_count_annual",
+        "any_opt_hire_count_annual",
+        "bachelors_opt_hire_rate_annual",
+        "masters_opt_hire_rate_annual",
+        "phd_opt_hire_rate_annual",
+        "any_opt_hire_rate_annual",
+        "school_opt_share_new_hire_bachelors_annual",
+        "school_opt_share_new_hire_masters_annual",
+        "school_opt_share_new_hire_phd_annual",
+        "school_opt_share_tenured_bachelors_annual",
+        "school_opt_share_tenured_masters_annual",
+        "school_opt_share_tenured_phd_annual",
         "n_schools_new_hire_annual",
         "n_schools_tenured_annual",
         "firm_size_annual",
         "total_headcount_annual",
+        "total_headcount_foreign_weighted_annual",
+        "total_headcount_native_weighted_annual",
         "long_term_headcount_annual",
-        "long_term_headcount_combined_annual",
         "n_new_hires_annual",
+        "n_new_hires_foreign_weighted_annual",
+        "n_new_hires_native_weighted_annual",
         "salary_mean_annual",
         "salary_var_annual",
         "total_comp_mean_annual",
@@ -1136,39 +1308,52 @@ def build_company_features(
         "age_share_40_49_annual",
         "age_share_50_59_annual",
         "age_share_60p_annual",
-        "role_share_unknown_annual",
-        "role_share_engineering_annual",
-        "role_share_management_annual",
-        "role_share_finance_annual",
-        "role_share_operations_annual",
-        "race_share_asian_annual",
-        "race_share_black_annual",
-        "race_share_hispanic_annual",
+        "female_share_annual",
         "race_share_white_annual",
-        "race_share_other_annual",
+        "race_share_black_annual",
+        "race_share_api_annual",
+        "race_share_asian_annual",
+        "race_share_hispanic_annual",
+        "race_share_native_annual",
+        "race_share_multiple_annual",
+        "seniority_mean_annual",
+        "avg_tenure_years_annual",
+        "occ_share_mgmt_annual",
+        "occ_share_business_finance_annual",
+        "occ_share_computing_math_annual",
+        "occ_share_engineering_annual",
+        "occ_share_science_annual",
+        "occ_share_community_legal_education_annual",
+        "occ_share_arts_media_annual",
+        "occ_share_healthcare_annual",
+        "occ_share_sales_office_annual",
+        "occ_share_manual_annual",
     ]
+    print("[company_features] Summarizing pre-period features in DuckDB")
     summarized = summarize_pre_period_features(
         annual,
         feature_cols,
         year_min=year_min,
         year_max=year_max,
     )
-    static = _build_static_feature_frame(company_meta, firms, feature_year_max=year_max)
-    feature_df = static.merge(summarized, on="c", how="left")
+    print("[company_features] Building static feature frame in DuckDB")
+    static = _build_static_feature_frame(selected_meta, firms, feature_year_max=year_max)
+    print("[company_features] Merging static and summarized features in DuckDB")
+    feature_df = _merge_feature_frames(static, summarized)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     feature_df.to_parquet(out_path, index=False)
     print(f"[company_features] Wrote {out_path}")
 
-    paths.outside_negative_sample_out.parent.mkdir(parents=True, exist_ok=True)
-    outside.to_parquet(paths.outside_negative_sample_out, index=False)
-    print(f"[company_features] Wrote {paths.outside_negative_sample_out}")
-
     metadata.update(
         {
             "n_feature_firms": int(len(feature_df)),
             "n_analysis_firms": int(feature_df["in_analysis_universe"].fillna(0).sum()),
+            "n_preferred_source_firms": int(feature_df["preferred_rcid_source"].fillna(0).sum()),
             "n_outside_negative_candidates": int(feature_df["outside_negative_candidate"].fillna(0).sum()),
+            "shared_universe_meta": universe_meta,
+            "workforce_cache_meta": workforce_meta,
+            "school_flows_cache_meta": school_flows_meta,
             "build_seconds": round(time.time() - t0, 2),
         }
     )
@@ -1186,14 +1371,47 @@ def load_or_build_company_features(
 ) -> tuple[pd.DataFrame, dict]:
     cfg_full = cfg or load_config(config_path or DEFAULT_CONFIG_PATH)
     paths = _resolve_feature_paths(cfg_full)
+    source_paths = resolve_source_exposure_paths(cfg_full)
     feature_cfg = get_cfg_section(cfg_full, "revelio_company_features")
     year_min = int(feature_year_min if feature_year_min is not None else feature_cfg.get("feature_year_min", 2010))
     year_max = int(feature_year_max if feature_year_max is not None else feature_cfg.get("feature_year_max", 2015))
     validate_feature_window(year_min, year_max)
-
+    _, _, _, universe_meta = load_or_build_source_firm_universe(
+        cfg=cfg_full,
+        force_rebuild=force_rebuild,
+    )
+    expected_meta = {
+        "feature_year_min": year_min,
+        "feature_year_max": year_max,
+        "analysis_universe_method": ANALYSIS_UNIVERSE_METHOD,
+        "opt_count_method": OPT_COUNT_METHOD,
+        "school_benchmark_method": SCHOOL_BENCHMARK_METHOD,
+        "degree_groups": list(DEGREE_GROUPS),
+        "outside_negative_ratio": float(feature_cfg.get("outside_negative_ratio", 2.0)),
+        "outside_negative_seed": int(feature_cfg.get("outside_negative_seed", 42)),
+        "outside_negative_min_n_users": int(feature_cfg.get("outside_negative_min_n_users", 10)),
+        "min_position_days": int(feature_cfg.get("min_position_days", 365)),
+        "tenure_min_days": int(feature_cfg.get("tenure_min_days", 365)),
+        "wrds_workforce_include_education_features": bool(
+            feature_cfg.get("wrds_workforce_include_education_features", True)
+        ),
+        "new_hire_origin_method": NEW_HIRE_ORIGIN_METHOD,
+    }
+    _, school_map_meta = load_revelio_school_map(
+        legacy_crosswalk=source_paths.revelio_inst_crosswalk,
+        deterministic_triple_map=source_paths.revelio_inst_deterministic_map,
+        ref_inst_catalog=source_paths.revelio_ref_inst_catalog,
+    )
+    expected_meta["revelio_school_map_method"] = school_map_meta["mapping_method"]
+    expected_meta["revelio_school_map_paths"] = {
+        "deterministic_triple_map": school_map_meta.get("deterministic_triple_map"),
+        "ref_inst_catalog": school_map_meta.get("ref_inst_catalog"),
+        "legacy_crosswalk": school_map_meta.get("legacy_crosswalk"),
+    }
+    expected_meta["shared_universe_meta"] = universe_meta
     if paths.company_features_out.exists() and not force_rebuild:
         meta = _load_metadata(paths.company_features_out)
-        if meta.get("feature_year_min") == year_min and meta.get("feature_year_max") == year_max:
+        if _metadata_compatible(meta, expected_meta):
             return pd.read_parquet(paths.company_features_out), meta
 
     df = build_company_features(

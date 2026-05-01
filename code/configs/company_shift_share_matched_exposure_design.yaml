@@ -1,0 +1,117 @@
+root: "/home/yk0581"
+matched_exposure_out_dir: "{root}/data/out/company_shift_share_apr2026/matched_exposure_design"
+
+paths:
+  out_dir: "${matched_exposure_out_dir}"
+  transition_shares_out: "${matched_exposure_out_dir}/transition_shares_source_rebuilt.parquet"
+  school_growth_out: "${matched_exposure_out_dir}/school_growth_source_rebuilt.parquet"
+  school_shift_sample_out: "${matched_exposure_out_dir}/school_shift_sample.parquet"
+  instrument_panel_out: "${matched_exposure_out_dir}/instrument_panel_source_rebuilt.parquet"
+  analysis_panel_out: "${matched_exposure_out_dir}/analysis_panel_source_rebuilt.parquet"
+  matching_features_out: "${matched_exposure_out_dir}/matching_features.parquet"
+  propensity_scores_out: "${matched_exposure_out_dir}/propensity_scores.parquet"
+  trajectory_summary_out: "${matched_exposure_out_dir}/trajectory_summary.parquet"
+  matched_pairs_out: "${matched_exposure_out_dir}/matched_pairs.parquet"
+  balance_table_out: "${matched_exposure_out_dir}/matching_balance_table.parquet"
+  balance_summary_out: "${matched_exposure_out_dir}/matching_balance_summary.parquet"
+  matched_panel_out: "${matched_exposure_out_dir}/matched_panel.parquet"
+  final_matched_analysis_panel_out: "${matched_exposure_out_dir}/final_matched_analysis_panel.parquet"
+  common_break_results_out: "${matched_exposure_out_dir}/common_break_event_study.parquet"
+  stacked_panel_out: "${matched_exposure_out_dir}/stacked_did_panel.parquet"
+  stacked_results_out: "${matched_exposure_out_dir}/stacked_did_results.parquet"
+  diagnostics_out: "${matched_exposure_out_dir}/design_diagnostics.json"
+
+matched_exposure_design:
+  base_shift_share_config_path: "{root}/h1bworkers/code/configs/company_shift_share_apr2026.yaml"
+  base_source_config_path: "{root}/h1bworkers/code/configs/company_shift_share_exposure_event_study.yaml"
+
+  data_min_t: 2010
+  data_max_t: 2022
+  source_flow_year_min: 2010
+  source_flow_year_max: 2022
+  share_year_min: 2010
+  share_year_max: 2013
+  share_robustness_windows:
+    - [2010, 2011]
+    - [2012, 2013]
+    - [2010, 2013]
+
+  school_sample_window_start: 2014
+  school_sample_window_end: 2017
+  event_shock_pre_years: 2
+  event_shock_post_years: 2
+  reuse_cached_wrds_universe_only: true
+
+  propensity_feature_year_min: 2010
+  propensity_feature_year_max: 2013
+  propensity_target_year_min: 2016
+  propensity_target_year_max: 2022
+  propensity_model_method: "logit"
+  propensity_entry_mode: "continuous"
+  propensity_ntiles: 2
+  logit_class_weight: "balanced"
+  leaveout_enabled: true
+  leaveout_share: 0.25
+  leaveout_seed: 42
+  training_sample_mode: "preferred_plus_outside_negatives"
+  feature_sample_seed: 42
+  x_source_col: "any_opt_hires_correction_aware"
+
+  propensity_design: "treatment_propensity" # options: opt_takeup or treatment_propensity
+  include_outside_negative_controls: true
+  caliper_sd_multiplier: 0.2
+  matching_algorithm: "optimal_max_cardinality_min_cost"
+  matching_size_feature: "match_firm_size_pre_level"
+  matching_growth_feature: "match_firm_size_pre_growth"
+  matching_users_feature: "company_n_users_log1p"
+  matching_coverage_feature: "firm_size_annual_pre_n_years"
+  matching_coverage_rule: "full_pre_coverage"
+  matching_size_weight: 0.35
+  matching_growth_weight: 0.35
+  matching_users_weight: 0.20
+  matching_progress_every: 250
+  write_analysis_reports: true
+  analysis_top_balance_rows: 20
+  reuse_saved_analysis_outputs: false
+  reuse_saved_matching_outputs: false
+  high_exposure_quantile: 0.75
+  low_exposure_quantile: 0.25
+  high_exposure_metric: "max_z"
+  low_exposure_metric: "max_z"
+
+  event_year: 2015
+  ref_year: 2014
+
+  trajectory_specs:
+    # - name: "pre_policy"
+    #   start: 2010
+    #   end: 2015
+    #   run_matching: true
+    #   run_regressions: true
+    - name: "full_path"
+      start: 2010
+      end: 2022
+      run_matching: true
+      run_regressions: true
+
+  stacked_min_cohort_year: 2013
+  stacked_max_cohort_year: 2016
+  stacked_pre_years: 3
+  stacked_post_years: 3
+  stacked_min_positive_years_in_forward_window: 2
+
+  outcome_cols:
+    - "x_bin_any_nonzero"
+    - "any_opt_hires_correction_aware"
+    - "log1p_y_cst_lag0"
+    - "log1p_y_cst_foreign_lag0"
+    - "log1p_y_cst_native_lag0"
+    - "log1p_y_new_hires_lag0"
+    - "log1p_y_new_hires_foreign_lag0"
+    - "log1p_y_new_hires_native_lag0"
+
+  force_rebuild_inputs: false
+
+testing:
+  enabled: false
+  output_suffix: "_testing"

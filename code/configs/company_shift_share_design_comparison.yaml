@@ -1,0 +1,66 @@
+company_shift_share_design_comparison_out_dir: "{root}/data/out/company_shift_share_apr2026/design_comparison"
+
+paths:
+  out_dir: "${company_shift_share_design_comparison_out_dir}"
+  shift_share_analysis_panel: "{root}/data/out/company_shift_share/apr2026/analysis_panel.parquet"
+
+design_comparison:
+  force_rebuild_base: false
+  # When true and force_rebuild_base=false, read existing source/feature/WRDS/model
+  # parquet caches directly and fail if missing instead of letting lower-level
+  # load_or_build helpers rebuild WRDS-derived artifacts after metadata checks.
+  trust_existing_base_caches: true
+  reuse_prepared_panels: true
+  memory_cache: true
+  write_prepared_panels: true
+  verbose: true
+  show_figures: false
+
+  unit: firm
+  local_market_col: company_metro_feature
+  first_stage_type: ols_binary
+  exclude_size_year_fe: true
+  ppml_first_stage_fallback_to_firm_year_fe: true
+
+  source_config_path: "{root}/h1bworkers/code/configs/company_shift_share_exposure_event_study.yaml"
+  matched_config_path: "{root}/h1bworkers/code/configs/company_shift_share_matched_exposure_design.yaml"
+
+  baseline_start: 2010
+  baseline_end: 2013
+  data_min_t: 2010
+  data_max_t: 2022
+  min_pre_avg_employment: 0
+
+  use_log_outcome: true
+  use_log_tenure_outcome: false
+  baseline_size_bins: 10
+  baseline_growth_bins: 5
+
+  dynamic_horizon_start: -4
+  dynamic_horizon_end: 5
+  shift_share_start_t: 2013
+  shift_share_enforce_balanced_panel: true
+  shift_share_fe_baseline_start: 2008
+  shift_share_fe_baseline_end: 2013
+  event_year: 2016
+  event_ref_year: 2014
+
+  stacked_min_cohort_year: 2013
+  stacked_max_cohort_year: 2016
+  stacked_pre_years: 3
+  stacked_post_years: 3
+  stacked_ref_event_time: -1
+  stacked_min_event_jump: 1.0e-9
+
+  outcome_cols:
+    - y_cst_lag0
+    - y_new_hires_lag0
+    - y_new_hires_foreign_lag0
+    - y_new_hires_native_lag0
+    - avg_tenure_years_lag0
+
+  shift_share_instrument_variants:
+    ihmp_levels: z_ct
+    ihmp_share_levels: z_ct_ihmp_share
+    ihmp_levels_ar_residual: z_ct_flow_ar_resid
+    ihmp_share_ar_residual: z_ct_ihmp_share_ar_resid

@@ -73,3 +73,21 @@ def get_cfg_section(cfg: dict[str, Any], name: str) -> dict[str, Any]:
     if not isinstance(section, dict):
         raise ValueError(f"Config section '{name}' must be a mapping.")
     return section
+
+
+def get_testing_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    return get_cfg_section(cfg, "testing")
+
+
+def testing_enabled(cfg: dict[str, Any]) -> bool:
+    return bool(get_testing_cfg(cfg).get("enabled", False))
+
+
+def apply_testing_output_suffix(path: Path, cfg: dict[str, Any]) -> Path:
+    testing_cfg = get_testing_cfg(cfg)
+    if not bool(testing_cfg.get("enabled", False)):
+        return path
+    suffix = str(testing_cfg.get("output_suffix", "")).strip()
+    if not suffix or suffix.lower() in {"none", "null"}:
+        return path
+    return path.with_name(f"{path.stem}{suffix}{path.suffix}")

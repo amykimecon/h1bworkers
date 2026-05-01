@@ -1,0 +1,121 @@
+# Minimal config for the source-only OPT exposure workflow.
+#
+# Run with:
+#   python -m company_shift_share.exposure_event_study \
+#     --config configs/company_shift_share_exposure_event_study.yaml
+#
+# This config deliberately excludes downstream build_company_shift_share outputs.
+
+int_dir: "{root}/data/int"
+company_shift_share_out_dir: "{root}/data/out/company_shift_share_apr2026_lpm_rerun_20260420"
+
+paths:
+  foia_sevp_with_person_id_employment_corrected: "${int_dir}/foia_sevp_with_person_id_employment_corrected.parquet"
+  employer_crosswalk: "${int_dir}/int_files_feb2026/f1_employer_final_crosswalk.parquet"
+  preferred_rcids: "${int_dir}/int_files_feb2026/f1_preferred_rcids_multi_year.parquet"
+  revelio_company_mapping: "${int_dir}/int_files_feb2026/revelio_company_mapping_full.parquet"
+  f1_inst_unitid_crosswalk: "${int_dir}/int_files_feb2026/f1_inst_unitid_crosswalk.parquet"
+  revelio_ipeds_foia_inst_crosswalk: "${int_dir}/int_files_feb2026/revelio_ipeds_foia_inst_crosswalk.parquet"
+  revelio_inst_deterministic_map: "{root}/data/della_import/deterministic_candidate_map_apr2026_f1merge_v2.parquet"
+  revelio_ref_inst_catalog: "{root}/data/della_import/ref_inst_catalog_apr2026_f1merge_v2.parquet"
+
+  source_opt_counts_out: "${company_shift_share_out_dir}/source_opt_counts.parquet"
+  school_opt_benchmark_out: "${company_shift_share_out_dir}/school_opt_benchmark.parquet"
+  opt_exposure_analysis_panel_out: "${company_shift_share_out_dir}/opt_exposure_analysis_panel.parquet"
+  company_features_out: "${company_shift_share_out_dir}/company_features.parquet"
+  outside_negative_sample_out: "${company_shift_share_out_dir}/outside_negative_sample.parquet"
+  wrds_company_year_workforce_out: "${company_shift_share_out_dir}/wrds_company_year_workforce.parquet"
+  wrds_school_flows_out: "${company_shift_share_out_dir}/wrds_school_flows.parquet"
+  opt_probability_index_out: "${company_shift_share_out_dir}/opt_probability_index.parquet"
+
+revelio_company_features:
+  wrds_username: "amykimecon"
+
+  feature_year_min: 2010
+  feature_year_max: 2015
+
+  outside_negative_ratio: 1.0
+  outside_negative_seed: 42
+  outside_negative_min_n_users: 10
+
+  wrds_rcid_batch_size: 50
+  wrds_large_firm_n_users_threshold: 75000
+  wrds_large_firm_year_span: 1
+  wrds_workforce_include_education_features: true
+  query_timeout_minutes: 10
+  wrds_singleton_query_timeout_minutes: 60
+  query_max_retries: 1
+  min_position_days: 365
+  tenure_min_days: 365
+
+testing:
+  enabled: false
+  verbose: true
+  random_seed: 42
+  output_suffix: "_testing"
+
+  analysis_sample_n: 20
+  analysis_sample_year_min: 2010
+  analysis_sample_year_max: 2015
+  analysis_min_post2016_positive: 15
+  analysis_min_post2016_nonpositive: 15
+
+  model_max_active_features: null
+  model_max_feature_to_train_ratio: 0.75
+  feature_sample_seed: 42
+
+  diagnostics_top_n: 25
+  predictive_n_bins: 8
+
+exposure_event_study:
+  exposure_version: "opt_probability_index"
+
+  exposure_year_min: 2010
+  exposure_year_max: 2015
+  feature_year_min: 2010
+  feature_year_max: 2015
+
+  target_year_min: 2016
+  target_year_max: 2022
+
+
+  index_model_method: "lpm" # can be lpm, lasso, or random_forest
+  index_entry_mode: "ntiles"
+  lasso_cv_folds: 3
+  lasso_n_cs: 10
+
+  leaveout_enabled: true
+  leaveout_share: 0.25
+  leaveout_seed: 42
+
+  rf_n_estimators: 500
+  rf_max_depth: null
+  rf_min_samples_leaf: 10
+  rf_min_samples_split: 20
+
+  force_rebuild_company_features: false
+  force_rebuild_source_analysis_panel: false
+
+  ntiles: 2
+  diagnostics_top_n: 12
+  predictive_n_bins: 10
+
+  event_year: 2016
+  ref_year: 2015
+  data_min_t: 2010
+  data_max_t: 2022
+
+  x_source_col: "any_opt_hires_correction_aware"
+
+  outcome_cols:
+    - "x_bin_any_nonzero"
+    - "any_opt_hires_correction_aware"
+    - "log1p_y_cst_lag0"
+    - "log1p_y_cst_foreign_lag0"
+    - "log1p_y_cst_native_lag0"
+    - "log1p_y_new_hires_lag0"
+    - "log1p_y_new_hires_foreign_lag0"
+    - "log1p_y_new_hires_native_lag0"
+
+  slides_out_dir: "{root}/h1bworkers/output/slides/slides_20260507_lpm_rerun_20260420"
+  log_out_path: "${company_shift_share_out_dir}/exposure_event_study_full_log.txt"
