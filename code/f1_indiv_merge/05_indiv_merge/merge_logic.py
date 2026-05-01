@@ -77,6 +77,7 @@ from employer_entity_sql import (  # noqa: E402
     sql_state_name_to_abbr_expr,
 )
 from helpers import cip_code_to_cip4_sql, field_clean_to_cip4_sql  # noqa: E402
+from src.duckdb_runtime import get_duckdb_memory_limit_sql_literal  # noqa: E402
 
 try:  # noqa: E402
     import f1_foia.econ_relabels_opt_usage as relabel_base
@@ -175,7 +176,7 @@ def _create_duckdb_temp_dir() -> Path:
 
 def _configure_duckdb_runtime(con):
     con.execute("SET threads = 8")
-    con.execute("SET memory_limit = '48GB'")
+    con.execute(f"SET memory_limit = '{get_duckdb_memory_limit_sql_literal()}'")
     temp_dir = _create_duckdb_temp_dir()
     weakref.finalize(con, _cleanup_duckdb_temp_dir, temp_dir)
     escaped_temp_dir = str(temp_dir).replace("'", "''")
@@ -938,22 +939,34 @@ def materialize_table(table_name: str, query: str, con=con_f1) -> int:
     return n
 
 
+def _atomic_tmp_path(path: str | Path) -> Path:
+    out_path = Path(path)
+    return out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
+
+
 def write_query_to_parquet(query: str, out_path: str, overwrite: bool = False, con=con_f1) -> None:
     t0 = time.perf_counter()
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    if os.path.exists(out_path):
-        if os.path.getsize(out_path) == 0:
-            print(f"  Removing empty file: {out_path}")
-            os.remove(out_path)
+    final_path = Path(out_path)
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    if final_path.exists():
+        if final_path.stat().st_size == 0:
+            print(f"  Removing empty file: {final_path}")
+            final_path.unlink()
         elif not overwrite:
-            print(f"  Skipping (exists): {out_path}")
+            print(f"  Skipping (exists): {final_path}")
             return
-        else:
-            os.remove(out_path)
-    esc = _sql_escape_path(out_path)
-    con.sql(f"COPY ({query}) TO '{esc}' (FORMAT parquet)")
+    tmp_path = _atomic_tmp_path(final_path)
+    if tmp_path.exists():
+        tmp_path.unlink()
+    try:
+        esc = _sql_escape_path(str(tmp_path))
+        con.sql(f"COPY ({query}) TO '{esc}' (FORMAT parquet)")
+        tmp_path.replace(final_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
     elapsed = time.perf_counter() - t0
-    print(f"  Wrote: {out_path} ({_fmt_elapsed(elapsed)})")
+    print(f"  Wrote: {final_path} ({_fmt_elapsed(elapsed)})")
 
 
 def _relabel_sample_cache_is_usable(
@@ -3507,7 +3520,10 @@ def _solve_individual_assignment(
             .reset_index(drop=True)
         )
 
-    from scipy.optimize import linear_sum_assignment
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import min_weight_full_bipartite_matching
+
+    dummy_cost = 1e-12
 
     person_to_users: dict[int, set[int]] = {}
     user_to_persons: dict[int, set[int]] = {}
@@ -3558,19 +3574,38 @@ def _solve_individual_assignment(
         users = sorted(comp_users)
         p_idx = {pid: i for i, pid in enumerate(people)}
         u_idx = {uid: j for j, uid in enumerate(users)}
-        cost = np.zeros((len(people), len(users)))
+        row_idx: list[int] = []
+        col_idx: list[int] = []
+        data: list[float] = []
 
         for pid in people:
+            person_index = p_idx[pid]
             for uid in person_to_users.get(pid, ()):
                 if uid not in u_idx:
                     continue
                 row = pair_lookup[(pid, uid)]
-                score = float(max(row["person_score_sum"], 0.0))
-                cost[p_idx[pid], u_idx[uid]] = -score
+                raw_score = row.get("person_score_sum")
+                score = float(raw_score) if pd.notna(raw_score) else 0.0
+                if not np.isfinite(score) or score <= 0.0:
+                    continue
+                row_idx.append(person_index)
+                col_idx.append(u_idx[uid])
+                data.append(-score)
 
-        row_ind, col_ind = linear_sum_assignment(cost)
+            # Give every person one private dummy column so leaving them unmatched
+            # stays feasible without expanding to a dense people x users matrix.
+            row_idx.append(person_index)
+            col_idx.append(len(users) + person_index)
+            data.append(dummy_cost)
+
+        cost = coo_matrix(
+            (np.asarray(data, dtype=np.float64), (np.asarray(row_idx), np.asarray(col_idx))),
+            shape=(len(people), len(users) + len(people)),
+        ).tocsr()
+
+        row_ind, col_ind = min_weight_full_bipartite_matching(cost)
         for r, c in zip(row_ind, col_ind):
-            if cost[r, c] >= 0:
+            if c >= len(users):
                 continue
             pid = people[r]
             uid = users[c]

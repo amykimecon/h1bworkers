@@ -23,6 +23,7 @@ for _path in (PIPELINE_ROOT, REPO_ROOT):
 
 from config import root  # noqa: E402
 from helpers import fullname_clean_regex_sql  # noqa: E402
+from src.duckdb_runtime import get_duckdb_memory_limit_sql_literal  # noqa: E402
 
 ANGLO_COUNTRIES = (
     "United States",
@@ -176,7 +177,7 @@ def _cleanup_duckdb_temp_dir(path: str | Path) -> None:
 def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
     con.execute(f"SET threads = {min(8, max(1, os.cpu_count() or 1))}")
-    con.execute("SET memory_limit = '48GB'")
+    con.execute(f"SET memory_limit = '{get_duckdb_memory_limit_sql_literal()}'")
     con.execute("SET preserve_insertion_order = false")
     temp_root = Path(root) / ".tmp" / "f1_indiv_merge_duckdb"
     temp_root.mkdir(parents=True, exist_ok=True)

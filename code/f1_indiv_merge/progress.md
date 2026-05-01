@@ -59,6 +59,6 @@
 > **Rerun if:** any upstream stage output changes, merge scoring logic changes, or the
 > current legacy-wrapper behavior changes.
 
-| Stage            | Status | Completed at     | By     | Duration | Notes                                                                                                        |
-| -----------------|--------|------------------|--------|----------|------------------------------------------------------------------------------------------------------------- |
-| `05_indiv_merge` | ✓      | 2026-04-16 11:00 | yk0581 | 4m 32s   | Implemented locally; now reads pipeline.yaml + stage-03/04 artifacts, but still needs a full real-data rerun |
+| Stage            | Status | Completed at     | By     | Duration   | Notes                                                                                                        |
+| -----------------|--------|------------------|--------|------------|------------------------------------------------------------------------------------------------------------- |
+| `05_indiv_merge` | ✓      | 2026-04-18 02:37 | yk0581 | 3h 52m 57s | Implemented locally; now reads pipeline.yaml + stage-03/04 artifacts, but still needs a full real-data rerun |

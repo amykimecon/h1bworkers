@@ -144,6 +144,21 @@ def _build_shard_output_paths(
     }
 
 
+def _fail_if_existing_outputs(
+    paths: list[str | Path],
+    *,
+    overwrite: bool,
+    context: str,
+) -> None:
+    if overwrite:
+        return
+    existing = [str(Path(path)) for path in paths if Path(path).exists()]
+    if existing:
+        raise FileExistsError(
+            f"{context} would skip existing outputs because build.overwrite=false: {existing}"
+        )
+
+
 def _read_parquet_list_sql(paths: list[str | Path]) -> str:
     escaped = ", ".join(f"'{_escape(path)}'" for path in paths)
     return f"read_parquet([{escaped}])"
@@ -666,6 +681,19 @@ def _merge_stage05_sharded_outputs(
             raise FileNotFoundError(
                 f"Cannot merge `{label}` because some shard outputs are missing: {missing}"
             )
+    _fail_if_existing_outputs(
+        [
+            stage_cfg["baseline_parquet"],
+            stage_cfg["mult2_parquet"],
+            stage_cfg["mult4_parquet"],
+            stage_cfg["mult6_parquet"],
+            stage_cfg["strict_parquet"],
+            stage_cfg["person_baseline_parquet"],
+            stage_cfg["person_strict_parquet"],
+        ],
+        overwrite=overwrite,
+        context=f"{STAGE_NAME} shard merge",
+    )
 
     con = merge_module.get_duckdb_connection()
     try:
@@ -733,6 +761,11 @@ def run(
 
     print(f"Pipeline config: {cfg_loader.ACTIVE_CONFIG_PATH}")
     merge_cfg, merge_module = _load_local_merge_modules(effective_config_path)
+    _fail_if_existing_outputs(
+        list(shard_output_paths.values()) if shard_output_paths else [],
+        overwrite=bool(merge_cfg.BUILD_OVERWRITE),
+        context=f"{STAGE_NAME} shard run",
+    )
 
     if run_merge:
         print(f"[{STAGE_NAME}] Building merge outputs (testing={testing_enabled})")

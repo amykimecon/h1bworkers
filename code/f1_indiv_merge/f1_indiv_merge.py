@@ -70,6 +70,7 @@ from employer_entity_sql import (  # noqa: E402
     sql_state_name_to_abbr_expr,
 )
 from helpers import field_clean_to_cip2_sql  # noqa: E402
+from src.duckdb_runtime import get_duckdb_memory_limit_sql_literal  # noqa: E402
 
 # Flush progress output immediately so redirected logs stay live.
 print = partial(_print, flush=True)
@@ -153,7 +154,7 @@ def _configure_duckdb_runtime(con):
     con.execute("SET threads = 8")
     # Use home filesystem for temp (has ~40TB free); /tmp is a tiny 7.8GB partition
     con.execute("SET temp_directory = '/home/yk0581/tmp/duckdb_f1_merge'")
-    con.execute("SET memory_limit = '48GB'")
+    con.execute(f"SET memory_limit = '{get_duckdb_memory_limit_sql_literal()}'")
     # initcap (capitalize first letter of each word) is absent in DuckDB 1.2.x
     con.create_function("initcap", lambda s: s.title() if s else s, [str], str)
 

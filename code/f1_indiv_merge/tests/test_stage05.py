@@ -262,11 +262,18 @@ class Stage05Tests(unittest.TestCase):
             "legacy_indiv": legacy_indiv_path,
         }
 
-    def _write_config(self, tempdir: Path, inputs: dict[str, Path], *, use_stage4_indiv: bool) -> Path:
+    def _write_config(
+        self,
+        tempdir: Path,
+        inputs: dict[str, Path],
+        *,
+        use_stage4_indiv: bool,
+        overwrite: bool = True,
+    ) -> Path:
         cfg = {
             "run_tag": "test",
             "build": {
-                "overwrite": True,
+                "overwrite": overwrite,
                 "default_stages": ["05_indiv_merge"],
                 "stop_on_deferred_stage": True,
                 "allow_legacy_fallbacks": True,
@@ -693,6 +700,63 @@ class Stage05Tests(unittest.TestCase):
             self.assertEqual(baseline["spell_id"].nunique(), 2)
             self.assertEqual(mult2["spell_id"].nunique(), 2)
 
+    def test_stage05_global_assignment_allows_unmatched_people_when_user_supply_is_smaller(self) -> None:
+        con = duckdb.connect()
+        try:
+            pairs_df = pd.DataFrame(
+                [
+                    {
+                        "person_id": 1,
+                        "user_id": 10,
+                        "person_score_sum": 10.0,
+                        "n_evidence_units": 2,
+                        "n_spell_matches": 2,
+                        "total_emp_matches": 1,
+                        "has_employer_match_ind": 1,
+                        "person_weight_norm": 0.95,
+                        "person_match_rank": 1,
+                    },
+                    {
+                        "person_id": 2,
+                        "user_id": 10,
+                        "person_score_sum": 9.0,
+                        "n_evidence_units": 1,
+                        "n_spell_matches": 1,
+                        "total_emp_matches": 1,
+                        "has_employer_match_ind": 1,
+                        "person_weight_norm": 0.90,
+                        "person_match_rank": 1,
+                    },
+                    {
+                        "person_id": 3,
+                        "user_id": 20,
+                        "person_score_sum": 8.0,
+                        "n_evidence_units": 1,
+                        "n_spell_matches": 1,
+                        "total_emp_matches": 0,
+                        "has_employer_match_ind": 0,
+                        "person_weight_norm": 0.85,
+                        "person_match_rank": 1,
+                    },
+                ]
+            )
+            con.register("_person_pairs_py", pairs_df)
+            con.execute("CREATE TABLE _person_pairs AS SELECT * FROM _person_pairs_py")
+
+            assigned = merge_logic._solve_individual_assignment(
+                con,
+                "_person_pairs",
+                enforce_one_to_one=True,
+            )
+
+            assignment = {
+                int(row["person_id"]): int(row["user_id"])
+                for _, row in assigned.iterrows()
+            }
+            self.assertEqual(assignment, {1: 10, 3: 20})
+        finally:
+            con.close()
+
     def test_stage05_shard_person_agg_preserves_multi_spell_person_totals(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir_str:
             tempdir = Path(tempdir_str)
@@ -856,6 +920,58 @@ class Stage05Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "0 <= person_shard_id < person_shard_count"):
                 stage_main.run(config_path=cfg_path, testing=False, shard_count=2, shard_id=2)
 
+    def test_stage05_shard_run_rejects_existing_outputs_when_overwrite_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_str:
+            tempdir = Path(tempdir_str)
+            inputs = self._write_fixture_inputs(tempdir)
+            cfg_path = self._write_config(
+                tempdir,
+                inputs,
+                use_stage4_indiv=True,
+                overwrite=False,
+            )
+
+            shard_paths = self._shard_artifact_paths(cfg_path, shard_count=2, shard_id=1)
+            shard_paths["baseline"].parent.mkdir(parents=True, exist_ok=True)
+            shard_paths["baseline"].write_bytes(b"stale shard output")
+
+            with self.assertRaisesRegex(FileExistsError, "build.overwrite=false"):
+                stage_main.run(
+                    config_path=cfg_path,
+                    testing=False,
+                    shard_count=2,
+                    shard_id=1,
+                )
+
+    def test_stage05_merge_shards_rejects_existing_final_outputs_when_overwrite_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_str:
+            tempdir = Path(tempdir_str)
+            inputs = self._write_fixture_inputs(tempdir)
+            cfg_path = self._write_config(
+                tempdir,
+                inputs,
+                use_stage4_indiv=True,
+                overwrite=False,
+            )
+
+            for shard_id in range(2):
+                stage_main.run(
+                    config_path=cfg_path,
+                    testing=False,
+                    shard_count=2,
+                    shard_id=shard_id,
+                )
+
+            final_output = tempdir / "out" / "baseline.parquet"
+            final_output.parent.mkdir(parents=True, exist_ok=True)
+            final_output.write_bytes(b"existing final output")
+
+            with self.assertRaisesRegex(FileExistsError, "build.overwrite=false"):
+                stage_main._merge_stage05_sharded_outputs(
+                    config_path=cfg_path,
+                    shard_count=2,
+                )
+
     def test_stage05_wrapper_rejects_forwarded_shard_management_flags(self) -> None:
         script_path = PIPELINE_ROOT / "05_indiv_merge" / "run_stage05_shards.sh"
         result = subprocess.run(
@@ -874,6 +990,40 @@ class Stage05Tests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("wrapper-managed flag forwarded via stage_main args: --merge-shards", result.stderr)
+
+    def test_stage05_wrapper_runs_parallel_shards_and_merges(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_str:
+            tempdir = Path(tempdir_str)
+            inputs = self._write_fixture_inputs(tempdir)
+            cfg_path = self._write_config(tempdir, inputs, use_stage4_indiv=True)
+            script_path = PIPELINE_ROOT / "05_indiv_merge" / "run_stage05_shards.sh"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(script_path),
+                    "--config",
+                    str(cfg_path),
+                    "--shard-count",
+                    "2",
+                    "--max-parallel",
+                    "2",
+                    "--log-dir",
+                    str(tempdir / "logs"),
+                    "--",
+                    "--no-testing",
+                ],
+                cwd=PIPELINE_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}",
+            )
+            self._assert_outputs(tempdir)
 
     def test_stage05_audit_person_candidates_prints_raw_candidates_before_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir_str:

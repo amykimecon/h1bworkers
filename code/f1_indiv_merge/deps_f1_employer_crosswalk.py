@@ -61,6 +61,7 @@ from employer_entity_sql import (  # noqa: E402
     sql_state_name_to_abbr_expr,
 )
 from helpers import fuzzy_join_lev_jw  # noqa: E402
+from src.duckdb_runtime import get_duckdb_memory_limit_sql_literal  # noqa: E402
 
 # Flush progress output immediately so redirected logs stay live.
 print = partial(_print, flush=True)
@@ -271,7 +272,7 @@ def build_employer_crosswalk(overwrite: bool = None, do_fuzzy: bool | None = Non
     if con is None:
         con = duckdb.connect()
         con.execute("SET threads = 8")
-        con.execute("SET memory_limit = '48GB'")
+        con.execute(f"SET memory_limit = '{get_duckdb_memory_limit_sql_literal()}'")
 
     crosswalk_path = cfg.F1_EMPLOYER_ENTITY_CROSSWALK_PARQUET
     rev_pos_path = cfg.choose_path(cfg.REV_POS_PARQUET, cfg.REV_POS_PARQUET_LEGACY)
