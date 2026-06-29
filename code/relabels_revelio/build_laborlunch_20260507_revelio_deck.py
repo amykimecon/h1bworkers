@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """Populate the Revelio figures used in slides_laborlunch_20260507 and rebuild the PDF.
 
-This wrapper runs three relabel_indiv_analysis jobs:
+This wrapper runs four relabel_indiv_analysis jobs:
 1. Main deck figures: econ_v2, no controls, main config output dir.
-2. Appendix controlled figures: econ_v2, slide-controls output dir.
-3. Appendix no-control figures: econ_v2, slide-nocontrols output dir.
+2. Always-STEM button figures: generalized full sample, always-STEM controls.
+3. Appendix controlled figures: econ_v2, slide-controls output dir.
+4. Appendix no-control figures: econ_v2, slide-nocontrols output dir.
 
 It then rebuilds the slide deck with pdflatex twice.
 """
@@ -35,6 +36,7 @@ DEFAULT_MAIN_CONFIG = CODE_ROOT / "configs" / "relabel_indiv.yaml"
 DEFAULT_CONTROLS_TEMPLATE = TMP_ROOT / "relabel_indiv_slides_controls.yaml"
 DEFAULT_ECON_TEMPLATE = TMP_ROOT / "relabel_indiv_slides_nocontrols.yaml"
 DEFAULT_TEX = HOME / "writing" / "slides" / "slides_laborlunch_20260507" / "slides_laborlunch_20260507.tex"
+DEFAULT_ALWAYS_STEM_OUTPUT_DIR = HOME / "output" / "relabel_indiv_always_stem"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -68,10 +70,12 @@ def _materialize_configs(
     econ_template: Path,
     main_did_sample: str,
     control_group: str,
+    always_stem_output_dir: Path,
 ) -> dict[str, Path]:
     main_cfg = _load_yaml(main_template)
     controls_cfg = _load_yaml(controls_template)
     econ_cfg = _load_yaml(econ_template)
+    always_stem_cfg = _load_yaml(main_template)
 
     event_source_mode = "generalized_final_sample" if main_did_sample == "full_sample" else "econ_v2"
     sample_cip_prefixes = [] if event_source_mode == "generalized_final_sample" else ["4506"]
@@ -89,14 +93,40 @@ def _materialize_configs(
             str(generalized_panel),
         )
 
+    _set_nested(always_stem_cfg, ("build", "event_source_mode"), "generalized_final_sample")
+    _set_nested(always_stem_cfg, ("build", "control_group"), "always_stem")
+    _set_nested(always_stem_cfg, ("build", "outcome_horizons"), PREFERRED_REVELIO_HORIZONS)
+    _set_nested(always_stem_cfg, ("build", "did_plot_mode"), "pooled_post_by_horizon")
+    _set_nested(always_stem_cfg, ("build", "pooled_post_event_min"), REVELIO_POOLED_POST_EVENT_MIN)
+    _set_nested(always_stem_cfg, ("build", "pooled_post_event_max"), REVELIO_POOLED_POST_EVENT_MAX)
+    _set_nested(always_stem_cfg, ("build", "sample_cip_prefixes"), [])
+    _set_nested(
+        always_stem_cfg,
+        ("paths", "generalized_relabels_panel_parquet"),
+        str(generalized_panel),
+    )
+    _set_nested(always_stem_cfg, ("paths", "output_dir"), str(always_stem_output_dir))
+    _set_nested(
+        always_stem_cfg,
+        ("paths", "output_panel_parquet"),
+        str(HOME / "data" / "int" / "relabel_indiv_panel_laborlunch_20260507_always_stem.parquet"),
+    )
+    _set_nested(
+        always_stem_cfg,
+        ("paths", "output_did_results_parquet"),
+        str(HOME / "data" / "int" / "relabel_indiv_did_laborlunch_20260507_always_stem.parquet"),
+    )
+
     out_paths = {
         "main_econ": TMP_ROOT / "relabel_indiv_laborlunch_20260507_main_econ.yaml",
         "controls_econ": TMP_ROOT / "relabel_indiv_laborlunch_20260507_controls_econ.yaml",
         "econ_appendix": TMP_ROOT / "relabel_indiv_laborlunch_20260507_econ_appendix.yaml",
+        "always_stem": TMP_ROOT / "relabel_indiv_laborlunch_20260507_always_stem.yaml",
     }
     _write_yaml(out_paths["main_econ"], main_cfg)
     _write_yaml(out_paths["controls_econ"], controls_cfg)
     _write_yaml(out_paths["econ_appendix"], econ_cfg)
+    _write_yaml(out_paths["always_stem"], always_stem_cfg)
     return out_paths
 
 
@@ -166,6 +196,12 @@ def parse_args() -> argparse.Namespace:
         help="Control group for generalized full-sample Revelio runs.",
     )
     parser.add_argument(
+        "--always-stem-output-dir",
+        type=Path,
+        default=DEFAULT_ALWAYS_STEM_OUTPUT_DIR,
+        help="Output directory for always-STEM Revelio button figures.",
+    )
+    parser.add_argument(
         "--tex",
         type=Path,
         default=DEFAULT_TEX,
@@ -194,6 +230,7 @@ def main() -> None:
         econ_template=args.econ_config_template,
         main_did_sample=args.main_did_sample,
         control_group=args.control_group,
+        always_stem_output_dir=args.always_stem_output_dir,
     )
 
     print("Generated run configs:")
@@ -201,6 +238,7 @@ def main() -> None:
         print(f"  {key}: {path}")
 
     _run_analysis(configs["main_econ"])
+    _run_analysis(configs["always_stem"])
     _run_analysis(configs["controls_econ"])
     _run_analysis(configs["econ_appendix"])
 

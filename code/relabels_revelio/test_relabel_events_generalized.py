@@ -509,6 +509,33 @@ class GeneralizedRelabelEventTests(unittest.TestCase):
         self.assertEqual(set(finance["source_cips"]), {"520801"})
         self.assertEqual(set(finance["target_cips"]), {"270501"})
 
+    def test_pair_control_cip_rows_expands_always_stem_control_cip2(self) -> None:
+        matched_pairs = pd.DataFrame(
+            [
+                {
+                    "pair_id": 1,
+                    "control_group": generalized.CONTROL_GROUP_ALWAYS_STEM,
+                    "control_cip6": "110101",
+                    "control_cip2": "11",
+                    "broad_pair_bin": "econ_to_quant_econ",
+                }
+            ]
+        )
+        always_stem_cips = pd.DataFrame(
+            {
+                "control_cip6": ["110101", "110701", "140101"],
+                "control_cip2": ["11", "11", "14"],
+            }
+        )
+
+        rows = generalized._pair_control_cip_rows(
+            matched_pairs,
+            generalized.build_broad_bin_membership(["450601", "450603"]),
+            always_stem_cips=always_stem_cips,
+        )
+
+        self.assertEqual(set(rows["cip6"].tolist()), {"110101", "110701"})
+
     def test_derive_allowable_pair_configs_dedupes_candidate_families(self) -> None:
         candidates = pd.DataFrame(
             [
@@ -850,6 +877,45 @@ class GeneralizedRelabelEventTests(unittest.TestCase):
         self.assertEqual(int(control_t0["n_rows"]), 2)
         self.assertEqual(int(control_t0["n_units"]), 2)
 
+    def test_laborlunch_event_time_axis_relabels_without_shifting_points(self) -> None:
+        rows = pd.DataFrame(
+            {
+                "event_t": [-5, -2, 0, 4],
+                "coef": [-0.1, 0.0, 0.2, 0.3],
+                "se": [0.02, 0.0, 0.04, 0.05],
+                "reference_event_t": [-2, -2, -2, -2],
+            }
+        )
+        captured: dict[str, object] = {}
+
+        def fake_save(fig: plt.Figure, path: Path) -> None:
+            captured["ax"] = fig.axes[0]
+            captured["path"] = Path(path)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(generalized, "_save_figure", side_effect=fake_save):
+            out_path = generalized.plot_did_event_study_generalized(
+                rows,
+                yvar="opt_share",
+                degree_type="Pooled",
+                out_dir=tmp,
+            )
+
+            self.assertIsNotNone(out_path)
+            ax = captured["ax"]
+            self.assertEqual(
+                [label.get_text() for label in ax.get_xticklabels()],
+                ["-4", "-3", "-2", "-1", "0", "1", "2", "3", "4", "5"],
+            )
+            vertical_line_x = [
+                float(xdata[0])
+                for line in ax.lines
+                for xdata in [list(line.get_xdata())]
+                if len(xdata) == 2 and float(xdata[0]) == float(xdata[1])
+            ]
+            self.assertIn(generalized.LABORLUNCH_DI_D_EVENT_LINE_X, vertical_line_x)
+            self.assertEqual([float(x) for x in ax.lines[0].get_xdata()], [-5.0, -2.0, 0.0, 4.0])
+            self.assertEqual(pd.read_csv(Path(out_path).with_suffix(".csv"))["event_t"].tolist(), [-5, -2, 0, 4])
+
     def test_compute_did_event_study_supports_unweighted_estimation(self) -> None:
         did_panel = pd.DataFrame(
             [
@@ -1031,7 +1097,7 @@ class GeneralizedRelabelEventTests(unittest.TestCase):
             ]
             args = generalized._parse_args()
             self.assertEqual(args.foia_path, generalized.base.FOIA_PATH)
-            self.assertEqual(args.candidate_path, str(generalized.DEFAULT_CANDIDATE_PATH))
+            self.assertIsNone(args.candidate_path)
         finally:
             sys.argv = original_argv
             if original_ipykernel is None:
@@ -1540,9 +1606,9 @@ class GeneralizedRelabelEventTests(unittest.TestCase):
                     {"unitid": 100, "year": 2021, "awlevel": 7, "awlevel_group": "Master", "cipcode": 520801, "cipcode_lab": "52.0801-Finance, General", "ctotalt": 4, "cnralt": 3, "share_intl": 0.6},
                     {"unitid": 100, "year": 2022, "awlevel": 7, "awlevel_group": "Master", "cipcode": 520801, "cipcode_lab": "52.0801-Finance, General", "ctotalt": 4, "cnralt": 3, "share_intl": 0.6},
                     {"unitid": 100, "year": 2023, "awlevel": 7, "awlevel_group": "Master", "cipcode": 520801, "cipcode_lab": "52.0801-Finance, General", "ctotalt": 4, "cnralt": 3, "share_intl": 0.6},
-                    {"unitid": 100, "year": 2021, "awlevel": 7, "awlevel_group": "Master", "cipcode": 270301, "cipcode_lab": "27.0301-Applied Mathematics, General", "ctotalt": 18, "cnralt": 11, "share_intl": 0.7},
-                    {"unitid": 100, "year": 2022, "awlevel": 7, "awlevel_group": "Master", "cipcode": 270301, "cipcode_lab": "27.0301-Applied Mathematics, General", "ctotalt": 18, "cnralt": 11, "share_intl": 0.7},
-                    {"unitid": 100, "year": 2023, "awlevel": 7, "awlevel_group": "Master", "cipcode": 270301, "cipcode_lab": "27.0301-Applied Mathematics, General", "ctotalt": 18, "cnralt": 11, "share_intl": 0.7},
+                    {"unitid": 100, "year": 2021, "awlevel": 7, "awlevel_group": "Master", "cipcode": 270501, "cipcode_lab": "27.0501-Statistics, General", "ctotalt": 18, "cnralt": 11, "share_intl": 0.7},
+                    {"unitid": 100, "year": 2022, "awlevel": 7, "awlevel_group": "Master", "cipcode": 270501, "cipcode_lab": "27.0501-Statistics, General", "ctotalt": 18, "cnralt": 11, "share_intl": 0.7},
+                    {"unitid": 100, "year": 2023, "awlevel": 7, "awlevel_group": "Master", "cipcode": 270501, "cipcode_lab": "27.0501-Statistics, General", "ctotalt": 18, "cnralt": 11, "share_intl": 0.7},
                 ],
                 tmpdir,
             )
@@ -1554,8 +1620,34 @@ class GeneralizedRelabelEventTests(unittest.TestCase):
             self.assertEqual(int(events.loc[0, "unitid"]), 100)
             self.assertEqual(int(events.loc[0, "relabel_year"]), 2021)
             self.assertEqual(events.loc[0, "event_source_cip6"], "520801")
-            self.assertEqual(events.loc[0, "target_cip6"], "270301")
+            self.assertEqual(events.loc[0, "target_cip6"], "270501")
             self.assertEqual(events.loc[0, "degree_type"], "Master")
+
+    def test_detect_ipeds_relabels_uses_broad_source_aggregate_not_single_cip_drop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            ipeds_path = self._write_ipeds_fixture(
+                [
+                    {"unitid": 101, "year": 2018, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450601, "cipcode_lab": "45.0601-Economics, General", "ctotalt": 20, "cnralt": 10, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2019, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450601, "cipcode_lab": "45.0601-Economics, General", "ctotalt": 20, "cnralt": 10, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2020, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450601, "cipcode_lab": "45.0601-Economics, General", "ctotalt": 20, "cnralt": 10, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2021, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450601, "cipcode_lab": "45.0601-Economics, General", "ctotalt": 4, "cnralt": 2, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2022, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450601, "cipcode_lab": "45.0601-Economics, General", "ctotalt": 4, "cnralt": 2, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2023, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450601, "cipcode_lab": "45.0601-Economics, General", "ctotalt": 4, "cnralt": 2, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2021, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450699, "cipcode_lab": "45.0699-Economics, Other", "ctotalt": 16, "cnralt": 8, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2022, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450699, "cipcode_lab": "45.0699-Economics, Other", "ctotalt": 16, "cnralt": 8, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2023, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450699, "cipcode_lab": "45.0699-Economics, Other", "ctotalt": 16, "cnralt": 8, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2021, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450603, "cipcode_lab": "45.0603-Econometrics and Quantitative Economics", "ctotalt": 12, "cnralt": 6, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2022, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450603, "cipcode_lab": "45.0603-Econometrics and Quantitative Economics", "ctotalt": 12, "cnralt": 6, "share_intl": 0.6},
+                    {"unitid": 101, "year": 2023, "awlevel": 7, "awlevel_group": "Master", "cipcode": 450603, "cipcode_lab": "45.0603-Econometrics and Quantitative Economics", "ctotalt": 12, "cnralt": 6, "share_intl": 0.6},
+                ],
+                tmpdir,
+            )
+            con = duckdb.connect()
+
+            events = generalized.detect_ipeds_relabels(con, ipeds_path=ipeds_path)
+
+            self.assertTrue(events.empty)
 
     def test_detect_ipeds_relabels_drops_master_when_matching_phd_event_lags_2_to_4_years(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2076,7 +2168,7 @@ class GeneralizedRelabelEventTests(unittest.TestCase):
             )
 
             self.assertEqual(len(unrestricted), 1)
-            self.assertEqual(unrestricted.loc[0, "target_cip6"], "270301")
+            self.assertEqual(unrestricted.loc[0, "target_cip6"], "521301")
             self.assertEqual(len(restricted), 1)
             self.assertEqual(restricted.loc[0, "event_source_cip6"], "520201")
             self.assertEqual(restricted.loc[0, "target_cip6"], "521301")

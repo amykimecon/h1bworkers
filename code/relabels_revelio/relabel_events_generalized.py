@@ -58,6 +58,8 @@ PLOT_EVENT_MIN = -5
 PLOT_EVENT_MAX = 4
 DI_D_REFERENCE_EVENT_TIME = -2
 DI_D_EVENT_LINE_X = -0.5
+LABORLUNCH_EVENT_TIME_LABEL_SHIFT = 1
+LABORLUNCH_DI_D_EVENT_LINE_X = DI_D_EVENT_LINE_X - LABORLUNCH_EVENT_TIME_LABEL_SHIFT
 DI_D_BROAD_BIN_MARKERS = ("o", "s", "v", "^", "D", "X", "P", "*", "h", "d", ">", "<")
 DI_D_PLOT_FONT_SIZE = llstyle.AXIS_LABEL_FONT_SIZE
 DI_D_PLOT_MARKER_SIZE = llstyle.MARKER_SIZE
@@ -147,6 +149,13 @@ ALWAYS_STEM_COMPARABLE_CIP2 = {
     "26",  # Biological and Biomedical Sciences
     "40",  # Physical Sciences
 }
+
+
+def apply_laborlunch_event_time_axis(ax: Any) -> None:
+    ticks = list(range(PLOT_EVENT_MIN, PLOT_EVENT_MAX + 1))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([str(tick + LABORLUNCH_EVENT_TIME_LABEL_SHIFT) for tick in ticks])
+    ax.set_xlim(PLOT_EVENT_MIN - 0.6, PLOT_EVENT_MAX + 0.6)
 
 STRICT_THRESHOLDS: dict[str, float] = {
     "min_share_intl": 0.20,
@@ -2431,6 +2440,405 @@ def scan_ipeds_pair_candidates(
     return df.reset_index(drop=True)
 
 
+def scan_ipeds_broad_bin_candidates(
+    con: ddb.DuckDBPyConnection,
+    *,
+    ipeds_path: str | Path = base.IPEDS_PATH,
+    thresholds: dict[str, float] | None = None,
+    unitids: list[int] | None = None,
+    awlevels: list[int] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    keep_all_sources: bool = False,
+    allowed_pair_configs: list[dict[str, object]] | None = None,
+    clamp_to_analysis_window: bool = True,
+) -> pd.DataFrame:
+    thresholds = thresholds or STRICT_THRESHOLDS
+    year_min, year_max = _clamp_relabel_year_bounds(
+        year_min,
+        year_max,
+        clamp_to_analysis_window=clamp_to_analysis_window,
+    )
+    _ensure_ipeds_view(con, ipeds_path)
+    cip_map = _load_ipeds_cip_map(ipeds_path)
+    broad_membership = build_broad_bin_membership(cip_map.keys())
+    broad_source_cips = _broad_membership_rows(broad_membership, side="source")
+    broad_target_cips = _broad_membership_rows(broad_membership, side="target")
+    if broad_source_cips.empty or broad_target_cips.empty:
+        return pd.DataFrame()
+    con.register("scan_broad_source_cips_py", broad_source_cips)
+    con.register("scan_broad_target_cips_py", broad_target_cips)
+
+    data_min_year, data_max_year = _ipeds_year_bounds(con)
+    scan_year_min = int(year_min if year_min is not None else data_min_year + 1)
+    scan_year_max = int(year_max if year_max is not None else data_max_year)
+    scan_year_min = max(scan_year_min, data_min_year + 1)
+    scan_year_max = min(scan_year_max, data_max_year)
+    if scan_year_min > scan_year_max:
+        return pd.DataFrame()
+
+    unitid_filter = _int_clause(unitids, "unitid")
+    awlevel_filter = _int_clause(awlevels, "awlevel")
+    lookback_years = int(thresholds["lookback_years"])
+    lookahead_years = int(thresholds["lookahead_years"])
+    allowed_pair_filter = ""
+    allowed_pair_sql = _allowed_pair_configs_sql(
+        allowed_pair_configs,
+        source_column="sx.source_cip6",
+        target_column="tx.target_cip6",
+    )
+    if allowed_pair_sql:
+        allowed_pair_filter = f" AND {allowed_pair_sql}"
+    final_filter = "WHERE rn_unit_year >= 1" if keep_all_sources else "WHERE rn_unit_year = 1"
+
+    df = con.sql(
+        f"""
+        WITH eligible AS (
+            SELECT
+                CAST(unitid AS BIGINT) AS unitid,
+                CAST(year AS INTEGER) AS year,
+                CAST(awlevel AS INTEGER) AS awlevel,
+                COALESCE(CAST(awlevel_group AS VARCHAR), 'Other') AS awlevel_group,
+                LPAD(CAST(cipcode AS VARCHAR), 6, '0') AS cip6,
+                CAST(ctotalt AS DOUBLE) AS ctotalt,
+                CAST(cnralt AS DOUBLE) AS cnralt
+            FROM ipeds_raw
+            WHERE unitid IS NOT NULL
+              AND cipcode IS NOT NULL
+              AND awlevel IS NOT NULL
+              AND CAST(year AS INTEGER) BETWEEN {data_min_year} AND {data_max_year}
+              AND COALESCE(CAST(share_intl AS DOUBLE), 0) >= {thresholds["min_share_intl"]}
+              {unitid_filter}
+              {awlevel_filter}
+        ),
+        annual_source AS (
+            SELECT
+                e.unitid,
+                e.awlevel,
+                MIN(e.awlevel_group) AS awlevel_group,
+                e.year,
+                s.broad_pair_bin,
+                SUM(e.ctotalt) AS source_total,
+                SUM(e.cnralt) AS source_total_intl
+            FROM eligible e
+            JOIN scan_broad_source_cips_py s
+              ON e.cip6 = s.cip6
+            GROUP BY e.unitid, e.awlevel, e.year, s.broad_pair_bin
+        ),
+        annual_target AS (
+            SELECT
+                e.unitid,
+                e.awlevel,
+                e.year,
+                t.broad_pair_bin,
+                SUM(e.ctotalt) AS target_total,
+                SUM(e.cnralt) AS target_total_intl
+            FROM eligible e
+            JOIN scan_broad_target_cips_py t
+              ON e.cip6 = t.cip6
+            GROUP BY e.unitid, e.awlevel, e.year, t.broad_pair_bin
+        ),
+        unit_awlevel_broad AS (
+            SELECT DISTINCT unitid, awlevel, awlevel_group, broad_pair_bin
+            FROM annual_source
+            UNION
+            SELECT DISTINCT
+                t.unitid,
+                t.awlevel,
+                COALESCE(s.awlevel_group, 'Other') AS awlevel_group,
+                t.broad_pair_bin
+            FROM annual_target t
+            LEFT JOIN annual_source s
+              ON s.unitid = t.unitid
+             AND s.awlevel = t.awlevel
+             AND s.broad_pair_bin = t.broad_pair_bin
+        ),
+        years AS (
+            SELECT * FROM generate_series({data_min_year}, {data_max_year}) AS y(year)
+        ),
+        broad_panel AS (
+            SELECT
+                u.unitid,
+                u.awlevel,
+                u.awlevel_group,
+                u.broad_pair_bin,
+                y.year,
+                COALESCE(s.source_total, 0) AS source_total,
+                COALESCE(s.source_total_intl, 0) AS source_total_intl,
+                COALESCE(t.target_total, 0) AS target_total,
+                COALESCE(t.target_total_intl, 0) AS target_total_intl
+            FROM unit_awlevel_broad u
+            CROSS JOIN years y
+            LEFT JOIN annual_source s
+              ON s.unitid = u.unitid
+             AND s.awlevel = u.awlevel
+             AND s.broad_pair_bin = u.broad_pair_bin
+             AND s.year = y.year
+            LEFT JOIN annual_target t
+              ON t.unitid = u.unitid
+             AND t.awlevel = u.awlevel
+             AND t.broad_pair_bin = u.broad_pair_bin
+             AND t.year = y.year
+        ),
+        broad_stats AS (
+            SELECT
+                *,
+                LAG(source_total) OVER (
+                    PARTITION BY unitid, awlevel, broad_pair_bin
+                    ORDER BY year
+                ) AS prev_source_total,
+                LAG(target_total) OVER (
+                    PARTITION BY unitid, awlevel, broad_pair_bin
+                    ORDER BY year
+                ) AS prev_target_total,
+                AVG(source_total) OVER (
+                    PARTITION BY unitid, awlevel, broad_pair_bin
+                    ORDER BY year
+                    ROWS BETWEEN {lookback_years} PRECEDING AND 1 PRECEDING
+                ) AS prev_source_window_avg,
+                AVG(target_total) OVER (
+                    PARTITION BY unitid, awlevel, broad_pair_bin
+                    ORDER BY year
+                    ROWS BETWEEN {lookback_years} PRECEDING AND 1 PRECEDING
+                ) AS prev_target_window_avg,
+                AVG(source_total) OVER (
+                    PARTITION BY unitid, awlevel, broad_pair_bin
+                    ORDER BY year
+                    ROWS BETWEEN 1 FOLLOWING AND {lookahead_years} FOLLOWING
+                ) AS post_source_window_avg,
+                AVG(target_total) OVER (
+                    PARTITION BY unitid, awlevel, broad_pair_bin
+                    ORDER BY year
+                    ROWS BETWEEN 1 FOLLOWING AND {lookahead_years} FOLLOWING
+                ) AS post_target_window_avg
+            FROM broad_panel
+        ),
+        broad_candidates AS (
+            SELECT
+                unitid,
+                awlevel,
+                awlevel_group,
+                year,
+                broad_pair_bin,
+                source_total,
+                COALESCE(prev_source_total, 0) AS source_total_prev,
+                source_total_intl,
+                COALESCE(prev_source_total, 0) AS source_total_intl_prev,
+                target_total,
+                COALESCE(prev_target_total, 0) AS target_total_prev,
+                target_total_intl,
+                COALESCE(prev_target_total, 0) AS target_total_intl_prev,
+                GREATEST(COALESCE(prev_source_total, 0) - source_total, 0) AS source_drop,
+                CASE
+                    WHEN COALESCE(prev_source_total, 0) > 0
+                    THEN (COALESCE(prev_source_total, 0) - source_total) / prev_source_total
+                    ELSE NULL
+                END AS source_drop_pct,
+                target_total - COALESCE(prev_target_total, 0) AS target_increase,
+                CASE
+                    WHEN COALESCE(prev_target_total, 0) > 0
+                    THEN (target_total - COALESCE(prev_target_total, 0)) / prev_target_total
+                    ELSE NULL
+                END AS target_increase_pct,
+                COALESCE(prev_source_window_avg, prev_source_total, 0) AS source_baseline,
+                COALESCE(prev_target_window_avg, prev_target_total, 0) AS target_baseline,
+                COALESCE(post_source_window_avg, source_total, 0) - COALESCE(prev_source_window_avg, prev_source_total, 0) AS avg5_source_drop,
+                CASE
+                    WHEN COALESCE(prev_source_window_avg, prev_source_total, 0) > 0
+                    THEN (
+                        COALESCE(post_source_window_avg, source_total, 0)
+                        - COALESCE(prev_source_window_avg, prev_source_total, 0)
+                    ) / COALESCE(prev_source_window_avg, prev_source_total, 0)
+                    ELSE NULL
+                END AS avg5_source_drop_pct,
+                COALESCE(post_target_window_avg, target_total, 0) - COALESCE(prev_target_window_avg, prev_target_total, 0) AS avg5_target_increase,
+                CASE
+                    WHEN COALESCE(prev_target_window_avg, prev_target_total, 0) > 0
+                    THEN (
+                        COALESCE(post_target_window_avg, target_total, 0)
+                        - COALESCE(prev_target_window_avg, prev_target_total, 0)
+                    ) / COALESCE(prev_target_window_avg, prev_target_total, 0)
+                    ELSE NULL
+                END AS avg5_target_increase_pct
+            FROM broad_stats
+            WHERE year BETWEEN {scan_year_min} AND {scan_year_max}
+              AND COALESCE(prev_source_window_avg, prev_source_total, 0) >= {thresholds["min_source_baseline"]}
+              AND GREATEST(COALESCE(prev_source_total, 0) - source_total, 0) >= {thresholds["min_source_drop_abs"]}
+              AND CASE
+                    WHEN COALESCE(prev_source_total, 0) > 0
+                    THEN (COALESCE(prev_source_total, 0) - source_total) / prev_source_total
+                    ELSE 0
+                  END >= {thresholds["min_source_drop_pct"]}
+              AND COALESCE(post_source_window_avg, source_total, 0)
+                  <= COALESCE(prev_source_window_avg, prev_source_total, 0) * (1 - {thresholds["source_persistence_drop_share"]})
+              AND target_total - COALESCE(prev_target_total, 0) >= {thresholds["min_target_offset_share"]}
+                  * GREATEST(COALESCE(prev_source_total, 0) - source_total, 0)
+              AND (source_total + target_total) - (COALESCE(prev_source_total, 0) + COALESCE(prev_target_total, 0))
+                  >= -{thresholds["max_net_loss_share"]} * GREATEST(COALESCE(prev_source_total, 0) - source_total, 0)
+              AND COALESCE(post_target_window_avg, target_total, 0)
+                  >= COALESCE(prev_target_window_avg, prev_target_total, 0)
+                     + {thresholds["target_persistence_gain_share"]}
+                       * GREATEST(COALESCE(prev_source_total, 0) - source_total, 0)
+        ),
+        exact_unit_awlevel_cip AS (
+            SELECT DISTINCT unitid, awlevel, awlevel_group, cip6
+            FROM eligible
+        ),
+        exact_panel AS (
+            SELECT
+                u.unitid,
+                u.awlevel,
+                u.awlevel_group,
+                u.cip6,
+                y.year,
+                COALESCE(e.ctotalt, 0) AS ctotalt
+            FROM exact_unit_awlevel_cip u
+            CROSS JOIN years y
+            LEFT JOIN eligible e
+              ON e.unitid = u.unitid
+             AND e.awlevel = u.awlevel
+             AND e.cip6 = u.cip6
+             AND e.year = y.year
+        ),
+        exact_stats AS (
+            SELECT
+                *,
+                LAG(ctotalt) OVER (
+                    PARTITION BY unitid, awlevel, cip6
+                    ORDER BY year
+                ) AS prev_total
+            FROM exact_panel
+        ),
+        source_exact_ranked AS (
+            SELECT
+                b.unitid,
+                b.awlevel,
+                b.year,
+                b.broad_pair_bin,
+                s.cip6 AS source_cip6,
+                GREATEST(COALESCE(s.prev_total, 0) - s.ctotalt, 0) AS exact_source_drop,
+                ROW_NUMBER() OVER (
+                    PARTITION BY b.unitid, b.awlevel, b.year, b.broad_pair_bin
+                    ORDER BY
+                        GREATEST(COALESCE(s.prev_total, 0) - s.ctotalt, 0) DESC,
+                        COALESCE(s.prev_total, 0) DESC,
+                        s.cip6
+                ) AS rn_source_exact
+            FROM broad_candidates b
+            JOIN scan_broad_source_cips_py m
+              ON m.broad_pair_bin = b.broad_pair_bin
+            JOIN exact_stats s
+              ON s.unitid = b.unitid
+             AND s.awlevel = b.awlevel
+             AND s.year = b.year
+             AND s.cip6 = m.cip6
+        ),
+        target_exact_ranked AS (
+            SELECT
+                b.unitid,
+                b.awlevel,
+                b.year,
+                b.broad_pair_bin,
+                t.cip6 AS target_cip6,
+                t.ctotalt - COALESCE(t.prev_total, 0) AS exact_target_increase,
+                ROW_NUMBER() OVER (
+                    PARTITION BY b.unitid, b.awlevel, b.year, b.broad_pair_bin
+                    ORDER BY
+                        t.ctotalt - COALESCE(t.prev_total, 0) DESC,
+                        t.ctotalt DESC,
+                        t.cip6
+                ) AS rn_target_exact
+            FROM broad_candidates b
+            JOIN scan_broad_target_cips_py m
+              ON m.broad_pair_bin = b.broad_pair_bin
+            JOIN exact_stats t
+              ON t.unitid = b.unitid
+             AND t.awlevel = b.awlevel
+             AND t.year = b.year
+             AND t.cip6 = m.cip6
+        ),
+        with_exact AS (
+            SELECT
+                b.*,
+                sx.source_cip6,
+                tx.target_cip6,
+                (
+                    COALESCE(b.target_increase / NULLIF(b.source_drop, 0), 0)
+                    + 0.5 * COALESCE(b.avg5_target_increase / NULLIF(b.source_drop, 0), 0)
+                    + 0.5 * COALESCE((-b.avg5_source_drop) / NULLIF(b.source_drop, 0), 0)
+                    - 0.5 * COALESCE((-LEAST(
+                        (b.source_total + b.target_total) - (b.source_total_prev + b.target_total_prev),
+                        0
+                    )) / NULLIF(b.source_drop, 0), 0)
+                ) AS relabel_score
+            FROM broad_candidates b
+            JOIN source_exact_ranked sx
+              ON sx.unitid = b.unitid
+             AND sx.awlevel = b.awlevel
+             AND sx.year = b.year
+             AND sx.broad_pair_bin = b.broad_pair_bin
+             AND sx.rn_source_exact = 1
+            JOIN target_exact_ranked tx
+              ON tx.unitid = b.unitid
+             AND tx.awlevel = b.awlevel
+             AND tx.year = b.year
+             AND tx.broad_pair_bin = b.broad_pair_bin
+             AND tx.rn_target_exact = 1
+            WHERE b.source_drop > 0
+              {allowed_pair_filter}
+        ),
+        best_pairs AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY unitid, awlevel, year
+                    ORDER BY source_drop DESC, relabel_score DESC, target_increase DESC, broad_pair_bin
+                ) AS rn_unit_year
+            FROM with_exact
+        )
+        SELECT
+            unitid,
+            awlevel,
+            awlevel_group,
+            year,
+            source_cip6,
+            target_cip6,
+            broad_pair_bin,
+            source_total,
+            source_total_prev,
+            source_total_intl,
+            source_total_intl_prev,
+            target_total,
+            target_total_prev,
+            target_total_intl,
+            target_total_intl_prev,
+            source_drop,
+            source_drop_pct,
+            target_increase,
+            target_increase_pct,
+            source_baseline,
+            target_baseline,
+            avg5_source_drop,
+            avg5_source_drop_pct,
+            avg5_target_increase,
+            avg5_target_increase_pct,
+            relabel_score,
+            1 AS rn_source,
+            rn_unit_year
+        FROM best_pairs
+        {final_filter}
+        """
+    ).df()
+
+    if df.empty:
+        return df
+    df["relabel_year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+    df["relabel_type"] = df["source_cip6"].astype(str) + "_to_" + df["target_cip6"].astype(str)
+    df["degree_type"] = df["awlevel"].map(degree_type_for_awlevel)
+    df["broad_bin_eligible"] = 1
+    return df.reset_index(drop=True)
+
+
 def detect_ipeds_relabels(
     con: ddb.DuckDBPyConnection,
     *,
@@ -2443,7 +2851,7 @@ def detect_ipeds_relabels(
     clamp_to_analysis_window: bool = True,
 ) -> pd.DataFrame:
     relabel_year_mode = _normalize_relabel_year_mode(relabel_year_mode)
-    events = scan_ipeds_pair_candidates(
+    events = scan_ipeds_broad_bin_candidates(
         con,
         ipeds_path=ipeds_path,
         thresholds=thresholds or STRICT_THRESHOLDS,
@@ -4125,21 +4533,46 @@ def _always_stem_cip_rows(
         """
     ).df()
     if rows.empty:
-        return pd.DataFrame(columns=["control_cip6"])
+        return pd.DataFrame(columns=["control_cip6", "control_cip2"])
     rows["control_cip6"] = rows["cip6"].astype(str).str.zfill(6)
+    rows["control_cip2"] = rows["control_cip6"].str.slice(0, 2)
     rows = rows[rows["control_cip6"].str.slice(0, 2).isin(ALWAYS_STEM_COMPARABLE_CIP2)].copy()
-    return rows[["control_cip6"]].drop_duplicates().reset_index(drop=True)
+    return rows[["control_cip6", "control_cip2"]].drop_duplicates().reset_index(drop=True)
 
 
 def _pair_control_cip_rows(
     matched_pairs: pd.DataFrame,
     broad_membership: dict[str, dict[str, tuple[str, ...]]],
+    always_stem_cips: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     if matched_pairs.empty:
         return pd.DataFrame(columns=["pair_id", "cip6"])
+    always_stem_by_cip2: dict[str, tuple[str, ...]] = {}
+    if always_stem_cips is not None and not always_stem_cips.empty:
+        stem_rows = always_stem_cips.copy()
+        if "control_cip2" not in stem_rows.columns:
+            stem_rows["control_cip2"] = stem_rows["control_cip6"].astype(str).str.zfill(6).str.slice(0, 2)
+        stem_rows["control_cip6"] = stem_rows["control_cip6"].astype(str).str.zfill(6)
+        stem_rows["control_cip2"] = stem_rows["control_cip2"].astype(str).str.zfill(2)
+        always_stem_by_cip2 = {
+            cip2: tuple(sorted(group["control_cip6"].dropna().astype(str).unique().tolist()))
+            for cip2, group in stem_rows.groupby("control_cip2", dropna=False)
+        }
     for row in matched_pairs.itertuples(index=False):
         pair_id = int(getattr(row, "pair_id"))
+        control_group = getattr(row, "control_group", pd.NA)
+        control_cip2 = getattr(row, "control_cip2", pd.NA)
+        if (
+            pd.notna(control_group)
+            and str(control_group) == CONTROL_GROUP_ALWAYS_STEM
+            and pd.notna(control_cip2)
+            and str(control_cip2).strip()
+        ):
+            for cip6 in always_stem_by_cip2.get(str(control_cip2).zfill(2), ()):
+                rows.append({"pair_id": pair_id, "cip6": str(cip6).zfill(6)})
+            if any(row_dict["pair_id"] == pair_id for row_dict in rows):
+                continue
         control_cip6 = getattr(row, "control_cip6", pd.NA)
         if pd.notna(control_cip6) and str(control_cip6).strip():
             rows.append({"pair_id": pair_id, "cip6": str(control_cip6).zfill(6)})
@@ -4152,7 +4585,25 @@ def _pair_control_cip_rows(
     return pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
 
 
+def _always_stem_cips_for_matches(
+    con: ddb.DuckDBPyConnection,
+    matched_pairs: pd.DataFrame,
+) -> pd.DataFrame | None:
+    if matched_pairs.empty or "control_group" not in matched_pairs.columns:
+        return None
+    if not matched_pairs["control_group"].astype(str).eq(CONTROL_GROUP_ALWAYS_STEM).any():
+        return None
+    return _always_stem_cip_rows(con)
+
+
 def _unit_year_carnegie_rows(con: ddb.DuckDBPyConnection) -> pd.DataFrame:
+    columns = {
+        str(row[1]).lower()
+        for row in con.execute("PRAGMA table_info('ipeds_raw')").fetchall()
+        if len(row) > 1
+    }
+    if not {"c21basic", "c21basic_lab"}.issubset(columns):
+        return pd.DataFrame(columns=["unitid", "year", "carnegie_basic", "carnegie_basic_label"])
     rows = con.sql(
         """
         SELECT
@@ -4336,7 +4787,8 @@ def _alternate_control_candidate_pool(
                     g.degree_type,
                     CAST(i.year AS INTEGER) AS year,
                     g.broad_pair_bin,
-                    s.control_cip6,
+                    MIN(s.control_cip6) AS control_cip6,
+                    s.control_cip2,
                     CAST(NULL AS INTEGER) AS control_relabel_year,
                     SUM(CAST(i.ctotalt AS DOUBLE)) AS source_total
                 FROM ipeds_raw i
@@ -4357,10 +4809,10 @@ def _alternate_control_candidate_pool(
                     g.degree_type,
                     CAST(i.year AS INTEGER),
                     g.broad_pair_bin,
-                    s.control_cip6
+                    s.control_cip2
             ),
             candidate_units AS (
-                SELECT DISTINCT unitid, awlevel, degree_type, broad_pair_bin, control_cip6, control_relabel_year
+                SELECT DISTINCT unitid, awlevel, degree_type, broad_pair_bin, control_cip6, control_cip2, control_relabel_year
                 FROM annual_source
             ),
             grid AS (
@@ -4371,6 +4823,7 @@ def _alternate_control_candidate_pool(
                     wy.broad_pair_bin,
                     cu.unitid,
                     cu.control_cip6,
+                    cu.control_cip2,
                     cu.control_relabel_year,
                     wy.pre_year AS year
                 FROM generalized_window_years_py wy
@@ -4387,6 +4840,7 @@ def _alternate_control_candidate_pool(
                     g.broad_pair_bin,
                     g.unitid,
                     g.control_cip6,
+                    g.control_cip2,
                     g.control_relabel_year,
                     g.year,
                     COALESCE(a.source_total, 0.0) AS source_total
@@ -4396,14 +4850,14 @@ def _alternate_control_candidate_pool(
                  AND a.awlevel = g.awlevel
                  AND a.degree_type = g.degree_type
                  AND a.broad_pair_bin = g.broad_pair_bin
-                 AND a.control_cip6 = g.control_cip6
+                 AND a.control_cip2 = g.control_cip2
                  AND a.year = g.year
             ),
             with_lag AS (
                 SELECT
                     *,
                     LAG(source_total) OVER (
-                        PARTITION BY relabel_year, awlevel, degree_type, broad_pair_bin, unitid, control_cip6
+                        PARTITION BY relabel_year, awlevel, degree_type, broad_pair_bin, unitid, control_cip2
                         ORDER BY year
                     ) AS prev_source_total
                 FROM grid_source
@@ -4415,6 +4869,7 @@ def _alternate_control_candidate_pool(
                 broad_pair_bin,
                 unitid,
                 control_cip6,
+                control_cip2,
                 control_relabel_year,
                 AVG(source_total) AS control_pre_avg_level,
                 COALESCE(
@@ -4427,7 +4882,7 @@ def _alternate_control_candidate_pool(
                     0.0
                 ) AS control_source_group_pre_size
             FROM with_lag
-            GROUP BY relabel_year, awlevel, degree_type, broad_pair_bin, unitid, control_cip6, control_relabel_year
+            GROUP BY relabel_year, awlevel, degree_type, broad_pair_bin, unitid, control_cip6, control_cip2, control_relabel_year
             """
         ).df()
 
@@ -4467,7 +4922,7 @@ def match_treated_to_never_treated(
     if broad_source_cips.empty:
         return pd.DataFrame()
     late_control_events = pd.DataFrame()
-    always_stem_cips = pd.DataFrame(columns=["control_cip6"])
+    always_stem_cips = pd.DataFrame(columns=["control_cip6", "control_cip2"])
     if control_group == CONTROL_GROUP_LATE_TREATED:
         late_control_events = _late_treated_control_events(con, ipeds_path=ipeds_path)
         if late_control_events.empty:
@@ -4935,6 +5390,11 @@ def match_treated_to_never_treated(
                     if "control_cip6" in chosen.index and pd.notna(chosen["control_cip6"])
                     else pd.NA
                 ),
+                "control_cip2": (
+                    str(chosen["control_cip2"]).zfill(2)
+                    if "control_cip2" in chosen.index and pd.notna(chosen["control_cip2"])
+                    else pd.NA
+                ),
                 "control_relabel_year": (
                     int(chosen["control_relabel_year"])
                     if "control_relabel_year" in chosen.index and pd.notna(chosen["control_relabel_year"])
@@ -4995,7 +5455,11 @@ def compute_never_treated_control_event_time_generalized(
     cip_map = _load_ipeds_cip_map(ipeds_path)
     broad_membership = build_broad_bin_membership(cip_map.keys())
     broad_any_cips = _broad_membership_rows(broad_membership, side="all")
-    control_cips = _pair_control_cip_rows(matched_pairs, broad_membership)
+    control_cips = _pair_control_cip_rows(
+        matched_pairs,
+        broad_membership,
+        always_stem_cips=_always_stem_cips_for_matches(con, matched_pairs),
+    )
     con.register("generalized_control_pairs_py", matched_pairs)
     con.register("generalized_broad_any_cips_py", broad_any_cips)
     con.register("generalized_control_cips_py", control_cips)
@@ -5384,7 +5848,11 @@ def compute_generalized_did_panel(
     cip_map = _load_ipeds_cip_map(ipeds_path)
     broad_membership = build_broad_bin_membership(cip_map.keys())
     broad_any_cips = _broad_membership_rows(broad_membership, side="all")
-    control_cips = _pair_control_cip_rows(matched_pairs, broad_membership)
+    control_cips = _pair_control_cip_rows(
+        matched_pairs,
+        broad_membership,
+        always_stem_cips=_always_stem_cips_for_matches(con, matched_pairs),
+    )
     panel_rows = degree_panel.copy()
     relabel_events = panel_rows[
         [
@@ -6032,7 +6500,11 @@ def compute_generalized_ipeds_did_panel(
     cip_map = _load_ipeds_cip_map(ipeds_path)
     broad_membership = build_broad_bin_membership(cip_map.keys())
     broad_any_cips = _broad_membership_rows(broad_membership, side="all")
-    control_cips = _pair_control_cip_rows(matched_pairs, broad_membership)
+    control_cips = _pair_control_cip_rows(
+        matched_pairs,
+        broad_membership,
+        always_stem_cips=_always_stem_cips_for_matches(con, matched_pairs),
+    )
     data_min_year, data_max_year = _ipeds_year_bounds(con)
     year_min = max(int(ANALYSIS_ORIGINAL_YEAR_MIN), int(data_min_year))
     year_max = min(int(ANALYSIS_IPEDS_YEAR_MAX), int(data_max_year))
@@ -7595,19 +8067,32 @@ def plot_source_target_ctotalt_event_time_by_degree_treated_control(
                 plot_df = degree_df[degree_df["series"].eq(series)].sort_values("event_t")
                 if plot_df.empty:
                     continue
+                ax.plot(
+                    plot_df["event_t"],
+                    plot_df["mean_ctotalt"],
+                    color=color_by_series[series],
+                    linestyle="-",
+                    linewidth=1.5,
+                    label=series,
+                )
+                ax.scatter(
+                    plot_df["event_t"],
+                    plot_df["mean_ctotalt"],
+                    color=color_by_series[series],
+                    s=llstyle.marker_area(llstyle.MULTI_MARKER_SIZE),
+                    marker="o",
+                    linewidths=0,
+                )
                 ax.errorbar(
                     plot_df["event_t"],
                     plot_df["mean_ctotalt"],
                     yerr=1.96 * plot_df["se_ctotalt"],
+                    fmt="none",
                     color=color_by_series[series],
-                    linestyle="-",
-                    marker="o",
-                    markersize=llstyle.MULTI_MARKER_SIZE,
-                    linewidth=1.5,
+                    ecolor=llstyle.rgba(color_by_series[series], DI_D_ERRORBAR_ALPHA),
                     elinewidth=llstyle.MULTI_MARKER_SIZE,
-                    alpha=0.9,
                     capsize=0,
-                    label=series,
+                    label="_nolegend_",
                 )
             unique_n = panel_n_lookup.get((role, degree_name), 0)
             ax.text(
@@ -7931,7 +8416,8 @@ def plot_event_time_with_control_generalized(
     _format_yaxis_for_outcome(ax_t, yvar)
     ax_t.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=DI_D_PLOT_FONT_SIZE)
     ax_t.set_title("")
-    ax_t.axvline(x=DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    ax_t.axvline(x=LABORLUNCH_DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    apply_laborlunch_event_time_axis(ax_t)
     treated_path = Path(out_dir) / f"{_slugify(degree_type)}_{yvar}_event_time_treated.png"
     _save_figure(fig_t, treated_path)
 
@@ -7958,7 +8444,8 @@ def plot_event_time_with_control_generalized(
     _format_yaxis_for_outcome(ax, yvar)
     ax.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=DI_D_PLOT_FONT_SIZE)
     ax.set_title("")
-    ax.axvline(x=DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    ax.axvline(x=LABORLUNCH_DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    apply_laborlunch_event_time_axis(ax)
     llstyle.right_legend(ax)
     combined_path = Path(out_dir) / f"{_slugify(degree_type)}_{yvar}_event_time_treated_control_never_treated.png"
     _save_figure(fig, combined_path)
@@ -8025,11 +8512,12 @@ def plot_did_event_study_generalized(
         label="_nolegend_",
     )
     ax.axhline(y=0, linestyle="--", color="gray", linewidth=1)
-    ax.axvline(x=DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    ax.axvline(x=LABORLUNCH_DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
     ax.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=DI_D_PLOT_FONT_SIZE)
     ax.set_ylabel(ylabel or _did_coef_ylabel(yvar), fontsize=DI_D_PLOT_FONT_SIZE)
     _format_yaxis_for_outcome(ax, yvar)
     ax.set_title("")
+    apply_laborlunch_event_time_axis(ax)
     _add_did_summary_text(ax, summary_text)
     default_stem = f"{_slugify(degree_type)}_{yvar}_did_event_time_never_treated"
     out_path = Path(out_dir) / f"{file_stem or default_stem}.png"
@@ -8135,14 +8623,12 @@ def plot_broad_bin_did_event_study_generalized(
         return None
 
     ax.axhline(y=0, linestyle="--", color="gray", linewidth=1)
-    ax.axvline(x=DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    ax.axvline(x=LABORLUNCH_DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
     ax.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=DI_D_PLOT_FONT_SIZE)
     ax.set_ylabel(_did_coef_ylabel(yvar), fontsize=DI_D_PLOT_FONT_SIZE)
     _format_yaxis_for_outcome(ax, yvar)
     ax.set_title("")
-    event_ticks = list(range(PLOT_EVENT_MIN, PLOT_EVENT_MAX + 1))
-    ax.set_xticks(event_ticks)
-    ax.set_xlim(PLOT_EVENT_MIN - 0.6, PLOT_EVENT_MAX + 0.6)
+    apply_laborlunch_event_time_axis(ax)
     llstyle.right_legend(ax, title="Broad bin")
     _add_did_summary_text(ax, None)
 
@@ -8236,13 +8722,12 @@ def plot_degree_level_did_event_study_generalized(
         return None
 
     ax.axhline(y=0, linestyle="--", color="gray", linewidth=1)
-    ax.axvline(x=DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    ax.axvline(x=LABORLUNCH_DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
     ax.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=DI_D_PLOT_FONT_SIZE)
     ax.set_ylabel(_did_coef_ylabel(yvar), fontsize=DI_D_PLOT_FONT_SIZE)
     _format_yaxis_for_outcome(ax, yvar)
     ax.set_title("")
-    ax.set_xticks(list(range(PLOT_EVENT_MIN, PLOT_EVENT_MAX + 1)))
-    ax.set_xlim(PLOT_EVENT_MIN - 0.6, PLOT_EVENT_MAX + 0.6)
+    apply_laborlunch_event_time_axis(ax)
     llstyle.right_legend(ax, title="Degree level")
     _add_did_summary_text(ax, None)
 
@@ -9182,7 +9667,7 @@ def _enrich_event_labels(events: pd.DataFrame, cip_map: dict[str, str]) -> pd.Da
 
 def run_pipeline(
     *,
-    candidate_path: str | Path | None = DEFAULT_CANDIDATE_PATH,
+    candidate_path: str | Path | None = None,
     ipeds_path: str | Path = base.IPEDS_PATH,
     crosswalk_path: str | Path = v2.CROSSWALK_PATH,
     foia_path: str | Path = base.FOIA_PATH,
@@ -9369,8 +9854,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--candidate-path",
         type=str,
-        default=str(DEFAULT_CANDIDATE_PATH),
-        help=f"Messy external candidate list (csv/xlsx/parquet or directory). Default: {DEFAULT_CANDIDATE_PATH}",
+        default=None,
+        help=(
+            "Optional messy external candidate list (csv/xlsx/parquet or directory). "
+            "Default: omitted, so relabel events are identified from IPEDS only."
+        ),
     )
     parser.add_argument("--ipeds-path", type=str, default=base.IPEDS_PATH, help="IPEDS completions parquet.")
     parser.add_argument("--crosswalk-path", type=str, default=v2.CROSSWALK_PATH, help="IPEDS crosswalk parquet.")

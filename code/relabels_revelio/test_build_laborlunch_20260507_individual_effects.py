@@ -37,11 +37,14 @@ class IndividualEffectsBuilderTests(unittest.TestCase):
                         r"\newcommand{\companyoutput}{/tmp/company}",
                         r"\renewcommand{\outputpath}{/tmp/slides}",
                         r"\providecommand{\figureoutput}{/tmp/figures}",
+                        r"\newcommand{\designcomparisonoutput}{/tmp/company_shift_share/design_comparison}",
+                        r"\newcommand{\designcomparisonfigures}{\designcomparisonoutput/figures}",
                         r"\includegraphics{\relabeloutput/generalized_relabels_plots/a.png}",
                         r"\input{\relabeloutput/generalized_relabels_plots/b.tex}",
                         r"\includegraphics{\outputpath/slides_20251204/open_doors.png}",
                         r"\includegraphics{\figureoutput/linkedin_match_share.png}",
                         r"\includegraphics{\companyoutput/slides_20260507_shift_share/c.png}",
+                        r"\includegraphics{\designcomparisonfigures/nested_macro_firm_asset.png}",
                         r"\input{/tmp/company_shift_share/slides_20260507_shift_share/d.tex}",
                         r"\texttt{relabel\_broad\_bin\_treated\_control\_school\_samples\_part1.tex}",
                     ]
@@ -66,6 +69,7 @@ class IndividualEffectsBuilderTests(unittest.TestCase):
         self.assertEqual(args.foia_plots_dir, builder.DEFAULT_FOIA_PLOTS_DIR)
         self.assertEqual(args.figure_output_dir, builder.DEFAULT_FIGURE_OUTPUT_DIR)
         self.assertEqual(args.revelio_main_output_dir, builder.DEFAULT_REVELIO_MAIN_OUTPUT_DIR)
+        self.assertEqual(args.revelio_always_stem_output_dir, builder.DEFAULT_REVELIO_ALWAYS_STEM_OUTPUT_DIR)
         self.assertEqual(args.revelio_econ_output_dir, builder.DEFAULT_REVELIO_ECON_OUTPUT_DIR)
         self.assertEqual(args.revelio_controls_output_dir, builder.DEFAULT_REVELIO_CONTROLS_OUTPUT_DIR)
         self.assertEqual(args.revelio_alt_output_dir, builder.DEFAULT_REVELIO_ALT_OUTPUT_DIR)
@@ -75,7 +79,7 @@ class IndividualEffectsBuilderTests(unittest.TestCase):
         self.assertEqual(args.revelio_relabel_year_min, 2014)
         self.assertEqual(args.revelio_relabel_year_max, 2020)
         self.assertEqual(args.estimation_type, "sun_abraham")
-        self.assertFalse(args.revelio_control_comparison)
+        self.assertTrue(args.revelio_control_comparison)
         self.assertFalse(args.sun_abraham_use_weights)
 
     def test_parse_args_caps_revelio_horizons_at_four(self) -> None:
@@ -161,6 +165,43 @@ class IndividualEffectsBuilderTests(unittest.TestCase):
                 cwd=root,
                 check=True,
             )
+
+    def test_run_pdflatex_discards_truncated_aux_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tex = root / "deck.tex"
+            aux = root / "deck.aux"
+            tex.write_text(r"\documentclass{beamer}\begin{document}\end{document}")
+            aux.write_text(r"\newlabel{app_foia_opt_share_pooled_degree_levels}{{26}{84}{Appendix")
+
+            with patch.object(builder.subprocess, "run") as run_mock:
+                builder._run_pdflatex(tex)
+
+            self.assertFalse(aux.exists())
+            self.assertEqual(run_mock.call_count, 2)
+
+    def test_run_pdflatex_keeps_valid_multiline_aux_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tex = root / "deck.tex"
+            aux = root / "deck.aux"
+            tex.write_text(r"\documentclass{beamer}\begin{document}\end{document}")
+            aux.write_text(
+                "\n".join(
+                    [
+                        r"\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined",
+                        r"\global\let\oldnewlabel\newlabel",
+                        r"\fi}",
+                        r"\gdef \@abspage@last{171}",
+                    ]
+                )
+            )
+
+            with patch.object(builder.subprocess, "run") as run_mock:
+                builder._run_pdflatex(tex)
+
+            self.assertTrue(aux.exists())
+            self.assertEqual(run_mock.call_count, 2)
 
     def test_pooled_from_dynamic_uses_treated_post_weights(self) -> None:
         estimates = pd.DataFrame(
@@ -340,6 +381,88 @@ class IndividualEffectsBuilderTests(unittest.TestCase):
         self.assertEqual(set(collapsed["event_t"].tolist()), {-2, 0})
         self.assertEqual(set(collapsed["treated"].tolist()), {0, 1})
 
+    def test_revelio_in_us_condition_expected_variants_require_treated_control(self) -> None:
+        panel = pd.DataFrame(
+            {
+                "analysis_variant": ["foia_linked_person_baseline"] * 5,
+                "target_year_observed": [1, 1, 1, 1, 1],
+                "in_us": [1, 1, 0, 0, 0],
+                "treated_ind": [1, 0, 1, 0, 1],
+            }
+        )
+
+        self.assertEqual(
+            builder._in_us_condition_expected_variants(panel),
+            ["foia_linked_person_baseline_in_us_1", "foia_linked_person_baseline_in_us_0"],
+        )
+
+        no_control = panel[panel["in_us"].eq(1) & panel["treated_ind"].eq(1)].copy()
+        no_control = pd.concat([no_control, panel[panel["in_us"].eq(0)]], ignore_index=True)
+        self.assertEqual(
+            builder._in_us_condition_expected_variants(no_control),
+            ["foia_linked_person_baseline_in_us_0"],
+        )
+
+    def test_always_stem_button_expected_paths_cover_main_revelio_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(revelio_always_stem_output_dir=Path(tmp))
+
+            paths = builder._always_stem_button_expected_paths(args)
+
+        self.assertEqual(
+            [path.name for path in paths],
+            [
+                "did_att_by_variant_active_us.png",
+                "did_att_by_variant_unique_employers.png",
+                "did_att_by_variant_employer_tenure.png",
+                "did_att_by_variant_compensation.png",
+            ],
+        )
+
+    def test_full_sample_button_expected_paths_cover_main_revelio_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(revelio_econ_output_dir=Path(tmp))
+
+            paths = builder._revelio_full_sample_button_expected_paths(args)
+
+        self.assertEqual(
+            [path.name for path in paths],
+            [
+                "did_att_by_full_sample_foreign_split_active_us.png",
+                "did_att_by_full_sample_foreign_split_unique_employers.png",
+                "did_att_by_full_sample_foreign_split_employer_tenure.png",
+                "did_att_by_full_sample_foreign_split_compensation.png",
+            ],
+        )
+
+    def test_revelio_in_us_condition_plot_writes_main_slide_asset(self) -> None:
+        results = pd.DataFrame(
+            {
+                "analysis_variant": [
+                    "foia_linked_person_baseline_in_us_1",
+                    "foia_linked_person_baseline_in_us_1",
+                    "foia_linked_person_baseline_in_us_0",
+                    "foia_linked_person_baseline_in_us_0",
+                ],
+                "outcome": ["n_employers"] * 4,
+                "horizon_years": [0, 1, 0, 1],
+                "coef": [0.1, 0.2, -0.05, 0.03],
+                "se": [0.01, 0.02, 0.015, 0.025],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            out_paths = builder._plot_revelio_in_us_condition_results(
+                results,
+                output_dir=out_dir,
+                output_mode="new_pooled_post",
+            )
+
+            self.assertEqual(out_paths, [out_dir / "did_att_by_in_us_condition_unique_employers.png"])
+            self.assertTrue(out_paths[0].exists())
+            self.assertTrue(out_paths[0].with_suffix(".csv").exists())
+
     def test_write_revelio_matching_table_creates_slide_tex(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "revelio_matching_stats_summary_table.tex"
@@ -509,13 +632,13 @@ class IndividualEffectsBuilderTests(unittest.TestCase):
         self.assertEqual(builder._revelio_event_source_mode(args.revelio_main_did_sample), "generalized_final_sample")
         self.assertEqual(
             builder._revelio_primary_control_group(args.revelio_main_did_sample),
-            builder.generalized.CONTROL_GROUP_ALWAYS_STEM,
+            builder.generalized.CONTROL_GROUP_NEVER_TREATED,
         )
         self.assertEqual(
             builder._revelio_control_groups(args),
             (
-                builder.generalized.CONTROL_GROUP_ALWAYS_STEM,
                 builder.generalized.CONTROL_GROUP_NEVER_TREATED,
+                builder.generalized.CONTROL_GROUP_ALWAYS_STEM,
             ),
         )
 
@@ -678,6 +801,84 @@ class IndividualEffectsBuilderTests(unittest.TestCase):
         self.assertEqual(int(reg.loc[reg["treated"].eq(0), "event_t"].notna().sum()), 0)
         self.assertFalse(estimates.empty)
         self.assertTrue((estimates["control_n_schools"] == 2).all())
+
+    def test_foia_control_comparison_did_uses_laborlunch_event_time_display(self) -> None:
+        rows = pd.DataFrame(
+            {
+                "event_t": [-5, -2, 0, 4],
+                "coef": [-0.1, 0.0, 0.2, 0.3],
+                "se": [0.02, 0.0, 0.04, 0.05],
+                "reference_event_t": [-2, -2, -2, -2],
+            }
+        )
+        captured: dict[str, object] = {}
+
+        def fake_savefig(fig: object, path: Path, *, dpi: int = 220) -> None:
+            captured["ax"] = fig.axes[0]
+            captured["path"] = Path(path)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(builder.llstyle, "savefig", side_effect=fake_savefig):
+            args = SimpleNamespace(foia_plots_dir=Path(tmp))
+            out_path = builder._plot_foia_main_control_comparison_did(
+                {builder.generalized.CONTROL_GROUP_NEVER_TREATED: rows},
+                args=args,
+                yvar="opt_share",
+                summary_text=None,
+            )
+
+            ax = captured["ax"]
+            self.assertEqual(
+                [label.get_text() for label in ax.get_xticklabels()],
+                ["-4", "-3", "-2", "-1", "0", "1", "2", "3", "4", "5"],
+            )
+            vertical_line_x = [
+                float(xdata[0])
+                for line in ax.lines
+                for xdata in [list(line.get_xdata())]
+                if len(xdata) == 2 and float(xdata[0]) == float(xdata[1])
+            ]
+            self.assertIn(builder.generalized.LABORLUNCH_DI_D_EVENT_LINE_X, vertical_line_x)
+            self.assertEqual([float(x) for x in ax.lines[0].get_xdata()], [-5.0, -2.0, 0.0, 4.0])
+            self.assertEqual(pd.read_csv(out_path.with_suffix(".csv"))["event_t"].tolist(), [-5, -2, 0, 4])
+
+    def test_foia_main_summary_uses_treated_weighted_dynamic_average(self) -> None:
+        did_panel = pd.DataFrame(
+            [
+                {
+                    "unitid": unitid,
+                    "calendar_year": 2020 + event_t,
+                    "event_t": event_t,
+                    "treated": treated,
+                    "total_grads": 1.0,
+                    "opt_stem_share": 0.10 if treated else 0.90,
+                }
+                for event_t in (-5, -2)
+                for unitid, treated in ((10, 1), (20, 0))
+            ]
+        )
+        dynamic_rows = pd.DataFrame(
+            {
+                "event_t": [-1, 0, 1, 2, 3],
+                "coef": [0.01, 0.02, 0.03, 0.04, 0.05],
+                "se": [0.001, 0.002, 0.003, 0.004, 0.005],
+                "treated_total_grads": [10.0, 20.0, 30.0, 40.0, 50.0],
+                "reference_event_t": [-2, -2, -2, -2, -2],
+            }
+        )
+
+        text = builder._foia_main_summary_text(
+            did_panel,
+            yvar="opt_stem_share",
+            dynamic_rows=dynamic_rows,
+            event_window=5,
+        )
+
+        self.assertEqual(
+            text,
+            "Baseline mean (t = -4 to -1): 10.0 pp\n"
+            "Dynamic avg (t = 0 to 4): 3.7 pp (0.2 pp)\n"
+            "Effect size: 36.7%",
+        )
 
     def test_foia_preperiod_patch_extends_lower_bound_to_cover_event_window(self) -> None:
         panel = pd.DataFrame({"relabel_year": [2014, 2018]})

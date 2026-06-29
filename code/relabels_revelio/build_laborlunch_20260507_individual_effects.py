@@ -54,6 +54,7 @@ DEFAULT_FOIA_OUTPUT_DIR = CODE_ROOT / "output" / "relabel_indiv"
 DEFAULT_FOIA_PLOTS_DIR = DEFAULT_FOIA_OUTPUT_DIR / "generalized_relabels_plots"
 DEFAULT_FIGURE_OUTPUT_DIR = HOME / "figures"
 DEFAULT_REVELIO_MAIN_OUTPUT_DIR = HOME / "output" / "relabel_indiv"
+DEFAULT_REVELIO_ALWAYS_STEM_OUTPUT_DIR = HOME / "output" / "relabel_indiv_always_stem"
 DEFAULT_REVELIO_ECON_OUTPUT_DIR = HOME / "output" / "relabel_indiv_slides_nocontrols"
 DEFAULT_REVELIO_CONTROLS_OUTPUT_DIR = HOME / "output" / "relabel_indiv_slides_controls"
 DEFAULT_REVELIO_ALT_OUTPUT_DIR = HOME / "output" / "relabel_indiv_slides_alt_spec"
@@ -202,6 +203,29 @@ REVELIO_ESTIMATION_APPENDICES = [
     ("relabel_revelio_compensation", "salary_imputed", "compensation", "Revelio Compensation"),
     ("relabel_revelio_internship_positions", "n_internship_positions", "internship_positions", "Revelio Education-Spell Positions"),
 ]
+REVELIO_MAIN_IN_US_CONDITION_OUTCOMES = (
+    "n_employers",
+    "avg_employer_tenure_years",
+    "salary_imputed",
+)
+REVELIO_MAIN_CONTROL_BUTTON_OUTCOMES = (
+    "in_us",
+    "n_employers",
+    "avg_employer_tenure_years",
+    "salary_imputed",
+)
+REVELIO_IN_US_CONDITION_VARIANTS = {
+    "foia_linked_person_baseline_in_us_1": {
+        "label": "Active in U.S.",
+        "color": "#3977B7",
+        "marker": "o",
+    },
+    "foia_linked_person_baseline_in_us_0": {
+        "label": "Not active in U.S.",
+        "color": "#B63D4A",
+        "marker": "s",
+    },
+}
 
 
 def _progress(message: str) -> None:
@@ -292,8 +316,6 @@ def _revelio_event_source_mode(sample_mode: str) -> str:
 
 
 def _revelio_primary_control_group(sample_mode: str) -> str:
-    if sample_mode == "full_sample":
-        return generalized.CONTROL_GROUP_ALWAYS_STEM
     return generalized.CONTROL_GROUP_NEVER_TREATED
 
 
@@ -454,14 +476,24 @@ def parse_slide_asset_refs(tex_path: str | Path) -> list[Path]:
             text,
         )
     }
+
+    def expand_macros(value: str) -> str:
+        expanded = value
+        for _ in range(len(macros) + 1):
+            next_value = expanded
+            for name, macro_value in macros.items():
+                next_value = next_value.replace(f"\\{name}", macro_value)
+            if next_value == expanded:
+                break
+            expanded = next_value
+        return expanded
+
     refs: list[Path] = []
     seen: set[str] = set()
     for raw in re.findall(r"\{([^{}]*(?:\.png|\.tex))\}", text):
         if r"\_" in raw:
             continue
-        expanded = raw.strip()
-        for name, value in macros.items():
-            expanded = expanded.replace(f"\\{name}", value)
+        expanded = expand_macros(raw.strip())
         if "company_shift_share" in expanded or "\\companyoutput" in raw:
             continue
         if not (expanded.endswith(".png") or expanded.endswith(".tex")):
@@ -621,7 +653,8 @@ def _plot_estimation_type_comparison(
             )
     ax.axhline(0, color="0.35", linestyle="--", linewidth=0.9)
     if x_col == "event_t":
-        ax.axvline(-0.5, color="0.55", linestyle="--", linewidth=0.8)
+        ax.axvline(generalized.LABORLUNCH_DI_D_EVENT_LINE_X, color="0.55", linestyle="--", linewidth=0.8)
+        generalized.apply_laborlunch_event_time_axis(ax)
     ax.grid(True, axis="y", alpha=0.25)
     ax.set_title("")
     ax.set_xlabel(x_label)
@@ -1992,6 +2025,435 @@ def _plot_revelio_generic_results(
             )
 
 
+def _in_us_condition_expected_variants(panel: pd.DataFrame) -> list[str]:
+    if panel.empty or "in_us" not in panel.columns or "analysis_variant" not in panel.columns:
+        return []
+    base = panel[panel["analysis_variant"].astype(str).eq("foia_linked_person_baseline")].copy()
+    if "target_year_observed" in base.columns:
+        base = base[pd.to_numeric(base["target_year_observed"], errors="coerce").eq(1)].copy()
+    if base.empty:
+        return []
+    in_us = pd.to_numeric(base["in_us"], errors="coerce")
+    expected: list[str] = []
+    for value in (1, 0):
+        subgroup = base[in_us.eq(value)].copy()
+        if subgroup.empty or subgroup["treated_ind"].nunique() < 2:
+            continue
+        expected.append(f"foia_linked_person_baseline_in_us_{value}")
+    return expected
+
+
+def _iter_revelio_in_us_condition_panels(panel: pd.DataFrame) -> Iterator[tuple[str, pd.DataFrame]]:
+    if panel.empty or "in_us" not in panel.columns or "analysis_variant" not in panel.columns:
+        return
+    base = panel[panel["analysis_variant"].astype(str).eq("foia_linked_person_baseline")].copy()
+    if "target_year_observed" in base.columns:
+        base = base[pd.to_numeric(base["target_year_observed"], errors="coerce").eq(1)].copy()
+    if base.empty:
+        return
+    in_us = pd.to_numeric(base["in_us"], errors="coerce")
+    for value in (1, 0):
+        subgroup = base[in_us.eq(value)].copy()
+        if subgroup.empty or subgroup["treated_ind"].nunique() < 2:
+            continue
+        variant = f"foia_linked_person_baseline_in_us_{value}"
+        subgroup["analysis_variant"] = variant
+        yield variant, subgroup
+
+
+def _in_us_condition_label(variant: object) -> str:
+    return REVELIO_IN_US_CONDITION_VARIANTS.get(str(variant), {}).get(
+        "label",
+        str(variant).replace("_", " "),
+    )
+
+
+def _in_us_condition_color(variant: object) -> str:
+    return REVELIO_IN_US_CONDITION_VARIANTS.get(str(variant), {}).get("color", llstyle.color(2))
+
+
+def _in_us_condition_marker(variant: object) -> str:
+    return REVELIO_IN_US_CONDITION_VARIANTS.get(str(variant), {}).get("marker", "o")
+
+
+def _compute_revelio_in_us_condition_results_generic(
+    panel: pd.DataFrame,
+    *,
+    estimation_type: str,
+    output_mode: str,
+    event_window: int,
+    bootstrap_reps: int,
+    random_seed: int,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    outcomes = [outcome for outcome in REVELIO_MAIN_IN_US_CONDITION_OUTCOMES if outcome in panel.columns]
+    tasks: list[tuple[str, pd.DataFrame, str, int]] = []
+    for variant, variant_panel in _iter_revelio_in_us_condition_panels(panel):
+        horizons = sorted(pd.to_numeric(variant_panel["horizon_years"], errors="coerce").dropna().astype(int).unique())
+        for outcome in outcomes:
+            tasks.extend((variant, variant_panel, outcome, int(horizon)) for horizon in horizons)
+    task_progress = ProgressCounter("Revelio in-US conditional estimates", len(tasks))
+    for variant, variant_panel, outcome, horizon in tasks:
+        reg_df = _collapse_revelio_for_generic(
+            variant_panel,
+            outcome=outcome,
+            horizon=int(horizon),
+            event_window=event_window,
+        )
+        if reg_df.empty:
+            task_progress.advance(f"{variant}/{outcome}/h{horizon} (empty)")
+            continue
+        estimates = estimate_dynamic_effects(
+            reg_df,
+            yvar=outcome,
+            estimation_type=estimation_type,
+            reference_event_time=-2,
+            bootstrap_reps=bootstrap_reps,
+            random_seed=random_seed,
+            use_weights=True,
+        )
+        if estimates.empty:
+            task_progress.advance(f"{variant}/{outcome}/h{horizon} (no estimates)")
+            continue
+        if output_mode == "old_event_time":
+            plot_df = estimates.copy()
+            plot_df["analysis_variant"] = variant
+            plot_df["did_model"] = estimation_type
+            plot_df["did_estimator"] = estimation_type
+            plot_df["outcome"] = outcome
+            plot_df["horizon_years"] = int(horizon)
+            plot_df["cohort_t"] = plot_df["event_t"]
+            rows.extend(plot_df.to_dict("records"))
+        else:
+            coef, se = _pooled_from_dynamic(estimates, reg_df)
+            stats = _pooled_effect_stats(reg_df, yvar=outcome, coef=coef)
+            rows.append(
+                {
+                    "analysis_variant": variant,
+                    "did_model": estimation_type,
+                    "did_estimator": estimation_type,
+                    "outcome": outcome,
+                    "horizon_years": int(horizon),
+                    "coef": coef,
+                    "se": se,
+                    "ci_lower": coef - 1.96 * se if pd.notna(coef) and pd.notna(se) else np.nan,
+                    "ci_upper": coef + 1.96 * se if pd.notna(coef) and pd.notna(se) else np.nan,
+                    **stats,
+                    "n_obs": int(len(reg_df)),
+                    "n_unitids": int(reg_df["unitid"].nunique()),
+                }
+            )
+        task_progress.advance(f"{variant}/{outcome}/h{horizon}")
+    return pd.DataFrame(rows)
+
+
+def _compute_revelio_in_us_condition_results_twfe(
+    panel: pd.DataFrame,
+    *,
+    output_mode: str,
+    event_window: int,
+    scratch_dir: Path,
+) -> pd.DataFrame:
+    did_plot_mode = "pooled_post_by_horizon" if output_mode == "new_pooled_post" else "event_study_by_cohort"
+    frames: list[pd.DataFrame] = []
+    outcomes = set(REVELIO_MAIN_IN_US_CONDITION_OUTCOMES)
+    with _patched_indiv_config(
+        OUTPUT_DIR=str(scratch_dir),
+        BUILD_DID_INCLUDE_INDIVIDUAL_CONTROLS=False,
+        BUILD_DID_INCLUDE_SCHOOL_CHAR_GRADYEAR_CONTROLS=False,
+        BUILD_DID_PLOT_MODE=did_plot_mode,
+        BUILD_EVENT_WINDOW=int(event_window),
+        BUILD_POOLED_POST_EVENT_MIN=REVELIO_POOLED_EVENT_MIN,
+        BUILD_POOLED_POST_EVENT_MAX=REVELIO_POOLED_EVENT_MAX,
+        BUILD_RUN_DID=True,
+    ):
+        condition_panels = list(_iter_revelio_in_us_condition_panels(panel))
+        condition_progress = ProgressCounter("Revelio TWFE in-US conditional estimates", len(condition_panels))
+        for variant, variant_panel in condition_panels:
+            treated_panel = variant_panel[variant_panel["treated_ind"] == 1].copy()
+            control_panel = variant_panel[variant_panel["treated_ind"] == 0].copy()
+            if treated_panel.empty or control_panel.empty:
+                condition_progress.advance(f"{variant} (missing treated/control)")
+                continue
+            if output_mode == "new_pooled_post":
+                result = indiv.step8_pooled_post_by_horizon(treated_panel, control_panel, analysis_variant=variant)
+            else:
+                result = indiv.step8_did(treated_panel, control_panel, analysis_variant=variant)
+            if not result.empty:
+                frames.append(result[result["outcome"].isin(outcomes)].copy())
+            condition_progress.advance(variant)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def _plot_revelio_in_us_condition_results(
+    results: pd.DataFrame,
+    *,
+    output_dir: Path,
+    output_mode: str,
+) -> list[Path]:
+    if results.empty:
+        return []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    work = results.copy()
+    if output_mode == "new_pooled_post":
+        x_col = "horizon_years"
+        x_label = "Calendar year relative to graduation"
+    else:
+        x_col = "cohort_t" if "cohort_t" in work.columns else "event_t"
+        x_label = "Graduation cohort relative to relabel event"
+        if "horizon_years" in work.columns:
+            work = work[pd.to_numeric(work["horizon_years"], errors="coerce").eq(3)].copy()
+    if work.empty or x_col not in work.columns:
+        return []
+
+    out_paths: list[Path] = []
+    condition_order = [variant for variant in REVELIO_IN_US_CONDITION_VARIANTS if variant in set(work["analysis_variant"])]
+    condition_order += [
+        str(variant)
+        for variant in work["analysis_variant"].dropna().astype(str).unique().tolist()
+        if str(variant) not in condition_order
+    ]
+    offsets = {
+        variant: float(offset)
+        for variant, offset in zip(condition_order, llstyle.offsets(max(1, len(condition_order))))
+    }
+    for outcome in REVELIO_MAIN_IN_US_CONDITION_OUTCOMES:
+        outcome_df = work[work["outcome"].eq(outcome)].dropna(subset=[x_col, "coef", "se"]).copy()
+        if outcome_df.empty:
+            continue
+        llstyle.apply_style()
+        fig, ax = plt.subplots(figsize=llstyle.FIGSIZE)
+        plotted = False
+        ticks = sorted(pd.to_numeric(outcome_df[x_col], errors="coerce").dropna().astype(int).unique().tolist())
+        for idx, variant in enumerate(condition_order):
+            sub = outcome_df[outcome_df["analysis_variant"].astype(str).eq(variant)].copy()
+            if sub.empty:
+                continue
+            sub = sub.sort_values(x_col)
+            x_vals = pd.to_numeric(sub[x_col], errors="coerce").astype(float).to_numpy()
+            x_vals = x_vals + offsets.get(variant, 0.0)
+            color = _in_us_condition_color(variant)
+            errorbar_container = ax.errorbar(
+                x_vals,
+                pd.to_numeric(sub["coef"], errors="coerce").astype(float).to_numpy(),
+                yerr=1.96 * pd.to_numeric(sub["se"], errors="coerce").astype(float).to_numpy(),
+                fmt="-",
+                color=color,
+                ecolor=llstyle.rgba(color, indiv.DI_D_ERRORBAR_ALPHA),
+                elinewidth=indiv.DI_D_PLOT_MARKER_SIZE,
+                capsize=0,
+                marker=_in_us_condition_marker(variant),
+                markersize=indiv.DI_D_PLOT_MARKER_SIZE,
+                linewidth=1.5,
+                label=_in_us_condition_label(variant),
+                zorder=3 + idx,
+            )
+            indiv._soften_errorbar_interval(errorbar_container)  # noqa: SLF001
+            plotted = True
+        if not plotted:
+            plt.close(fig)
+            continue
+        ax.axhline(y=0, linestyle="--", color="gray", linewidth=1)
+        if output_mode != "new_pooled_post":
+            ax.axvline(x=indiv.DI_D_EVENT_LINE_X, linestyle=":", color="gray", linewidth=1)
+            ax.scatter([-2], [0.0], facecolors="white", edgecolors="black", linewidths=1.3, s=65, zorder=4)
+        if ticks:
+            ax.set_xticks(ticks)
+        ax.set_xlabel(x_label, fontsize=indiv.DI_D_PLOT_FONT_SIZE)
+        ax.set_ylabel(f"did coef: {indiv.OUTCOME_LABELS.get(outcome, outcome)}", fontsize=indiv.DI_D_PLOT_FONT_SIZE)
+        ax.set_title("")
+        llstyle.right_legend(ax)
+        file_label = indiv.OUTCOME_FILE_LABELS.get(outcome, _slug(outcome))
+        out_path = output_dir / f"did_att_by_in_us_condition_{file_label}.png"
+        llstyle.savefig(fig, out_path, dpi=150)
+        outcome_df.to_csv(out_path.with_suffix(".csv"), index=False)
+        out_paths.append(out_path)
+    return out_paths
+
+
+def _ensure_revelio_in_us_condition_results(
+    panel: pd.DataFrame,
+    *,
+    args: argparse.Namespace,
+    run_hash: str,
+    log: RunLog,
+) -> pd.DataFrame:
+    output_dir = args.revelio_main_output_dir
+    results_path = args.cache_dir / (
+        f"revelio_in_us_condition_{args.estimation_type}_{ESTIMATOR_AGGREGATION_VERSION}_{args.revelio_output}_{run_hash}.parquet"
+    )
+    expected_variants = set(_in_us_condition_expected_variants(panel))
+    expected_outcomes = {outcome for outcome in REVELIO_MAIN_IN_US_CONDITION_OUTCOMES if outcome in panel.columns}
+    if not expected_variants or not expected_outcomes:
+        log.skip("revelio_in_us_condition_no_expected_groups")
+        return pd.DataFrame()
+    if not _force_estimator_rebuild(args) and _file_ok(results_path):
+        results = pd.read_parquet(results_path)
+        present_variants = set(results.get("analysis_variant", pd.Series(dtype=str)).dropna().astype(str))
+        present_outcomes = set(results.get("outcome", pd.Series(dtype=str)).dropna().astype(str))
+        column_gap = _revelio_cached_column_gap(results, args.revelio_output)
+        out_paths = [
+            output_dir / f"did_att_by_in_us_condition_{indiv.OUTCOME_FILE_LABELS.get(outcome, _slug(outcome))}.png"
+            for outcome in expected_outcomes
+        ]
+        if (
+            expected_variants.issubset(present_variants)
+            and expected_outcomes.issubset(present_outcomes)
+            and not column_gap
+            and not _missing_assets(out_paths)
+        ):
+            log.hit("revelio_in_us_condition_results")
+            return results
+        log.rebuild("revelio_in_us_condition_results_missing_cache_or_plot")
+    if args.estimation_type == "twfe":
+        results = _compute_revelio_in_us_condition_results_twfe(
+            panel,
+            output_mode=args.revelio_output,
+            event_window=args.event_window,
+            scratch_dir=args.cache_dir / "revelio_in_us_condition_twfe_plot_scratch",
+        )
+    else:
+        results = _compute_revelio_in_us_condition_results_generic(
+            panel,
+            estimation_type=args.estimation_type,
+            output_mode=args.revelio_output,
+            event_window=args.event_window,
+            bootstrap_reps=args.bootstrap_reps,
+            random_seed=args.random_seed,
+        )
+    if results.empty:
+        log.skip("revelio_in_us_condition_empty_results")
+        return results
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    results.to_parquet(results_path, index=False)
+    results.to_csv(results_path.with_suffix(".csv"), index=False)
+    out_paths = _plot_revelio_in_us_condition_results(
+        results,
+        output_dir=output_dir,
+        output_mode=args.revelio_output,
+    )
+    log.output(results_path)
+    for path in out_paths:
+        log.output(path)
+    return results
+
+
+def _revelio_full_sample_button_expected_paths(args: argparse.Namespace) -> list[Path]:
+    return [
+        args.revelio_econ_output_dir
+        / f"did_att_by_full_sample_foreign_split_{indiv.OUTCOME_FILE_LABELS.get(outcome, _slug(outcome))}.png"
+        for outcome in REVELIO_MAIN_CONTROL_BUTTON_OUTCOMES
+    ]
+
+
+def _revelio_always_stem_cip_expected_paths(args: argparse.Namespace) -> list[Path]:
+    suffix = "" if args.revelio_output == "new_pooled_post" else "_t3"
+    return [
+        args.revelio_econ_output_dir
+        / f"did_att_by_always_stem_cip_group_{indiv.OUTCOME_FILE_LABELS.get(outcome, _slug(outcome))}{suffix}.png"
+        for outcome in REVELIO_MAIN_CONTROL_BUTTON_OUTCOMES
+    ]
+
+
+def _always_stem_button_expected_paths(args: argparse.Namespace) -> list[Path]:
+    return [
+        args.revelio_always_stem_output_dir
+        / f"did_att_by_variant_{indiv.OUTCOME_FILE_LABELS.get(outcome, _slug(outcome))}.png"
+        for outcome in REVELIO_MAIN_CONTROL_BUTTON_OUTCOMES
+    ]
+
+
+def _ensure_revelio_always_stem_button_results(
+    panel: pd.DataFrame,
+    *,
+    args: argparse.Namespace,
+    run_hash: str,
+    log: RunLog,
+) -> pd.DataFrame:
+    control_group = generalized.CONTROL_GROUP_ALWAYS_STEM
+    event_source_mode = "generalized_final_sample"
+    cache_slug = f"full_sample_{_slug(control_group)}"
+    panel_cache = args.cache_dir / f"revelio_final_panel_{cache_slug}_{run_hash}.parquet"
+    cfg_cache = args.cache_dir / f"relabel_indiv_laborlunch_20260507_{cache_slug}_{run_hash}.yaml"
+    did_cache = args.cache_dir / f"revelio_did_{cache_slug}_{run_hash}.parquet"
+    output_dir = args.revelio_always_stem_output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    _materialize_revelio_config(
+        base_config=args.base_config,
+        out_path=cfg_cache,
+        output_dir=output_dir,
+        panel_path=panel_cache,
+        did_path=did_cache,
+        horizons=args.horizons,
+        event_window=args.event_window,
+        event_source_mode=event_source_mode,
+        relabel_year_min=args.revelio_relabel_year_min,
+        relabel_year_max=args.revelio_relabel_year_max,
+        control_group=control_group,
+        did_plot_mode="pooled_post_by_horizon" if args.revelio_output == "new_pooled_post" else "event_study_by_cohort",
+        include_controls=False,
+    )
+    always_stem_panel = _build_revelio_variant_panels(
+        config_path=cfg_cache,
+        output_dir=output_dir,
+        cache_path=panel_cache,
+        force_rebuild=args.force_rebuild,
+        horizons=args.horizons,
+        event_window=args.event_window,
+        event_source_mode=event_source_mode,
+        relabel_year_min=args.revelio_relabel_year_min,
+        relabel_year_max=args.revelio_relabel_year_max,
+        control_group=control_group,
+        log=log,
+    )
+    log.output(panel_cache)
+
+    if args.estimation_type == "twfe":
+        results_path = args.cache_dir / f"revelio_always_stem_twfe_{args.revelio_output}_{run_hash}.parquet"
+        results = _render_revelio_twfe(
+            always_stem_panel,
+            output_dir=output_dir,
+            did_results_path=results_path,
+            include_controls=False,
+            output_mode=args.revelio_output,
+            event_window=args.event_window,
+            log=log,
+            render_plots=True,
+            force_rebuild=args.force_rebuild,
+            progress_label=f"always-stem/{args.revelio_output}",
+        )
+    else:
+        results_path = args.cache_dir / (
+            f"revelio_always_stem_{args.estimation_type}_{ESTIMATOR_AGGREGATION_VERSION}_{args.revelio_output}_{run_hash}.parquet"
+        )
+        results = _render_revelio_generic(
+            always_stem_panel,
+            output_dir=output_dir,
+            results_path=results_path,
+            estimation_type=args.estimation_type,
+            output_mode=args.revelio_output,
+            event_window=args.event_window,
+            bootstrap_reps=args.bootstrap_reps,
+            random_seed=args.random_seed,
+            log=log,
+            render_plots=True,
+            force_rebuild=_force_estimator_rebuild(args),
+            progress_label=f"always-stem/{args.revelio_output}",
+        )
+
+    missing = _missing_assets(_always_stem_button_expected_paths(args))
+    if missing:
+        raise RuntimeError(
+            "Missing Revelio always-STEM button assets after build:\n"
+            + "\n".join(f"  {path}" for path in missing)
+        )
+    log.output(output_dir)
+    return results
+
+
 def _plot_revelio_control_comparison_results(
     results: pd.DataFrame,
     *,
@@ -2018,16 +2480,14 @@ def _plot_revelio_control_comparison_results(
     if work.empty or x_col not in work.columns:
         return
 
+    work = work[work["analysis_variant"].astype(str).eq("foia_linked_person_baseline")].copy()
+    if work.empty:
+        return
+
     outcomes = [out for out in indiv.OUTCOMES if out in set(work["outcome"])]
-    variant_order = list(dict.fromkeys(work["analysis_variant"].dropna().astype(str).tolist()))
     control_order = [cg for cg in REVELIO_MAIN_CONTROL_GROUPS if cg in set(work["control_group"])]
     control_order += [cg for cg in work["control_group"].dropna().astype(str).unique().tolist() if cg not in control_order]
-    line_styles = {
-        generalized.CONTROL_GROUP_NEVER_TREATED: "-",
-        generalized.CONTROL_GROUP_ALWAYS_STEM: "--",
-        generalized.CONTROL_GROUP_LATE_TREATED: "-.",
-    }
-    offsets = np.linspace(-0.16, 0.16, num=max(1, len(control_order) * max(1, len(variant_order))))
+    offsets = np.linspace(-0.08, 0.08, num=max(1, len(control_order)))
 
     for outcome in outcomes:
         outcome_df = work[work["outcome"].eq(outcome)].dropna(subset=[x_col, "coef", "se"]).copy()
@@ -2039,41 +2499,36 @@ def _plot_revelio_control_comparison_results(
         offset_idx = 0
         ticks = sorted(pd.to_numeric(outcome_df[x_col], errors="coerce").dropna().astype(int).unique().tolist())
         for control_group in control_order:
-            for variant_idx, variant in enumerate(variant_order):
-                sub = outcome_df[
-                    outcome_df["control_group"].eq(control_group)
-                    & outcome_df["analysis_variant"].astype(str).eq(str(variant))
-                ].copy()
-                if sub.empty:
-                    offset_idx += 1
-                    continue
-                line_df = sub.sort_values(x_col)
-                color = indiv._analysis_variant_color(variant)  # noqa: SLF001
-                marker = REVELIO_SAMPLE_MARKERS.get(str(variant), "o")
-                linestyle = line_styles.get(control_group, "-")
-                x_vals = pd.to_numeric(line_df[x_col], errors="coerce").astype(float).to_numpy()
-                x_vals = x_vals + float(offsets[offset_idx]) if len(offsets) else x_vals
+            sub = outcome_df[outcome_df["control_group"].eq(control_group)].copy()
+            if sub.empty:
                 offset_idx += 1
-                label = (
-                    f"{indiv._analysis_variant_label(variant)} "  # noqa: SLF001
-                    f"({FOIA_CONTROL_GROUP_LABELS.get(control_group, control_group)})"
-                )
-                errorbar_container = ax.errorbar(
-                    x_vals,
-                    pd.to_numeric(line_df["coef"], errors="coerce").astype(float).to_numpy(),
-                    yerr=1.96 * pd.to_numeric(line_df["se"], errors="coerce").astype(float).to_numpy(),
-                    fmt=linestyle,
-                    color=color,
-                    ecolor=llstyle.rgba(color, indiv.DI_D_ERRORBAR_ALPHA),
-                    elinewidth=indiv.DI_D_PLOT_MARKER_SIZE,
-                    capsize=0,
-                    marker=marker,
-                    markersize=indiv.DI_D_PLOT_MARKER_SIZE,
-                    linewidth=1.5,
-                    label=label,
-                )
-                indiv._soften_errorbar_interval(errorbar_container)  # noqa: SLF001
-                plotted = True
+                continue
+            line_df = sub.sort_values(x_col)
+            color = FOIA_CONTROL_GROUP_COLORS.get(
+                control_group,
+                generalized.base.PALETTE_SEQ[offset_idx % len(generalized.base.PALETTE_SEQ)],
+            )
+            marker = FOIA_CONTROL_GROUP_MARKERS.get(control_group, "o")
+            x_vals = pd.to_numeric(line_df[x_col], errors="coerce").astype(float).to_numpy()
+            x_vals = x_vals + float(offsets[offset_idx]) if len(offsets) else x_vals
+            offset_idx += 1
+            label = FOIA_CONTROL_GROUP_LABELS.get(control_group, control_group.replace("_", " ").title())
+            errorbar_container = ax.errorbar(
+                x_vals,
+                pd.to_numeric(line_df["coef"], errors="coerce").astype(float).to_numpy(),
+                yerr=1.96 * pd.to_numeric(line_df["se"], errors="coerce").astype(float).to_numpy(),
+                fmt="-",
+                color=color,
+                ecolor=llstyle.rgba(color, indiv.DI_D_ERRORBAR_ALPHA),
+                elinewidth=indiv.DI_D_PLOT_MARKER_SIZE,
+                capsize=0,
+                marker=marker,
+                markersize=indiv.DI_D_PLOT_MARKER_SIZE,
+                linewidth=1.6,
+                label=label,
+            )
+            indiv._soften_errorbar_interval(errorbar_container)  # noqa: SLF001
+            plotted = True
         if not plotted:
             plt.close(fig)
             continue
@@ -2088,9 +2543,460 @@ def _plot_revelio_control_comparison_results(
         ax.set_ylabel(f"did coef: {indiv.OUTCOME_LABELS.get(outcome, outcome)}", fontsize=indiv.DI_D_PLOT_FONT_SIZE)
         ax.set_title("")
         llstyle.right_legend(ax)
+        summary_text = _revelio_always_stem_summary_text(outcome_df, x_col=x_col)
+        generalized._add_did_summary_text(ax, summary_text)  # noqa: SLF001
         out_path = output_dir / f"did_att_by_variant_{indiv.OUTCOME_FILE_LABELS.get(outcome, _slug(outcome))}{file_suffix}.png"
         llstyle.savefig(fig, out_path, dpi=150)
         outcome_df.to_csv(out_path.with_suffix(".csv"), index=False)
+
+
+def _format_revelio_outcome_value(outcome: str, value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "NA"
+    value = float(value)
+    if outcome in {"in_us", "in_school", "linkedin_active_through_target_year"}:
+        return f"{100.0 * value:.1f} pp"
+    if outcome == "salary_imputed":
+        return f"${value:,.0f}"
+    if outcome in {"n_pos", "n_employers", "avg_employer_tenure_years", "n_internship_positions"}:
+        return f"{value:.2f}"
+    return f"{value:.3f}"
+
+
+def _revelio_always_stem_summary_text(outcome_df: pd.DataFrame, *, x_col: str) -> str | None:
+    if outcome_df.empty or "control_group" not in outcome_df.columns:
+        return None
+    rows = outcome_df[
+        outcome_df["control_group"].astype(str).eq(generalized.CONTROL_GROUP_ALWAYS_STEM)
+    ].copy()
+    if rows.empty or "baseline_mean" not in rows.columns:
+        return None
+    rows[x_col] = pd.to_numeric(rows[x_col], errors="coerce")
+    if x_col == "horizon_years" and rows[x_col].eq(3).any():
+        rows = rows[rows[x_col].eq(3)].copy()
+    rows["coef"] = pd.to_numeric(rows["coef"], errors="coerce")
+    rows["se"] = pd.to_numeric(rows.get("se", np.nan), errors="coerce")
+    rows["baseline_mean"] = pd.to_numeric(rows["baseline_mean"], errors="coerce")
+    rows = rows.dropna(subset=[x_col, "coef", "baseline_mean"]).copy()
+    if rows.empty:
+        return None
+    weights = (
+        pd.to_numeric(rows["n_obs"], errors="coerce").fillna(0.0).astype(float)
+        if "n_obs" in rows.columns
+        else pd.Series(1.0, index=rows.index, dtype=float)
+    )
+    if weights.sum() <= 0:
+        weights = pd.Series(1.0, index=rows.index, dtype=float)
+    weights = weights / weights.sum()
+    coef = float(np.dot(weights.to_numpy(), rows["coef"].astype(float).to_numpy()))
+    se_vals = rows["se"].fillna(0.0).astype(float).to_numpy()
+    se = float(np.sqrt(np.dot(np.square(weights.to_numpy()), np.square(se_vals))))
+    baseline_mean = float(np.dot(weights.to_numpy(), rows["baseline_mean"].astype(float).to_numpy()))
+    effect_size = (
+        100.0 * coef / baseline_mean
+        if pd.notna(coef) and pd.notna(baseline_mean) and not np.isclose(baseline_mean, 0.0)
+        else float("nan")
+    )
+    outcome = str(rows["outcome"].iloc[0]) if "outcome" in rows.columns else ""
+    min_x = int(rows[x_col].min())
+    max_x = int(rows[x_col].max())
+    axis_label = _revelio_summary_axis_label(x_col)
+    window_text = f"{axis_label} = {min_x}" if min_x == max_x else f"{axis_label} = {min_x} to {max_x}"
+    effect_text = "NA" if pd.isna(effect_size) else f"{float(effect_size):.1f}%"
+    return (
+        f"Baseline mean ({window_text}): "
+        f"{_format_revelio_outcome_value(outcome, baseline_mean)}\n"
+        f"Dynamic avg ({window_text}): "
+        f"{_format_revelio_outcome_value(outcome, coef)} ({_format_revelio_outcome_value(outcome, se)})\n"
+        f"Effect size: {effect_text}"
+    )
+
+
+def _revelio_summary_axis_label(x_col: str) -> str:
+    return "h" if x_col == "horizon_years" else "t"
+
+
+def _plot_revelio_full_sample_control_raw_means(
+    panels_by_control: dict[str, pd.DataFrame],
+    *,
+    output_dir: Path,
+    event_window: int,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    keep_horizons = {3}
+    rows_by_outcome: dict[str, list[pd.DataFrame]] = {outcome: [] for outcome in indiv.OUTCOMES}
+
+    for control_group in REVELIO_MAIN_CONTROL_GROUPS:
+        panel = panels_by_control.get(control_group)
+        if panel is None or panel.empty:
+            continue
+        sample = panel[panel["analysis_variant"].astype(str).eq("foia_linked_person_baseline")].copy()
+        if sample.empty:
+            continue
+        for treated_value, role in ((1, "Treated"), (0, "Control")):
+            role_panel = sample[pd.to_numeric(sample["treated_ind"], errors="coerce").eq(treated_value)].copy()
+            if role_panel.empty:
+                continue
+            agg = indiv._agg_cohort_time(role_panel)  # noqa: SLF001
+            if agg.empty:
+                continue
+            agg = agg[
+                agg["cohort_t"].between(-int(event_window), int(event_window))
+                & agg["horizon_years"].isin(keep_horizons)
+            ].copy()
+            if agg.empty:
+                continue
+            agg["control_group"] = control_group
+            agg["role"] = role
+            agg["analysis_variant"] = "foia_linked_person_baseline"
+            for outcome in indiv.OUTCOMES:
+                if f"{outcome}_mean" in agg.columns:
+                    rows_by_outcome[outcome].append(agg)
+
+    out_paths: list[Path] = []
+    for outcome, frames in rows_by_outcome.items():
+        if not frames:
+            continue
+        mean_col = f"{outcome}_mean"
+        plot_df = pd.concat(frames, ignore_index=True, sort=False)
+        plot_df["cohort_t"] = pd.to_numeric(plot_df["cohort_t"], errors="coerce")
+        plot_df["horizon_years"] = pd.to_numeric(plot_df["horizon_years"], errors="coerce")
+        plot_df[mean_col] = pd.to_numeric(plot_df[mean_col], errors="coerce")
+        plot_df = plot_df.dropna(subset=["cohort_t", "horizon_years", mean_col, "control_group", "role"]).copy()
+        if plot_df.empty:
+            continue
+
+        llstyle.apply_style()
+        fig, ax = plt.subplots(figsize=llstyle.FIGSIZE)
+        for control_idx, control_group in enumerate(REVELIO_MAIN_CONTROL_GROUPS):
+            control_df = plot_df[plot_df["control_group"].eq(control_group)].copy()
+            if control_df.empty:
+                continue
+            base_color = FOIA_CONTROL_GROUP_COLORS.get(
+                control_group,
+                generalized.base.PALETTE_SEQ[control_idx % len(generalized.base.PALETTE_SEQ)],
+            )
+            control_label = FOIA_CONTROL_GROUP_LABELS.get(control_group, control_group.replace("_", " ").title())
+            treated_marker = FOIA_CONTROL_GROUP_MARKERS.get(control_group, "o")
+            for role, linestyle, marker in (
+                ("Treated", "-", treated_marker),
+                ("Control", "--", "x" if control_group == generalized.CONTROL_GROUP_ALWAYS_STEM else "o"),
+            ):
+                role_df = control_df[control_df["role"].eq(role)].copy()
+                if role_df.empty:
+                    continue
+                sub = role_df.sort_values("cohort_t")
+                ax.plot(
+                    sub["cohort_t"].astype(float).to_numpy(),
+                    sub[mean_col].astype(float).to_numpy(),
+                    color=base_color,
+                    linestyle=linestyle,
+                    marker=marker,
+                    linewidth=1.6,
+                    markersize=indiv.EVENT_PLOT_MARKER_SIZE,
+                    label=f"{role}: {control_label}",
+                )
+
+        ax.axvline(x=indiv.DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+        ax.set_xlabel("Graduation year relative to relabel event", fontsize=indiv.DI_D_PLOT_FONT_SIZE)
+        ax.set_ylabel(indiv.OUTCOME_LABELS.get(outcome, outcome), fontsize=indiv.DI_D_PLOT_FONT_SIZE)
+        ax.set_title("")
+        generalized.apply_laborlunch_event_time_axis(ax)
+        if ax.get_legend_handles_labels()[0]:
+            llstyle.right_legend(ax)
+        out_path = output_dir / f"{outcome}_event_study_treated_vs_control_foia_linked_person_baseline.png"
+        plot_df.to_csv(out_path.with_suffix(".csv"), index=False)
+        llstyle.savefig(fig, out_path, dpi=150)
+        out_paths.append(out_path)
+    return out_paths
+
+
+def _revelio_cip_group_label(value: object) -> str:
+    text = str(value)
+    labels = {
+        "architecture_design_to_built_env_stem": "Architecture/design -> built-env STEM",
+        "business_52_to_52": "Business -> business STEM",
+        "econ_to_quant_econ": "Economics -> quantitative economics",
+        "finance_to_quantitative_finance": "Finance -> quantitative finance",
+    }
+    if text in labels:
+        return labels[text]
+    return text.replace("_to_", " -> ").replace("_", " ").title()
+
+
+def _iter_revelio_always_stem_cip_panels(panel: pd.DataFrame) -> Iterator[tuple[str, str, pd.DataFrame]]:
+    if panel.empty or "analysis_variant" not in panel.columns or "broad_pair_bin" not in panel.columns:
+        return
+    base = panel[panel["analysis_variant"].astype(str).eq("foia_linked_person_baseline")].copy()
+    if base.empty:
+        return
+    for cip_group, sub in base.groupby("broad_pair_bin", dropna=True, sort=True):
+        if sub.empty or sub["treated_ind"].nunique() < 2:
+            continue
+        cip_text = str(cip_group)
+        variant = f"foia_linked_always_stem_cip_{_slug(cip_text)}"
+        subgroup = sub.copy()
+        subgroup["analysis_variant"] = variant
+        subgroup["cip_group"] = cip_text
+        yield variant, cip_text, subgroup
+
+
+def _revelio_always_stem_cip_expected_variants(panel: pd.DataFrame) -> list[str]:
+    return [variant for variant, _cip_group, _sub in _iter_revelio_always_stem_cip_panels(panel)]
+
+
+def _compute_revelio_always_stem_cip_results_generic(
+    panel: pd.DataFrame,
+    *,
+    estimation_type: str,
+    output_mode: str,
+    event_window: int,
+    bootstrap_reps: int,
+    random_seed: int,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    outcomes = [outcome for outcome in REVELIO_MAIN_CONTROL_BUTTON_OUTCOMES if outcome in panel.columns]
+    tasks: list[tuple[str, str, pd.DataFrame, str, int]] = []
+    for variant, cip_group, variant_panel in _iter_revelio_always_stem_cip_panels(panel):
+        horizons = sorted(pd.to_numeric(variant_panel["horizon_years"], errors="coerce").dropna().astype(int).unique())
+        for outcome in outcomes:
+            tasks.extend((variant, cip_group, variant_panel, outcome, int(horizon)) for horizon in horizons)
+    task_progress = ProgressCounter("Revelio always-STEM CIP estimates", len(tasks))
+    for variant, cip_group, variant_panel, outcome, horizon in tasks:
+        reg_df = _collapse_revelio_for_generic(
+            variant_panel,
+            outcome=outcome,
+            horizon=int(horizon),
+            event_window=event_window,
+        )
+        if reg_df.empty:
+            task_progress.advance(f"{cip_group}/{outcome}/h{horizon} (empty)")
+            continue
+        estimates = estimate_dynamic_effects(
+            reg_df,
+            yvar=outcome,
+            estimation_type=estimation_type,
+            reference_event_time=-2,
+            bootstrap_reps=bootstrap_reps,
+            random_seed=random_seed,
+            use_weights=True,
+        )
+        if estimates.empty:
+            task_progress.advance(f"{cip_group}/{outcome}/h{horizon} (no estimates)")
+            continue
+        if output_mode == "old_event_time":
+            plot_df = estimates.copy()
+            plot_df["analysis_variant"] = variant
+            plot_df["did_model"] = estimation_type
+            plot_df["did_estimator"] = estimation_type
+            plot_df["outcome"] = outcome
+            plot_df["horizon_years"] = int(horizon)
+            plot_df["cohort_t"] = plot_df["event_t"]
+            plot_df["cip_group"] = cip_group
+            rows.extend(plot_df.to_dict("records"))
+        else:
+            coef, se = _pooled_from_dynamic(estimates, reg_df)
+            stats = _pooled_effect_stats(reg_df, yvar=outcome, coef=coef)
+            rows.append(
+                {
+                    "analysis_variant": variant,
+                    "did_model": estimation_type,
+                    "did_estimator": estimation_type,
+                    "outcome": outcome,
+                    "horizon_years": int(horizon),
+                    "coef": coef,
+                    "se": se,
+                    "ci_lower": coef - 1.96 * se if pd.notna(coef) and pd.notna(se) else np.nan,
+                    "ci_upper": coef + 1.96 * se if pd.notna(coef) and pd.notna(se) else np.nan,
+                    **stats,
+                    "n_obs": int(len(reg_df)),
+                    "n_unitids": int(reg_df["unitid"].nunique()),
+                    "cip_group": cip_group,
+                }
+            )
+        task_progress.advance(f"{cip_group}/{outcome}/h{horizon}")
+    return pd.DataFrame(rows)
+
+
+def _plot_revelio_always_stem_cip_results(
+    results: pd.DataFrame,
+    *,
+    output_dir: Path,
+    output_mode: str,
+) -> list[Path]:
+    if results.empty or "cip_group" not in results.columns:
+        return []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    work = results.copy()
+    if output_mode == "new_pooled_post":
+        x_col = "horizon_years"
+        x_label = "Calendar year relative to graduation"
+        file_suffix = ""
+        excluded = set(getattr(indiv, "HORIZON_PROFILE_EXCLUDED_OUTCOMES", set()))
+        work = work[~work["outcome"].isin(excluded)].copy()
+    else:
+        x_col = "cohort_t" if "cohort_t" in work.columns else "event_t"
+        x_label = "Graduation Cohort Relative to Relabel Event"
+        file_suffix = "_t3"
+        if "horizon_years" in work.columns:
+            work = work[pd.to_numeric(work["horizon_years"], errors="coerce").eq(3)].copy()
+    if work.empty or x_col not in work.columns:
+        return []
+
+    out_paths: list[Path] = []
+    cip_order = sorted(work["cip_group"].dropna().astype(str).unique().tolist())
+    offsets = {
+        cip_group: float(offset)
+        for cip_group, offset in zip(cip_order, llstyle.offsets(max(1, len(cip_order)), span=0.30))
+    }
+    markers = ("o", "s", "^", "D", "P", "X")
+    for outcome in REVELIO_MAIN_CONTROL_BUTTON_OUTCOMES:
+        outcome_df = work[work["outcome"].eq(outcome)].dropna(subset=[x_col, "coef", "se", "cip_group"]).copy()
+        if outcome_df.empty:
+            continue
+        llstyle.apply_style()
+        fig, ax = plt.subplots(figsize=llstyle.FIGSIZE)
+        plotted = False
+        ticks = sorted(pd.to_numeric(outcome_df[x_col], errors="coerce").dropna().astype(int).unique().tolist())
+        for idx, cip_group in enumerate(cip_order):
+            sub = outcome_df[outcome_df["cip_group"].astype(str).eq(cip_group)].sort_values(x_col)
+            if sub.empty:
+                continue
+            color = generalized.base.PALETTE_SEQ[idx % len(generalized.base.PALETTE_SEQ)]
+            x_vals = pd.to_numeric(sub[x_col], errors="coerce").astype(float).to_numpy()
+            x_vals = x_vals + offsets.get(cip_group, 0.0)
+            errorbar_container = ax.errorbar(
+                x_vals,
+                pd.to_numeric(sub["coef"], errors="coerce").astype(float).to_numpy(),
+                yerr=1.96 * pd.to_numeric(sub["se"], errors="coerce").astype(float).to_numpy(),
+                fmt="-",
+                color=color,
+                ecolor=llstyle.rgba(color, indiv.DI_D_ERRORBAR_ALPHA),
+                elinewidth=indiv.DI_D_PLOT_MARKER_SIZE,
+                capsize=0,
+                marker=markers[idx % len(markers)],
+                markersize=indiv.DI_D_PLOT_MARKER_SIZE,
+                linewidth=1.55,
+                label=_revelio_cip_group_label(cip_group),
+            )
+            indiv._soften_errorbar_interval(errorbar_container)  # noqa: SLF001
+            plotted = True
+        if not plotted:
+            plt.close(fig)
+            continue
+        ax.axhline(y=0, linestyle="--", color="gray", linewidth=1)
+        if output_mode != "new_pooled_post":
+            ax.scatter([-2], [0.0], facecolors="white", edgecolors="black", linewidths=1.3, s=65, zorder=4)
+            ax.axvline(x=indiv.DI_D_EVENT_LINE_X, linestyle=":", color="gray", linewidth=1)
+        if ticks:
+            ax.set_xticks(ticks)
+        ax.set_xlabel(x_label, fontsize=indiv.DI_D_PLOT_FONT_SIZE)
+        ax.set_ylabel(f"did coef: {indiv.OUTCOME_LABELS.get(outcome, outcome)}", fontsize=indiv.DI_D_PLOT_FONT_SIZE)
+        ax.set_title("")
+        llstyle.right_legend(ax)
+        file_label = indiv.OUTCOME_FILE_LABELS.get(outcome, _slug(outcome))
+        out_path = output_dir / f"did_att_by_always_stem_cip_group_{file_label}{file_suffix}.png"
+        outcome_df.to_csv(out_path.with_suffix(".csv"), index=False)
+        llstyle.savefig(fig, out_path, dpi=150)
+        out_paths.append(out_path)
+    return out_paths
+
+
+def _ensure_revelio_always_stem_cip_results(
+    panels_by_control: dict[str, pd.DataFrame],
+    *,
+    args: argparse.Namespace,
+    run_hash: str,
+    log: RunLog,
+) -> pd.DataFrame:
+    control_group = generalized.CONTROL_GROUP_ALWAYS_STEM
+    panel = panels_by_control.get(control_group)
+    if panel is None or panel.empty:
+        log.skip("revelio_always_stem_cip_no_panel")
+        return pd.DataFrame()
+    expected_variants = set(_revelio_always_stem_cip_expected_variants(panel))
+    expected_outcomes = {outcome for outcome in REVELIO_MAIN_CONTROL_BUTTON_OUTCOMES if outcome in panel.columns}
+    if not expected_variants or not expected_outcomes:
+        log.skip("revelio_always_stem_cip_no_expected_groups")
+        return pd.DataFrame()
+    results_path = args.cache_dir / (
+        f"revelio_always_stem_cip_{args.estimation_type}_{ESTIMATOR_AGGREGATION_VERSION}_{args.revelio_output}_{run_hash}.parquet"
+    )
+    out_paths = _revelio_always_stem_cip_expected_paths(args)
+    if not _force_estimator_rebuild(args) and _file_ok(results_path):
+        results = pd.read_parquet(results_path)
+        present_variants = set(results.get("analysis_variant", pd.Series(dtype=str)).dropna().astype(str))
+        present_outcomes = set(results.get("outcome", pd.Series(dtype=str)).dropna().astype(str))
+        column_gap = _revelio_cached_column_gap(results, args.revelio_output)
+        if expected_variants.issubset(present_variants) and expected_outcomes.issubset(present_outcomes) and not column_gap:
+            plotted = _plot_revelio_always_stem_cip_results(
+                results,
+                output_dir=args.revelio_econ_output_dir,
+                output_mode=args.revelio_output,
+            )
+            for path in plotted:
+                log.output(path)
+                log.output(path.with_suffix(".csv"))
+            if not _missing_assets(out_paths):
+                log.hit("revelio_always_stem_cip_results")
+                return results
+        log.rebuild("revelio_always_stem_cip_results_missing_cache_or_plot")
+    if args.estimation_type == "twfe":
+        grouped_panel = pd.concat(
+            [sub for _variant, _cip_group, sub in _iter_revelio_always_stem_cip_panels(panel)],
+            ignore_index=True,
+            sort=False,
+        )
+        results = _render_revelio_twfe(
+            grouped_panel,
+            output_dir=args.revelio_econ_output_dir,
+            did_results_path=results_path,
+            include_controls=False,
+            output_mode=args.revelio_output,
+            event_window=args.event_window,
+            log=log,
+            render_plots=False,
+            force_rebuild=args.force_rebuild,
+            progress_label=f"always-stem-cip/{args.revelio_output}",
+        )
+        cip_map = {
+            variant: cip_group
+            for variant, cip_group, _sub in _iter_revelio_always_stem_cip_panels(panel)
+        }
+        if not results.empty:
+            results = results[results["outcome"].isin(expected_outcomes)].copy()
+            results["cip_group"] = results["analysis_variant"].astype(str).map(cip_map)
+            results.to_parquet(results_path, index=False)
+            results.to_csv(results_path.with_suffix(".csv"), index=False)
+    else:
+        results = _compute_revelio_always_stem_cip_results_generic(
+            panel,
+            estimation_type=args.estimation_type,
+            output_mode=args.revelio_output,
+            event_window=args.event_window,
+            bootstrap_reps=args.bootstrap_reps,
+            random_seed=args.random_seed,
+        )
+        if not results.empty:
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            results.to_parquet(results_path, index=False)
+            results.to_csv(results_path.with_suffix(".csv"), index=False)
+            log.output(results_path)
+    plotted = _plot_revelio_always_stem_cip_results(
+        results,
+        output_dir=args.revelio_econ_output_dir,
+        output_mode=args.revelio_output,
+    )
+    for path in plotted:
+        log.output(path)
+        log.output(path.with_suffix(".csv"))
+    missing = _missing_assets(out_paths)
+    if missing:
+        raise RuntimeError(
+            "Missing Revelio always-STEM CIP button assets after build:\n"
+            + "\n".join(f"  {path}" for path in missing)
+        )
+    return results
 
 
 def _revelio_estimator_cache_path(args: argparse.Namespace, run_hash: str, estimation_type: str) -> Path:
@@ -2186,7 +3092,7 @@ def _load_revelio_estimation_rows(args: argparse.Namespace, run_hash: str, outco
         if data.empty:
             continue
         if "analysis_variant" in data.columns:
-            data = data[data["analysis_variant"].eq("stage04_all")].copy()
+            data = data[data["analysis_variant"].eq("foia_linked_person_baseline")].copy()
         if data.empty:
             continue
         data["estimator"] = estimation_type
@@ -3483,19 +4389,100 @@ def _foia_main_did_path(args: argparse.Namespace, yvar: str) -> Path:
     return args.foia_plots_dir / f"pooled_{yvar}_did_event_time_never_treated.png"
 
 
-def _foia_main_summary_text(did_panel: pd.DataFrame, *, yvar: str) -> str | None:
+def _foia_baseline_mean_for_summary(
+    did_panel: pd.DataFrame,
+    *,
+    yvar: str,
+    event_window: int,
+) -> float:
     plot_panel = _foia_expand_donor_controls_by_relabel_cohort(did_panel)
     did_spec = (
         generalized.DID_SPEC_INDIVIDUAL_BIN_DEGREE_FE
         if _is_foia_donor_control_panel(did_panel)
         else generalized.DID_SPEC_COLLAPSED_UNIT_FE
     )
+    reg_df = generalized._prepare_did_regression_df(  # noqa: SLF001
+        plot_panel,
+        yvar=yvar,
+        did_spec=did_spec,
+    )
+    if reg_df.empty or yvar not in reg_df.columns:
+        return float("nan")
+    event_t = pd.to_numeric(reg_df["event_t"], errors="coerce")
+    treated = pd.to_numeric(reg_df["treated"], errors="coerce")
+    baseline = reg_df[
+        treated.eq(1) & event_t.between(-int(event_window), generalized.DI_D_REFERENCE_EVENT_TIME)
+    ].copy()
+    if baseline.empty:
+        return float("nan")
+    return float(pd.to_numeric(baseline[yvar], errors="coerce").mean())
+
+
+def _treated_weighted_dynamic_summary(
+    dynamic_rows: pd.DataFrame,
+) -> tuple[float, float] | None:
+    if dynamic_rows.empty or "event_t" not in dynamic_rows.columns or "coef" not in dynamic_rows.columns:
+        return None
+    rows = dynamic_rows.copy()
+    if "reference_event_t" in rows.columns:
+        rows = rows[
+            pd.to_numeric(rows["reference_event_t"], errors="coerce").eq(generalized.DI_D_REFERENCE_EVENT_TIME)
+        ].copy()
+    rows["event_t"] = pd.to_numeric(rows["event_t"], errors="coerce")
+    rows["coef"] = pd.to_numeric(rows["coef"], errors="coerce")
+    rows["se"] = pd.to_numeric(rows.get("se", np.nan), errors="coerce")
+    rows = rows[
+        rows["event_t"].between(REVELIO_POOLED_EVENT_MIN, REVELIO_POOLED_EVENT_MAX)
+    ].dropna(subset=["event_t", "coef"]).copy()
+    if rows.empty:
+        return None
+    if "treated_total_grads" in rows.columns:
+        weights = pd.to_numeric(rows["treated_total_grads"], errors="coerce").fillna(0.0).astype(float)
+    else:
+        weights = pd.Series(1.0, index=rows.index, dtype=float)
+    if weights.sum() <= 0:
+        weights = pd.Series(1.0, index=rows.index, dtype=float)
+    weights = weights / weights.sum()
+    coef = float(np.dot(weights.to_numpy(), rows["coef"].astype(float).to_numpy()))
+    se_vals = rows["se"].fillna(0.0).astype(float).to_numpy()
+    se = float(np.sqrt(np.dot(np.square(weights.to_numpy()), np.square(se_vals))))
+    return coef, se
+
+
+def _foia_main_summary_text(
+    did_panel: pd.DataFrame,
+    *,
+    yvar: str,
+    dynamic_rows: pd.DataFrame,
+    event_window: int,
+) -> str | None:
     try:
-        return generalized.build_did_summary_text(
-            plot_panel,
+        dynamic_summary = _treated_weighted_dynamic_summary(dynamic_rows)
+        if dynamic_summary is None:
+            return None
+        coef, se = dynamic_summary
+        baseline_mean = _foia_baseline_mean_for_summary(
+            did_panel,
             yvar=yvar,
-            did_spec=did_spec,
-            use_weights=False,
+            event_window=event_window,
+        )
+        effect_size = (
+            100.0 * coef / baseline_mean
+            if pd.notna(coef) and pd.notna(baseline_mean) and not np.isclose(baseline_mean, 0.0)
+            else float("nan")
+        )
+        baseline_text = generalized._format_outcome_value(yvar, baseline_mean)  # noqa: SLF001
+        coef_text = generalized._format_outcome_value(yvar, coef)  # noqa: SLF001
+        se_text = generalized._format_se_value(yvar, se)  # noqa: SLF001
+        effect_text = "NA" if pd.isna(effect_size) else f"{float(effect_size):.1f}%"
+        post_min_display = REVELIO_POOLED_EVENT_MIN + generalized.LABORLUNCH_EVENT_TIME_LABEL_SHIFT
+        post_max_display = REVELIO_POOLED_EVENT_MAX + generalized.LABORLUNCH_EVENT_TIME_LABEL_SHIFT
+        baseline_min_display = -int(event_window) + generalized.LABORLUNCH_EVENT_TIME_LABEL_SHIFT
+        baseline_max_display = generalized.DI_D_REFERENCE_EVENT_TIME + generalized.LABORLUNCH_EVENT_TIME_LABEL_SHIFT
+        return (
+            f"Baseline mean (t = {baseline_min_display} to {baseline_max_display}): {baseline_text}\n"
+            f"Dynamic avg (t = {post_min_display} to {post_max_display}): {coef_text} ({se_text})\n"
+            f"Effect size: {effect_text}"
         )
     except Exception as exc:
         print(f"Warning: could not build FOIA summary box for {yvar}: {exc}", flush=True)
@@ -3584,15 +4571,13 @@ def _plot_foia_main_control_comparison_did(
         )
 
     ax.axhline(y=0, linestyle="--", color="gray", linewidth=1)
-    ax.axvline(x=generalized.DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    ax.axvline(x=generalized.LABORLUNCH_DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
     ax.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=axis_fontsize)
     ax.set_ylabel(generalized._did_coef_ylabel(yvar), fontsize=axis_fontsize)  # noqa: SLF001
     generalized._format_yaxis_for_outcome(ax, yvar)  # noqa: SLF001
     ax.tick_params(axis="both", labelsize=tick_fontsize)
     ax.set_title("")
-    event_ticks = list(range(generalized.PLOT_EVENT_MIN, generalized.PLOT_EVENT_MAX + 1))
-    ax.set_xticks(event_ticks)
-    ax.set_xlim(generalized.PLOT_EVENT_MIN - 0.6, generalized.PLOT_EVENT_MAX + 0.6)
+    generalized.apply_laborlunch_event_time_axis(ax)
     legend = llstyle.right_legend(ax)
     if legend is not None and text_scale != 1.0:
         for text in legend.get_texts():
@@ -3675,14 +4660,12 @@ def _plot_foia_main_control_comparison_raw_means(
                 label=f"{role_label}: {control_label}",
             )
 
-    ax.axvline(x=generalized.DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
+    ax.axvline(x=generalized.LABORLUNCH_DI_D_EVENT_LINE_X, linestyle="--", color="gray", linewidth=1)
     ax.set_xlabel("Graduation Cohort Relative to Relabel Event", fontsize=generalized.DI_D_PLOT_FONT_SIZE)
     ax.set_ylabel(generalized._outcome_ylabel(yvar), fontsize=generalized.DI_D_PLOT_FONT_SIZE)  # noqa: SLF001
     generalized._format_yaxis_for_outcome(ax, yvar)  # noqa: SLF001
     ax.set_title("")
-    event_ticks = list(range(generalized.PLOT_EVENT_MIN, generalized.PLOT_EVENT_MAX + 1))
-    ax.set_xticks(event_ticks)
-    ax.set_xlim(generalized.PLOT_EVENT_MIN - 0.6, generalized.PLOT_EVENT_MAX + 0.6)
+    generalized.apply_laborlunch_event_time_axis(ax)
     llstyle.right_legend(ax)
     out_path = _foia_main_raw_mean_path(args, yvar)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3815,7 +4798,6 @@ def _ensure_foia_main_estimator_plots(args: argparse.Namespace, log: RunLog) -> 
                     for control_group in control_groups
                 }
             panels_for_yvar = ipeds_did_panels
-        summary_panel = panels_for_yvar[FOIA_DEFAULT_CONTROL_GROUP]
         rows_by_control: dict[str, pd.DataFrame] = {}
         for control_group in control_groups:
             cache_path = _ensure_foia_estimator_cache(
@@ -3829,12 +4811,24 @@ def _ensure_foia_main_estimator_plots(args: argparse.Namespace, log: RunLog) -> 
             rows = pd.read_csv(cache_path)
             rows["estimator"] = args.estimation_type
             rows_by_control[control_group] = rows
+        summary_control_group = (
+            generalized.CONTROL_GROUP_ALWAYS_STEM
+            if generalized.CONTROL_GROUP_ALWAYS_STEM in rows_by_control
+            else FOIA_DEFAULT_CONTROL_GROUP
+        )
+        summary_panel = panels_for_yvar[summary_control_group]
+        summary_text = _foia_main_summary_text(
+            summary_panel,
+            yvar=yvar,
+            dynamic_rows=rows_by_control[summary_control_group],
+            event_window=args.event_window,
+        )
         if comparison_enabled:
             out_path = _plot_foia_main_control_comparison_did(
                 rows_by_control,
                 args=args,
                 yvar=yvar,
-                summary_text=_foia_main_summary_text(summary_panel, yvar=yvar),
+                summary_text=summary_text,
             )
         else:
             rows = rows_by_control[FOIA_DEFAULT_CONTROL_GROUP]
@@ -3845,7 +4839,7 @@ def _ensure_foia_main_estimator_plots(args: argparse.Namespace, log: RunLog) -> 
                 out_dir=args.foia_plots_dir,
                 file_stem=f"pooled_{yvar}_did_event_time_never_treated",
                 reference_event_time=generalized.DI_D_REFERENCE_EVENT_TIME,
-                summary_text=_foia_main_summary_text(summary_panel, yvar=yvar),
+                summary_text=summary_text,
             )
         if out_path is None:
             raise RuntimeError(f"No FOIA main {args.estimation_type} plot was produced for {yvar}.")
@@ -4069,11 +5063,25 @@ def _discard_corrupt_latex_auxiliary_files(tex_path: Path) -> list[Path]:
         path = tex_path.with_suffix(suffix)
         if not path.exists() or path.is_dir():
             continue
-        if b"\x00" not in path.read_bytes():
+        if not _latex_auxiliary_file_corrupt(path):
             continue
         path.unlink()
         discarded.append(path)
     return discarded
+
+
+def _latex_auxiliary_file_corrupt(path: Path) -> bool:
+    data = path.read_bytes()
+    if b"\x00" in data:
+        return True
+    try:
+        text = data.decode()
+    except UnicodeDecodeError:
+        return True
+    lines = [line for line in text.splitlines() if line.strip()]
+    if lines and lines[-1].count("{") != lines[-1].count("}"):
+        return True
+    return False
 
 
 def _revelio_alt_spec_config(output_mode: str) -> dict[str, str]:
@@ -4136,9 +5144,66 @@ def _ensure_revelio_alternate_spec_appendix(
     args: argparse.Namespace,
     run_hash: str,
     log: RunLog,
+    panels_by_control: dict[str, pd.DataFrame] | None = None,
+    primary_control_group: str | None = None,
 ) -> None:
     spec = _revelio_alt_spec_config(args.revelio_output)
     alt_mode = spec["alternate_output_mode"]
+    control_panels = panels_by_control or {primary_control_group or _revelio_primary_control_group(args.revelio_main_did_sample): panel}
+    if len(control_panels) > 1:
+        frames: list[pd.DataFrame] = []
+        primary = primary_control_group or next(iter(control_panels))
+        for control_group, control_panel in control_panels.items():
+            if args.estimation_type == "twfe":
+                result = _render_revelio_twfe(
+                    control_panel,
+                    output_dir=args.revelio_alt_output_dir,
+                    did_results_path=args.cache_dir / (
+                        f"revelio_alt_twfe_{alt_mode}_{_slug(control_group)}_{run_hash}.parquet"
+                    ),
+                    include_controls=False,
+                    output_mode=alt_mode,
+                    event_window=args.event_window,
+                    log=log,
+                    render_plots=False,
+                    force_rebuild=_force_estimator_rebuild(args),
+                    progress_label=f"alternate/{alt_mode}/{control_group}",
+                )
+            else:
+                cache_name = (
+                    f"revelio_alt_{args.estimation_type}_{ESTIMATOR_AGGREGATION_VERSION}_{alt_mode}_{run_hash}.parquet"
+                    if control_group == primary
+                    else f"revelio_alt_{args.estimation_type}_{ESTIMATOR_AGGREGATION_VERSION}_{alt_mode}_{_slug(control_group)}_{run_hash}.parquet"
+                )
+                result = _render_revelio_generic(
+                    control_panel,
+                    output_dir=args.revelio_alt_output_dir,
+                    results_path=args.cache_dir / cache_name,
+                    estimation_type=args.estimation_type,
+                    output_mode=alt_mode,
+                    event_window=args.event_window,
+                    bootstrap_reps=args.bootstrap_reps,
+                    random_seed=args.random_seed,
+                    log=log,
+                    render_plots=False,
+                    force_rebuild=_force_estimator_rebuild(args),
+                    progress_label=f"alternate/{alt_mode}/{control_group}",
+                )
+            if not result.empty:
+                result = result.copy()
+                result["control_group"] = control_group
+                frames.append(result)
+        if frames:
+            comparison_results = pd.concat(frames, ignore_index=True, sort=False)
+            _plot_revelio_control_comparison_results(
+                comparison_results,
+                output_dir=args.revelio_alt_output_dir,
+                output_mode=alt_mode,
+                sample_label=REVELIO_SAMPLE_LABELS.get(args.revelio_main_did_sample, args.revelio_main_did_sample),
+            )
+        _copy_existing_revelio_alt_assets(args, log=log)
+        log.output(args.revelio_alt_output_dir)
+        return
     if args.estimation_type == "twfe":
         _render_revelio_twfe(
             panel,
@@ -4186,6 +5251,7 @@ def build_assets(args: argparse.Namespace) -> dict[str, Any]:
     args.foia_plots_dir.mkdir(parents=True, exist_ok=True)
     args.figure_output_dir.mkdir(parents=True, exist_ok=True)
     args.revelio_main_output_dir.mkdir(parents=True, exist_ok=True)
+    args.revelio_always_stem_output_dir.mkdir(parents=True, exist_ok=True)
     args.revelio_econ_output_dir.mkdir(parents=True, exist_ok=True)
     args.revelio_controls_output_dir.mkdir(parents=True, exist_ok=True)
     args.revelio_alt_output_dir.mkdir(parents=True, exist_ok=True)
@@ -4209,7 +5275,7 @@ def build_assets(args: argparse.Namespace) -> dict[str, Any]:
     revelio_event_source_mode = _revelio_event_source_mode(args.revelio_main_did_sample)
     revelio_control_groups = _revelio_control_groups(args)
     revelio_primary_control_group = revelio_control_groups[0]
-    total_stages = 13
+    total_stages = 16
     if len(revelio_control_groups) > 1:
         total_stages += 1
     if args.build_tex:
@@ -4480,8 +5546,44 @@ def build_assets(args: argparse.Namespace) -> dict[str, Any]:
             log=log,
             force_rebuild=args.force_rebuild,
         )
+    stages.next("Revelio FOIA-linked raw means")
+    raw_mean_paths = _plot_revelio_full_sample_control_raw_means(
+        revelio_panels_by_control,
+        output_dir=args.revelio_econ_output_dir,
+        event_window=args.event_window,
+    )
+    for path in raw_mean_paths:
+        log.output(path)
+        log.output(path.with_suffix(".csv"))
+    stages.next("Revelio always-STEM CIP plots")
+    _ensure_revelio_always_stem_cip_results(
+        revelio_panels_by_control,
+        args=args,
+        run_hash=run_hash,
+        log=log,
+    )
+    missing_full_sample_button = _missing_assets(_revelio_full_sample_button_expected_paths(args))
+    if missing_full_sample_button:
+        raise RuntimeError(
+            "Missing Revelio full-sample button assets after build:\n"
+            + "\n".join(f"  {path}" for path in missing_full_sample_button)
+        )
+    stages.next("Revelio in-US conditional plots")
+    _ensure_revelio_in_us_condition_results(
+        panel,
+        args=args,
+        run_hash=run_hash,
+        log=log,
+    )
     stages.next("Revelio alternate-spec appendix")
-    _ensure_revelio_alternate_spec_appendix(panel, args=args, run_hash=run_hash, log=log)
+    _ensure_revelio_alternate_spec_appendix(
+        panel,
+        args=args,
+        run_hash=run_hash,
+        log=log,
+        panels_by_control=revelio_panels_by_control,
+        primary_control_group=revelio_primary_control_group,
+    )
     stages.next("Revelio estimation-type appendices")
     _ensure_revelio_estimation_type_appendices(panel, args, run_hash, log)
 
@@ -4521,6 +5623,7 @@ def build_assets(args: argparse.Namespace) -> dict[str, Any]:
             "foia_plots": str(args.foia_plots_dir),
             "figures": str(args.figure_output_dir),
             "revelio_main": str(args.revelio_main_output_dir),
+            "revelio_always_stem": str(args.revelio_always_stem_output_dir),
             "revelio_econ": str(args.revelio_econ_output_dir),
             "revelio_controls": str(args.revelio_controls_output_dir),
             "revelio_alt": str(args.revelio_alt_output_dir),
@@ -4550,7 +5653,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--revelio-control-comparison",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help=(
             "For full-sample Revelio DiD runs, overlay never-treated and always-STEM "
             "control specifications in the main Revelio coefficient plots."
@@ -4571,6 +5674,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--foia-plots-dir", type=Path, default=DEFAULT_FOIA_PLOTS_DIR)
     parser.add_argument("--figure-output-dir", type=Path, default=DEFAULT_FIGURE_OUTPUT_DIR)
     parser.add_argument("--revelio-main-output-dir", type=Path, default=DEFAULT_REVELIO_MAIN_OUTPUT_DIR)
+    parser.add_argument("--revelio-always-stem-output-dir", type=Path, default=DEFAULT_REVELIO_ALWAYS_STEM_OUTPUT_DIR)
     parser.add_argument("--revelio-econ-output-dir", type=Path, default=DEFAULT_REVELIO_ECON_OUTPUT_DIR)
     parser.add_argument("--revelio-controls-output-dir", type=Path, default=DEFAULT_REVELIO_CONTROLS_OUTPUT_DIR)
     parser.add_argument("--revelio-alt-output-dir", type=Path, default=DEFAULT_REVELIO_ALT_OUTPUT_DIR)
