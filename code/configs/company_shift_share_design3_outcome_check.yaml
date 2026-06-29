@@ -1,4 +1,4 @@
-company_shift_share_design_comparison_out_dir: "{root}/data/out/company_shift_share_apr2026/design_comparison"
+company_shift_share_design_comparison_out_dir: "{root}/data/out/company_shift_share_apr2026/design3_outcome_check"
 
 paths:
   out_dir: "${company_shift_share_design_comparison_out_dir}"
@@ -6,9 +6,6 @@ paths:
 
 design_comparison:
   force_rebuild_base: false
-  # When true and force_rebuild_base=false, read existing source/feature/WRDS/model
-  # parquet caches directly and fail if missing instead of letting lower-level
-  # load_or_build helpers rebuild WRDS-derived artifacts after metadata checks.
   trust_existing_base_caches: true
   reuse_prepared_panels: true
   memory_cache: true
@@ -16,15 +13,12 @@ design_comparison:
   verbose: true
   show_figures: false
   designs_to_run:
-    - shift_share
-    - event_study
     - stacked_did
 
   unit: firm
   local_market_col: company_metro_feature
   first_stage_type: ols_ihs
   exclude_size_year_fe: false
-  # null follows source_config_path's exposure_event_study.event_study_exclude_outside_negatives.
   exclude_outside_negative_firms: null
   ppml_drop_all_zero_fe_groups: true
   ppml_first_stage_fallback_to_firm_year_fe: true
@@ -41,8 +35,11 @@ design_comparison:
   data_max_t: 2022
   min_pre_avg_employment: 0
 
+  count_outcome_transform: ihs
   use_log_outcome: true
   use_log_tenure_outcome: false
+  design3_replace_new_hires_with_new_grad: true
+  design3_opt_likely_soc2: ["15", "17", "19", "13", "11"]
   baseline_size_bins: 10
   baseline_growth_bins: 5
 
@@ -60,7 +57,7 @@ design_comparison:
   stacked_jump_min_year: 2013
   stacked_jump_max_year: 2016
   stacked_pre_years: 3
-  stacked_post_years: 3
+  stacked_post_years: 6
   stacked_ref_event_time: -1
   stacked_min_event_jump: 1.0e-9
   stacked_treated_jump_percentile: 75
@@ -76,10 +73,21 @@ design_comparison:
 
   outcome_cols:
     - y_cst_lag0
-    - y_new_hires_lag0
     - y_new_hires_foreign_lag0
     - y_new_hires_native_lag0
+    - y_new_hires_foreign_opt_likely_lag0
+    - y_new_hires_foreign_masters_lag0
+    - y_new_hires_native_masters_lag0
+    - y_new_hires_foreign_opt_likely_masters_lag0
     - avg_tenure_years_lag0
+    - avg_tenure_opt_likely_jobs_lag0
+    - avg_tenure_foreign_new_hires_lag0
+    - avg_tenure_new_hires_lag0
+    - avg_tenure_foreign_new_hires_masters_lag0
+    - avg_tenure_new_hires_masters_lag0
+    - y_intern_positions_opt_likely_lag0
+    - y_intern_positions_foreign_lag0
+    - y_intern_positions_opt_likely_foreign_lag0
 
   shift_share_instrument_variants:
     ihmp_share_ar_residual: z_ct_ihmp_share_ar_resid

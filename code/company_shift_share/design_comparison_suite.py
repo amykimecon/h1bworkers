@@ -25,6 +25,11 @@ except ImportError:  # pragma: no cover
     plt = None  # type: ignore[assignment]
 
 try:
+    import laborlunch_plot_style as llstyle
+except ImportError:  # pragma: no cover
+    llstyle = None  # type: ignore[assignment]
+
+try:
     import pyfixest as pf
 except ImportError:  # pragma: no cover
     pf = None  # type: ignore[assignment]
@@ -33,6 +38,16 @@ try:
     from linearmodels.panel import PanelOLS
 except ImportError:  # pragma: no cover
     PanelOLS = None  # type: ignore[assignment,misc]
+
+try:
+    from scipy.optimize import minimize
+except ImportError:  # pragma: no cover
+    minimize = None  # type: ignore[assignment,misc]
+
+try:
+    from sklearn.neighbors import NearestNeighbors
+except ImportError:  # pragma: no cover
+    NearestNeighbors = None  # type: ignore[assignment,misc]
 
 try:
     from company_shift_share.config_loader import get_cfg_section, load_config
@@ -51,6 +66,7 @@ try:
     )
     from company_shift_share.revelio_company_features import load_or_build_company_features
     from company_shift_share.source_exposure_data import (
+        load_or_build_design3_position_outcomes_cache,
         load_or_build_source_analysis_panel,
         load_or_build_wrds_company_year_workforce_cache,
         load_or_build_wrds_school_flows_cache,
@@ -75,6 +91,7 @@ except ModuleNotFoundError:  # pragma: no cover
     )
     from company_shift_share.revelio_company_features import load_or_build_company_features
     from company_shift_share.source_exposure_data import (
+        load_or_build_design3_position_outcomes_cache,
         load_or_build_source_analysis_panel,
         load_or_build_wrds_company_year_workforce_cache,
         load_or_build_wrds_school_flows_cache,
@@ -85,6 +102,11 @@ DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[1] / "configs" / "company_shift_share_design_comparison.yaml"
 )
 SUITE_VERSION = "2026-05-01-design1-state-panel"
+ERRORBAR_INTERVAL_ALPHA = 0.4
+PLOT_MARKER_SIZE = 11
+MULTI_PLOT_MARKER_SIZE = 9
+PLOT_LINE_WIDTH = 1.5
+PLOT_PALETTE = ("#2e8b57", "#e07a5f", "#4c78a8", "#a05195", "#ffb000", "#0072b2", "#009e73")
 
 DEFAULT_OUTCOMES = [
     "y_cst_lag0",
@@ -94,14 +116,45 @@ DEFAULT_OUTCOMES = [
     "avg_tenure_years_lag0",
 ]
 FOREIGN_NEW_HIRE_OUTCOME = "y_new_hires_foreign_lag0"
-FIRST_STAGE_TYPES = {"ppml", "ols_continuous", "ols_binary"}
+DESIGN3_POSITION_OUTCOMES = [
+    "y_new_hires_foreign_lag0",
+    "y_new_hires_native_lag0",
+    "y_new_hires_foreign_opt_likely_lag0",
+    "y_new_hires_foreign_masters_lag0",
+    "y_new_hires_native_masters_lag0",
+    "y_new_hires_foreign_opt_likely_masters_lag0",
+    "avg_tenure_opt_likely_jobs_lag0",
+    "avg_tenure_foreign_new_hires_lag0",
+    "avg_tenure_new_hires_lag0",
+    "avg_tenure_foreign_new_hires_masters_lag0",
+    "avg_tenure_new_hires_masters_lag0",
+    "y_intern_positions_opt_likely_lag0",
+    "y_intern_positions_foreign_lag0",
+    "y_intern_positions_opt_likely_foreign_lag0",
+]
+DESIGN3_NEW_GRAD_OVERRIDE_OUTCOMES = {
+    "y_new_hires_foreign_lag0",
+    "y_new_hires_native_lag0",
+    "y_new_hires_foreign_opt_likely_lag0",
+    "y_new_hires_foreign_masters_lag0",
+    "y_new_hires_native_masters_lag0",
+    "y_new_hires_foreign_opt_likely_masters_lag0",
+    "avg_tenure_foreign_new_hires_lag0",
+    "avg_tenure_new_hires_lag0",
+    "avg_tenure_foreign_new_hires_masters_lag0",
+    "avg_tenure_new_hires_masters_lag0",
+}
+COUNT_OUTCOME_PREFIXES = ("y_",)
+FIRST_STAGE_TYPES = {"ppml", "ols_continuous", "ols_binary", "ols_ihs"}
 UNITS = {"firm", "local_market"}
+DESIGN_NAMES = ("shift_share", "event_study", "stacked_did")
 DATA_STAGE_ORDER = [
     "source_analysis_panel",
     "company_features",
     "shift_share_panel",
     "opt_probability_index",
     "workforce_panel",
+    "design3_position_outcomes",
     "school_flows",
     "shift_share_components",
     "matched_design_inputs",
@@ -119,6 +172,92 @@ class StageRecord:
     rebuilt: bool = False
     elapsed_seconds: float = 0.0
     error: Optional[str] = None
+
+
+@dataclass
+class _ConditionalPPMLFit:
+    params: pd.Series
+    std_errors: pd.Series
+    covariance: pd.DataFrame
+    nobs: int
+    converged: bool
+    message: str
+
+
+@dataclass
+class _LinearFit:
+    params: pd.Series
+    std_errors: pd.Series
+    covariance: pd.DataFrame
+    nobs: int
+
+
+@dataclass
+class _ConditionalPPMLDesign:
+    x: np.ndarray
+    y: np.ndarray
+    group_ids: np.ndarray
+    group_starts: np.ndarray
+    group_totals: np.ndarray
+    param_names: list[str]
+    kept_rows: int
+    dropped_zero_outcome_rows: int
+    dropped_zero_outcome_units: int
+
+
+@dataclass
+class _ConditionalPPMLObjective:
+    design: _ConditionalPPMLDesign
+    sum_yx: np.ndarray
+
+    def objective_gradient(self, theta: np.ndarray) -> tuple[float, np.ndarray]:
+        x = self.design.x
+        y = self.design.y
+        gid = self.design.group_ids
+        starts = self.design.group_starts
+        totals = self.design.group_totals
+        eta = x @ theta
+        max_eta = np.maximum.reduceat(eta, starts)
+        exp_eta = np.exp(eta - max_eta[gid])
+        denom = np.add.reduceat(exp_eta, starts)
+        log_denom = max_eta + np.log(denom)
+        p = exp_eta / denom[gid]
+        expected_x = np.add.reduceat(p[:, None] * x, starts, axis=0)
+        score = self.sum_yx - (totals[:, None] * expected_x).sum(axis=0)
+        neg_loglik = -float(y @ eta - totals @ log_denom)
+        return neg_loglik, -score
+
+    def hessian(self, theta: np.ndarray) -> np.ndarray:
+        x = self.design.x
+        gid = self.design.group_ids
+        starts = self.design.group_starts
+        totals = self.design.group_totals
+        eta = x @ theta
+        max_eta = np.maximum.reduceat(eta, starts)
+        exp_eta = np.exp(eta - max_eta[gid])
+        denom = np.add.reduceat(exp_eta, starts)
+        p = exp_eta / denom[gid]
+        expected_x = np.add.reduceat(p[:, None] * x, starts, axis=0)
+        weighted_x = x * (p * totals[gid])[:, None]
+        expected_xx = x.T @ weighted_x
+        correction = expected_x.T @ (totals[:, None] * expected_x)
+        return expected_xx - correction
+
+    def cluster_meat(self, theta: np.ndarray) -> np.ndarray:
+        x = self.design.x
+        y = self.design.y
+        gid = self.design.group_ids
+        starts = self.design.group_starts
+        totals = self.design.group_totals
+        eta = x @ theta
+        max_eta = np.maximum.reduceat(eta, starts)
+        exp_eta = np.exp(eta - max_eta[gid])
+        denom = np.add.reduceat(exp_eta, starts)
+        p = exp_eta / denom[gid]
+        observed = np.add.reduceat(y[:, None] * x, starts, axis=0)
+        expected = totals[:, None] * np.add.reduceat(p[:, None] * x, starts, axis=0)
+        group_score = observed - expected
+        return group_score.T @ group_score
 
 
 @dataclass
@@ -226,6 +365,9 @@ class ComparisonDataStore:
     def school_flows(self) -> pd.DataFrame:
         return self.get("school_flows", self._load_school_flows)  # type: ignore[return-value]
 
+    def design3_position_outcomes(self) -> pd.DataFrame:
+        return self.get("design3_position_outcomes", self._load_design3_position_outcomes)  # type: ignore[return-value]
+
     def shift_share_components(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         return self.get("shift_share_components", self._load_shift_share_components)  # type: ignore[return-value]
 
@@ -267,17 +409,23 @@ class ComparisonDataStore:
         )
 
     def _load_shift_share_panel(self) -> pd.DataFrame:
-        path = self._paths_cfg().get("shift_share_analysis_panel")
-        cached = self._load_parquet_if_available(path)
-        if cached is not None:
-            return cached
-        fallback = get_cfg_section(load_config(DEFAULT_SHIFT_SHARE_CONFIG_PATH), "paths").get("analysis_panel")
-        cached = self._load_parquet_if_available(fallback)
-        if cached is not None:
-            return cached
+        candidates: list[object] = [self._paths_cfg().get("shift_share_analysis_panel")]
+        out_dir = self._paths_cfg().get("out_dir")
+        if out_dir is not None:
+            candidates.append(Path(str(out_dir)) / "prepared_panels" / "shift_share.parquet")
+        candidates.append(get_cfg_section(load_config(DEFAULT_SHIFT_SHARE_CONFIG_PATH), "paths").get("analysis_panel"))
+        checked: list[str] = []
+        for path in candidates:
+            if path is None:
+                continue
+            checked.append(str(path))
+            cached = self._load_parquet_if_available(path)
+            if cached is not None:
+                return cached
         raise FileNotFoundError(
             "Shift-share analysis panel cache is missing. Run shift_share_analysis once, "
-            "or set paths.shift_share_analysis_panel to an existing parquet."
+            "or set paths.shift_share_analysis_panel to an existing parquet. "
+            f"Checked: {checked}"
         )
 
     def _load_source_analysis_panel(self) -> pd.DataFrame:
@@ -344,6 +492,28 @@ class ComparisonDataStore:
             force_rebuild=self.force_rebuild_base,
         )
         return school_flows
+
+    def _load_design3_position_outcomes(self) -> pd.DataFrame:
+        cfg_path = _path_or_default(self._comparison_cfg().get("source_config_path"), DEFAULT_SOURCE_CONFIG_PATH)
+        source_cfg = load_config(cfg_path)
+        cmp_cfg = self._comparison_cfg()
+        try:
+            source = self.source_analysis_panel()
+            firm_ids = source["c"].drop_duplicates() if "c" in source.columns else None
+        except Exception:
+            firm_ids = None
+        outcomes, _ = load_or_build_design3_position_outcomes_cache(
+            config_path=cfg_path,
+            cfg=source_cfg,
+            year_min=int(cmp_cfg.get("data_min_t", 2010)),
+            year_max=int(cmp_cfg.get("data_max_t", 2022)),
+            force_rebuild=bool(cmp_cfg.get("force_rebuild_design3_position_outcomes", self.force_rebuild_base)),
+            firm_ids=firm_ids,
+            position_history_path=cmp_cfg.get("design3_position_history_path"),
+            opt_likely_soc2=cmp_cfg.get("design3_opt_likely_soc2"),
+            intern_max_days=cmp_cfg.get("design3_intern_max_days"),
+        )
+        return outcomes
 
     def _load_shift_share_components(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         matched_cfg = _matched_base_cfg(self.cfg)
@@ -430,6 +600,9 @@ def run_design_comparison(
     force_rebuild_base: Optional[bool] = None,
     unit: Optional[str] = None,
     first_stage_type: Optional[str] = None,
+    first_stage_col: Optional[str] = None,
+    designs: Optional[Sequence[str] | str] = None,
+    stacked_exposures: Optional[Sequence[str] | str] = None,
     out_dir: str | Path | None = None,
 ) -> dict[str, object]:
     cfg_full = cfg or load_config(config_path or DEFAULT_CONFIG_PATH)
@@ -441,9 +614,16 @@ def run_design_comparison(
         cmp_cfg["unit"] = unit
     if first_stage_type is not None:
         cmp_cfg["first_stage_type"] = first_stage_type
+    if first_stage_col is not None:
+        cmp_cfg["first_stage_col"] = first_stage_col
+    if designs is not None:
+        cmp_cfg["designs_to_run"] = _parse_design_list(designs)
+    if stacked_exposures is not None:
+        cmp_cfg["stacked_exposures_to_run"] = _list_cfg(stacked_exposures)
     if out_dir is not None:
         paths_cfg["out_dir"] = str(out_dir)
     _validate_comparison_config(cmp_cfg)
+    selected_designs = _selected_designs(cmp_cfg)
 
     output_dir = Path(str(paths_cfg.get("out_dir", "/tmp/company_shift_share_design_comparison")))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -462,7 +642,8 @@ def run_design_comparison(
             "config: "
             f"unit={cmp_cfg.get('unit')} | first_stage={cmp_cfg.get('first_stage_type')} | "
             f"years={cmp_cfg.get('data_min_t')}-{cmp_cfg.get('data_max_t')} | "
-            f"baseline={cmp_cfg.get('baseline_start')}-{cmp_cfg.get('baseline_end')}",
+            f"baseline={cmp_cfg.get('baseline_start')}-{cmp_cfg.get('baseline_end')} | "
+            f"designs={','.join(selected_designs)}",
             indent=1,
         )
         _log(
@@ -481,7 +662,7 @@ def run_design_comparison(
     )
     started = time.perf_counter()
     if _verbose(cmp_cfg):
-        _log("Work plan: prepare panels -> design 1 shift-share -> design 2 event-study -> design 3 stacked DiD -> outputs")
+        _log(f"Work plan: prepare panels -> {' -> '.join(selected_designs)} -> outputs")
     prepared = prepare_comparison_panels(store, cmp_cfg)
     if bool(cmp_cfg.get("write_prepared_panels", True)):
         if _verbose(cmp_cfg):
@@ -494,20 +675,36 @@ def run_design_comparison(
                     _log(f"wrote prepared panel {name}: {_panel_summary_text(panel)} in {_fmt_seconds(time.perf_counter() - panel_started)}", indent=1)
 
     all_results: list[pd.DataFrame] = []
-    if _verbose(cmp_cfg):
-        _log("Design 1/3: shift_share starting")
-    all_results.append(run_shift_share_design(prepared["shift_share"], cmp_cfg, figures_dir))
-    if _verbose(cmp_cfg):
-        _log("Design 1/3: shift_share finished")
-        _log("Design 2/3: event_study starting")
-    all_results.append(run_event_study_design(prepared["event_study"], store, cmp_cfg, figures_dir))
-    if _verbose(cmp_cfg):
-        _log("Design 2/3: event_study finished")
-        _log("Design 3/3: stacked_did starting")
-    all_results.append(run_stacked_did_design(prepared["stacked_did"], cmp_cfg, figures_dir))
-    if _verbose(cmp_cfg):
-        _log("Design 3/3: stacked_did finished")
-    coef_df = pd.concat([df for df in all_results if df is not None and not df.empty], ignore_index=True)
+    if "shift_share" in selected_designs:
+        if _verbose(cmp_cfg):
+            _log("Design 1/3: shift_share starting")
+        all_results.append(run_shift_share_design(prepared["shift_share"], cmp_cfg, figures_dir))
+        if _verbose(cmp_cfg):
+            _log("Design 1/3: shift_share finished")
+    else:
+        if _verbose(cmp_cfg):
+            _log("Design 1/3: shift_share skipped")
+    if "event_study" in selected_designs:
+        if _verbose(cmp_cfg):
+            _log("Design 2/3: event_study starting")
+        all_results.append(run_event_study_design(prepared["event_study"], store, cmp_cfg, figures_dir))
+        if _verbose(cmp_cfg):
+            _log("Design 2/3: event_study finished")
+    else:
+        if _verbose(cmp_cfg):
+            _log("Design 2/3: event_study skipped")
+    if "stacked_did" in selected_designs:
+        if _verbose(cmp_cfg):
+            _log("Design 3/3: stacked_did starting")
+        all_results.append(run_stacked_did_design(prepared["stacked_did"], cmp_cfg, figures_dir))
+        if _verbose(cmp_cfg):
+            _log("Design 3/3: stacked_did finished")
+    else:
+        if _verbose(cmp_cfg):
+            _log("Design 3/3: stacked_did skipped")
+    nonempty_results = [df for df in all_results if df is not None and not df.empty]
+    coef_df = pd.concat(nonempty_results, ignore_index=True) if nonempty_results else pd.DataFrame()
+    coef_df = add_baseline_effect_stats(coef_df, prepared, cmp_cfg)
     if _verbose(cmp_cfg):
         _log(f"writing outputs | coefficient rows={len(coef_df):,}")
     coef_path = tables_dir / "all_design_coefficients.csv"
@@ -517,7 +714,7 @@ def run_design_comparison(
     final_tex = tables_dir / "design_comparison_first_stage_rf.tex"
     final_table.to_csv(final_csv, index=False)
     try:
-        final_tex.write_text(final_table.to_latex(index=False))
+        final_tex.write_text(format_final_comparison_table_latex(final_table))
     except Exception:
         final_tex.write_text(final_table.to_string(index=False))
 
@@ -528,6 +725,8 @@ def run_design_comparison(
     store.manifest["selected_config"] = {
         "unit": cmp_cfg.get("unit"),
         "first_stage_type": cmp_cfg.get("first_stage_type"),
+        "designs_to_run": selected_designs,
+        "stacked_exposures_to_run": _stacked_exposures_to_run(cmp_cfg),
         "outcome_cols": _list_cfg(cmp_cfg.get("outcome_cols", DEFAULT_OUTCOMES)),
         "baseline_start": int(cmp_cfg.get("baseline_start", 2010)),
         "baseline_end": int(cmp_cfg.get("baseline_end", 2013)),
@@ -566,6 +765,12 @@ def prepare_comparison_panels(store: ComparisonDataStore, cmp_cfg: dict) -> dict
         _log(f"loaded source panel: {_panel_summary_text(source)}", indent=1)
         _log(f"loaded shift-share panel: {_panel_summary_text(shift)}", indent=1)
         _log(f"loaded company features: {_panel_summary_text(features)}", indent=1)
+    if _needs_workforce_design_outcomes(source, cmp_cfg):
+        source = attach_workforce_design_outcomes(source, store.workforce_panel(), cmp_cfg)
+    if _needs_design3_position_outcomes(source, cmp_cfg):
+        source = attach_design3_position_outcomes(source, store.design3_position_outcomes(), cmp_cfg)
+    source = ensure_design_outcome_derivations(source, cmp_cfg)
+    shift = ensure_shift_share_share_variants(shift, cmp_cfg)
     shift = attach_company_features(shift, features, cmp_cfg)
     shift = prepare_shift_share_state_panel(shift, cmp_cfg)
     event_panel = attach_company_features(source, features, cmp_cfg)
@@ -632,9 +837,10 @@ def run_shift_share_design(panel: pd.DataFrame, cmp_cfg: dict, figures_dir: Path
         if _verbose(cmp_cfg):
             _log(f"finished {spec_name} in {_fmt_seconds(time.perf_counter() - spec_started)}", indent=2)
     out = pd.DataFrame(rows)
+    out = add_baseline_effect_stats(out, {"shift_share": panel}, cmp_cfg)
     out.attrs["show_figures"] = bool(cmp_cfg.get("show_figures", False))
     plot_dynamic_design(out, "shift_share", "horizon", figures_dir)
-    plot_raw_means_by_exposure(panel, variants, cmp_cfg, "shift_share", figures_dir)
+    plot_raw_means_by_exposure(panel, variants, cmp_cfg, "shift_share", figures_dir, stats=out)
     return out
 
 
@@ -660,7 +866,7 @@ def prepare_shift_share_dynamic_panel(
         work = work.loc[work[primary_outcome].notna()].copy()
     if str(cmp_cfg.get("first_stage_type", "ppml")) == "ppml":
         try:
-            x_col = _x_col(work)
+            x_col = _x_col(work, cmp_cfg)
             work[x_col] = pd.to_numeric(work[x_col], errors="coerce")
             work = work.loc[work[x_col].notna() & work[x_col].ge(0)].copy()
         except ValueError:
@@ -690,9 +896,7 @@ def run_event_study_design(panel: pd.DataFrame, store: ComparisonDataStore, cmp_
     rows: list[dict[str, object]] = []
     variants = [
         ("school_opt_share_binary", "school_opt_share_new_hire_annual_pre_level", "binary"),
-        ("school_opt_share_continuous", "school_opt_share_new_hire_annual_pre_level", "continuous"),
         ("opt_probability_index_binary", "predicted_prob", "binary"),
-        ("opt_probability_index_continuous", "predicted_prob", "continuous"),
     ]
     available_variants = [(a, b, c) for a, b, c in variants if b in panel.columns]
     if _verbose(cmp_cfg):
@@ -714,6 +918,8 @@ def run_event_study_design(panel: pd.DataFrame, store: ComparisonDataStore, cmp_
         before_exposure_drop = len(work)
         work = work.loc[pd.to_numeric(work[exposure_col], errors="coerce").notna()].copy()
         work[exposure_col] = pd.to_numeric(work[exposure_col], errors="coerce")
+        if exposure_col == "predicted_prob":
+            work = _filter_opt_index_analysis_sample(work, cmp_cfg)
         if _verbose(cmp_cfg):
             _log(
                 f"dropped missing exposure rows: {before_exposure_drop - len(work):,}; "
@@ -752,9 +958,10 @@ def run_event_study_design(panel: pd.DataFrame, store: ComparisonDataStore, cmp_
         if _verbose(cmp_cfg):
             _log(f"finished {spec_name} in {_fmt_seconds(time.perf_counter() - spec_started)}", indent=2)
     out = pd.DataFrame(rows)
+    out = add_baseline_effect_stats(out, {"event_study": panel}, cmp_cfg)
     out.attrs["show_figures"] = bool(cmp_cfg.get("show_figures", False))
     plot_dynamic_design(out, "event_study", "year", figures_dir)
-    plot_raw_means_by_exposure(panel, [(v[0], v[1]) for v in variants if v[1] in panel.columns], cmp_cfg, "event_study", figures_dir)
+    plot_raw_means_by_exposure(panel, [(v[0], v[1]) for v in variants if v[1] in panel.columns], cmp_cfg, "event_study", figures_dir, stats=out)
     return out
 
 
@@ -762,13 +969,16 @@ def run_stacked_did_design(panel: pd.DataFrame, cmp_cfg: dict, figures_dir: Path
     rows: list[dict[str, object]] = []
     exposure_candidates = [
         ("ihmp_share", _first_present(panel, ["z_ct_ihmp_share", "z_ct"])),
+        ("international_share", _first_present(panel, ["z_ct_international_share"])),
         ("opt_takeup", _first_present(panel, ["any_opt_hires_correction_aware", "masters_opt_hires_correction_aware"])),
     ]
-    available_exposures = [(name, col) for name, col in exposure_candidates if col is not None]
+    selected_exposures = set(_stacked_exposures_to_run(cmp_cfg))
+    available_exposures = [(name, col) for name, col in exposure_candidates if col is not None and name in selected_exposures]
     if _verbose(cmp_cfg):
         _log(
             f"stacked_did exposure families={len(available_exposures)} | "
-            f"cohorts={cmp_cfg.get('stacked_min_cohort_year', 2013)}-{cmp_cfg.get('stacked_max_cohort_year', 2016)} | "
+            f"jumps={cmp_cfg.get('stacked_jump_min_year', cmp_cfg.get('stacked_min_cohort_year', 2013))}-"
+            f"{cmp_cfg.get('stacked_jump_max_year', cmp_cfg.get('stacked_max_cohort_year', 2016))} | "
             f"window=±{cmp_cfg.get('stacked_pre_years', 3)}/{cmp_cfg.get('stacked_post_years', 3)}",
             indent=1,
         )
@@ -778,17 +988,34 @@ def run_stacked_did_design(panel: pd.DataFrame, cmp_cfg: dict, figures_dir: Path
         exp_started = time.perf_counter()
         if _verbose(cmp_cfg):
             _log(f"stacked_did exposure {exp_idx}/{len(available_exposures)}: {exposure_name} ({exposure_col})", indent=1)
+        detect_started = time.perf_counter()
         event_df = detect_largest_jump_events(
             panel,
             exposure_col=exposure_col,
-            cohort_min_year=int(cmp_cfg.get("stacked_min_cohort_year", 2013)),
-            cohort_max_year=int(cmp_cfg.get("stacked_max_cohort_year", 2016)),
+            cohort_min_year=int(cmp_cfg.get("stacked_jump_min_year", cmp_cfg.get("stacked_min_cohort_year", 2013))),
+            cohort_max_year=int(cmp_cfg.get("stacked_jump_max_year", cmp_cfg.get("stacked_max_cohort_year", 2016))),
             min_jump=float(cmp_cfg.get("stacked_min_event_jump", 0.0)),
+            treated_jump_percentile=float(cmp_cfg.get("stacked_treated_jump_percentile", 75)),
+            control_min_jump_percentile=float(cmp_cfg.get("stacked_control_min_jump_percentile", 25)),
         )
         if _verbose(cmp_cfg):
             n_treated = int(event_df.get("treated", pd.Series(dtype=int)).fillna(0).sum()) if not event_df.empty else 0
-            _log(f"detected treated events: {n_treated:,} of {len(event_df):,} units", indent=2)
-        for matching_style in ("unmatched", "matched"):
+            n_controls = (
+                int(event_df.get("control_eligible", pd.Series(dtype=int)).fillna(0).sum())
+                if not event_df.empty and "control_eligible" in event_df.columns
+                else int(event_df.get("treated", pd.Series(dtype=int)).eq(0).sum())
+            )
+            threshold = (
+                float(pd.to_numeric(event_df.get("treated_jump_threshold"), errors="coerce").dropna().iloc[0])
+                if not event_df.empty and "treated_jump_threshold" in event_df.columns and pd.to_numeric(event_df["treated_jump_threshold"], errors="coerce").notna().any()
+                else float(cmp_cfg.get("stacked_min_event_jump", 0.0))
+            )
+            _log(
+                f"detected events: treated={n_treated:,} | controls={n_controls:,} | valid={len(event_df):,} "
+                f"(treated jump threshold={threshold:.6g}) in {_fmt_seconds(time.perf_counter() - detect_started)}",
+                indent=2,
+            )
+        for matching_style in _stacked_matching_styles(cmp_cfg):
             match_started = time.perf_counter()
             if _verbose(cmp_cfg):
                 _log(f"stacked_did matching style: {matching_style}", indent=2)
@@ -797,6 +1024,7 @@ def run_stacked_did_design(panel: pd.DataFrame, cmp_cfg: dict, figures_dir: Path
                 event_df,
                 cmp_cfg,
                 matching_style=matching_style,
+                exposure_col=exposure_col,
             )
             if stacked.empty:
                 if _verbose(cmp_cfg):
@@ -806,13 +1034,19 @@ def run_stacked_did_design(panel: pd.DataFrame, cmp_cfg: dict, figures_dir: Path
                 _log(f"stacked panel: {_panel_summary_text(stacked)} | stacks={stacked['stack_id'].nunique():,}", indent=3)
             spec = f"{matching_style}_{exposure_name}"
             rows.extend(estimate_stacked_event_coefficients(stacked, "sun_abraham", spec, cmp_cfg))
-            rows.extend(estimate_stacked_event_coefficients(stacked, "twfe", f"{spec}_twfe", cmp_cfg))
-            plot_stacked_raw_means(stacked, spec, cmp_cfg, figures_dir)
+            plot_stacked_raw_means(
+                stacked,
+                spec,
+                cmp_cfg,
+                figures_dir,
+                stats=add_baseline_effect_stats(pd.DataFrame(rows), {"stacked_did": panel}, cmp_cfg),
+            )
             if _verbose(cmp_cfg):
                 _log(f"finished {matching_style} in {_fmt_seconds(time.perf_counter() - match_started)}", indent=3)
         if _verbose(cmp_cfg):
             _log(f"finished exposure {exposure_name} in {_fmt_seconds(time.perf_counter() - exp_started)}", indent=2)
     out = pd.DataFrame(rows)
+    out = add_baseline_effect_stats(out, {"stacked_did": panel}, cmp_cfg)
     out.attrs["show_figures"] = bool(cmp_cfg.get("show_figures", False))
     plot_dynamic_design(out, "stacked_did", "rel_time", figures_dir)
     return out
@@ -832,7 +1066,7 @@ def estimate_horizon_coefficients(
     del time_col, event_year
     rows: list[dict[str, object]] = []
     unit_col = _unit_id_col(cmp_cfg)
-    x_col = _x_col(panel)
+    x_col = _x_col(panel, cmp_cfg)
     for horizon in horizons:
         work = panel.copy()
         reg_col = _normalized_col(work, exposure_col)
@@ -888,7 +1122,7 @@ def estimate_event_year_coefficients(
     work = panel.copy()
     reg_col = _normalized_col(work, exposure_col)
     years = sorted(int(v) for v in pd.to_numeric(work["t"], errors="coerce").dropna().unique())
-    x_col = _x_col(work)
+    x_col = _x_col(work, cmp_cfg)
     lhs, estimator = _first_stage_lhs(work, pd.to_numeric(work[x_col], errors="coerce"), cmp_cfg)
     interaction_cols = _add_year_interactions(work, reg_col, years, ref_year)
     term_to_time = {col: year for year, col in interaction_cols}
@@ -914,41 +1148,66 @@ def estimate_event_year_coefficients(
             indent=2,
         )
     total_models = 1 + len(outcome_lhs)
-    rows.extend(
-        _estimate_multi_term_event_from_base(
-            base_panel,
-            lhs=lhs,
-            term_cols=term_cols,
+    event_year = int(cmp_cfg.get("event_year", 2016))
+    fs_rows = _estimate_multi_term_event_from_base(
+        base_panel,
+        lhs=lhs,
+        term_cols=term_cols,
+        family="first_stage",
+        design=design,
+        spec=spec,
+        estimator=estimator,
+        outcome_col=x_col,
+        cmp_cfg=cmp_cfg,
+        time_name="year",
+        term_to_time=term_to_time,
+        fe_cols=fe,
+        model_index=1,
+        model_total=total_models,
+    )
+    _annotate_event_time(fs_rows, event_year=event_year)
+    rows.extend(fs_rows)
+    rows.append(
+        _reference_result(
             family="first_stage",
             design=design,
             spec=spec,
             estimator=estimator,
+            time_name="year",
+            time_value=ref_year,
             outcome_col=x_col,
+            extra={"event_time": int(ref_year - event_year), "fe_cols": "+".join(fe)},
+        )
+    )
+    for model_index, (outcome, y_lhs) in enumerate(outcome_lhs, start=2):
+        rf_rows = _estimate_multi_term_event_from_base(
+            base_panel,
+            lhs=y_lhs,
+            term_cols=term_cols,
+            family="reduced_form",
+            design=design,
+            spec=spec,
+            estimator="ols",
+            outcome_col=outcome,
             cmp_cfg=cmp_cfg,
             time_name="year",
             term_to_time=term_to_time,
             fe_cols=fe,
-            model_index=1,
+            model_index=model_index,
             model_total=total_models,
         )
-    )
-    for model_index, (outcome, y_lhs) in enumerate(outcome_lhs, start=2):
-        rows.extend(
-            _estimate_multi_term_event_from_base(
-                base_panel,
-                lhs=y_lhs,
-                term_cols=term_cols,
+        _annotate_event_time(rf_rows, event_year=event_year)
+        rows.extend(rf_rows)
+        rows.append(
+            _reference_result(
                 family="reduced_form",
                 design=design,
                 spec=spec,
                 estimator="ols",
-                outcome_col=outcome,
-                cmp_cfg=cmp_cfg,
                 time_name="year",
-                term_to_time=term_to_time,
-                fe_cols=fe,
-                model_index=model_index,
-                model_total=total_models,
+                time_value=ref_year,
+                outcome_col=outcome,
+                extra={"event_time": int(ref_year - event_year), "fe_cols": "+".join(fe)},
             )
         )
     return rows
@@ -960,21 +1219,24 @@ def estimate_stacked_event_coefficients(
     spec: str,
     cmp_cfg: dict,
 ) -> list[dict[str, object]]:
+    if estimator_label == "sun_abraham":
+        return _estimate_stacked_sun_abraham_event_coefficients(stacked_panel, spec, cmp_cfg)
+
     rows: list[dict[str, object]] = []
     event_times = sorted(int(v) for v in pd.to_numeric(stacked_panel["rel_time"], errors="coerce").dropna().unique())
     ref_event_time = int(cmp_cfg.get("stacked_ref_event_time", -1))
     non_ref = [v for v in event_times if v != ref_event_time]
     if not non_ref:
         return rows
-    work = stacked_panel.copy()
+    work = _ensure_fe_columns(stacked_panel.copy(), cmp_cfg)
     terms: list[tuple[int, str]] = []
     for rel_time in non_ref:
         col = f"stack_treated_{_lag_suffix(rel_time)}"
         work[col] = (work["treated"].eq(1) & work["rel_time"].eq(rel_time)).astype(float)
         terms.append((rel_time, col))
-    x_col = _x_col(work)
+    x_col = _x_col(work, cmp_cfg)
     lhs, fs_estimator = _first_stage_lhs(work, pd.to_numeric(work[x_col], errors="coerce"), cmp_cfg)
-    fe_cols = ["unit_stack_fe", "year_stack_fe"] if estimator_label == "sun_abraham" else [_unit_id_col(cmp_cfg), "t"]
+    fe_cols = _stacked_fe_cols(work, cmp_cfg, estimator_label)
     rows.extend(
         _estimate_multi_term_event(
             work,
@@ -989,7 +1251,19 @@ def estimate_stacked_event_coefficients(
             time_name="rel_time",
             term_to_time={col: rel for rel, col in terms},
             fe_cols=fe_cols,
-            cluster_col="stack_id",
+            cluster_col=_stacked_cluster_col(estimator_label, cmp_cfg),
+        )
+    )
+    rows.append(
+        _reference_result(
+            family="first_stage",
+            design="stacked_did",
+            spec=spec,
+            estimator=fs_estimator,
+            time_name="rel_time",
+            time_value=ref_event_time,
+            outcome_col=x_col,
+            extra={"fe_cols": "+".join(fe_cols)},
         )
     )
     for outcome in _available_outcomes(work, cmp_cfg):
@@ -1009,10 +1283,297 @@ def estimate_stacked_event_coefficients(
                 time_name="rel_time",
                 term_to_time={col: rel for rel, col in terms},
                 fe_cols=fe_cols,
-                cluster_col="stack_id",
+                cluster_col=_stacked_cluster_col(estimator_label, cmp_cfg),
+            )
+        )
+        rows.append(
+            _reference_result(
+                family="reduced_form",
+                design="stacked_did",
+                spec=spec,
+                estimator="ols",
+                time_name="rel_time",
+                time_value=ref_event_time,
+                outcome_col=outcome,
+                extra={"fe_cols": "+".join(fe_cols)},
             )
         )
     return rows
+
+
+def _estimate_stacked_sun_abraham_event_coefficients(
+    stacked_panel: pd.DataFrame,
+    spec: str,
+    cmp_cfg: dict,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    event_times = sorted(int(v) for v in pd.to_numeric(stacked_panel["rel_time"], errors="coerce").dropna().unique())
+    ref_event_time = int(cmp_cfg.get("stacked_ref_event_time", -1))
+    non_ref = [v for v in event_times if v != ref_event_time]
+    if not non_ref:
+        return rows
+    work = _ensure_fe_columns(stacked_panel.copy(), cmp_cfg)
+    term_to_time, term_meta = _stacked_sun_abraham_terms(work, ref_event_time)
+    if not term_to_time:
+        return [
+            _empty_result("first_stage", "stacked_did", spec, str(cmp_cfg.get("first_stage_type", "ppml")), "rel_time", v, _x_col(work, cmp_cfg), "no cohort-specific event-time terms")
+            for v in non_ref
+        ]
+    x_col = _x_col(work, cmp_cfg)
+    lhs, fs_estimator = _first_stage_lhs(work, pd.to_numeric(work[x_col], errors="coerce"), cmp_cfg)
+    fe_cols = _stacked_fe_cols(work, cmp_cfg, "sun_abraham")
+    cluster_col = _stacked_cluster_col("sun_abraham", cmp_cfg)
+    rows.extend(
+        _estimate_stacked_sun_abraham_family(
+            work,
+            lhs=lhs,
+            term_to_time=term_to_time,
+            term_meta=term_meta,
+            event_times=event_times,
+            ref_event_time=ref_event_time,
+            family="first_stage",
+            spec=spec,
+            estimator=fs_estimator,
+            outcome_col=x_col,
+            cmp_cfg=cmp_cfg,
+            fe_cols=fe_cols,
+            cluster_col=cluster_col,
+        )
+    )
+    for outcome in _available_outcomes(work, cmp_cfg):
+        y_lhs = f"reg_{_safe_name(outcome)}"
+        work[y_lhs] = _transform_outcome(pd.to_numeric(work[outcome], errors="coerce"), outcome, cmp_cfg)
+        rows.extend(
+            _estimate_stacked_sun_abraham_family(
+                work,
+                lhs=y_lhs,
+                term_to_time=term_to_time,
+                term_meta=term_meta,
+                event_times=event_times,
+                ref_event_time=ref_event_time,
+                family="reduced_form",
+                spec=spec,
+                estimator="ols",
+                outcome_col=outcome,
+                cmp_cfg=cmp_cfg,
+                fe_cols=fe_cols,
+                cluster_col=cluster_col,
+            )
+        )
+    return rows
+
+
+def _stacked_sun_abraham_terms(
+    work: pd.DataFrame,
+    ref_event_time: int,
+) -> tuple[dict[str, int], dict[str, tuple[int, int]]]:
+    if "g" not in work.columns or "rel_time" not in work.columns or "treated" not in work.columns:
+        return {}, {}
+    g_num = pd.to_numeric(work["g"], errors="coerce")
+    rel_num = pd.to_numeric(work["rel_time"], errors="coerce")
+    treated = pd.to_numeric(work["treated"], errors="coerce").fillna(0).eq(1)
+    cohorts = sorted(int(v) for v in g_num.loc[treated & g_num.notna()].unique())
+    event_times = sorted(int(v) for v in rel_num.loc[rel_num.notna()].unique() if int(v) != int(ref_event_time))
+    term_to_time: dict[str, int] = {}
+    term_meta: dict[str, tuple[int, int]] = {}
+    for cohort in cohorts:
+        cohort_mask = treated & g_num.eq(cohort)
+        if not bool(cohort_mask.any()):
+            continue
+        for rel_time in event_times:
+            col = f"sa_g{cohort}_rt{_lag_suffix(rel_time)}"
+            work[col] = (cohort_mask & rel_num.eq(rel_time)).astype(float)
+            if work[col].nunique(dropna=True) <= 1:
+                continue
+            term_to_time[col] = int(rel_time)
+            term_meta[col] = (int(cohort), int(rel_time))
+    return term_to_time, term_meta
+
+
+def _estimate_stacked_sun_abraham_family(
+    work: pd.DataFrame,
+    *,
+    lhs: str,
+    term_to_time: dict[str, int],
+    term_meta: dict[str, tuple[int, int]],
+    event_times: Sequence[int],
+    ref_event_time: int,
+    family: str,
+    spec: str,
+    estimator: str,
+    outcome_col: str,
+    cmp_cfg: dict,
+    fe_cols: list[str],
+    cluster_col: str,
+) -> list[dict[str, object]]:
+    term_cols = list(term_to_time.keys())
+    required = _dedupe_existing([lhs, *term_cols, *fe_cols, cluster_col, "g", "rel_time", "treated"], work)
+    panel = work.loc[:, required].dropna(subset=required).copy()
+    if lhs in panel.columns:
+        panel[lhs] = pd.to_numeric(panel[lhs], errors="coerce")
+        panel = panel.loc[panel[lhs].notna()].copy()
+    for col in term_cols:
+        panel[col] = pd.to_numeric(panel[col], errors="coerce")
+    panel, prefilter_note = _prefilter_ppml_first_stage_panel(
+        panel,
+        lhs=lhs,
+        estimator=estimator,
+        family=family,
+        fe_cols=fe_cols,
+        cmp_cfg=cmp_cfg,
+        context=f"stacked_did/{spec}/{family}/{outcome_col}",
+    )
+    non_ref_times = [int(v) for v in event_times if int(v) != int(ref_event_time)]
+    if panel.empty or lhs not in panel.columns or panel[lhs].nunique(dropna=True) <= 1:
+        rows = [
+            _empty_result(family, "stacked_did", spec, estimator, "rel_time", v, outcome_col, "insufficient variation")
+            for v in non_ref_times
+        ]
+        rows.append(
+            _reference_result(
+                family=family,
+                design="stacked_did",
+                spec=spec,
+                estimator=estimator,
+                time_name="rel_time",
+                time_value=ref_event_time,
+                outcome_col=outcome_col,
+                extra={"fe_cols": "+".join(fe_cols), "sa_aggregation": "cohort_weighted"},
+            )
+        )
+        return rows
+    if _verbose(cmp_cfg):
+        _log(
+            f"stacked_did/{spec}: {family}/{outcome_col} Sun-Abraham starting | "
+            f"estimator={estimator} | rows={len(panel):,} | units={_n_units_text(panel, cmp_cfg)} | "
+            f"cohort-time terms={len(term_cols)} | FE={'+'.join(fe_cols)}",
+            indent=3,
+        )
+    started = time.perf_counter()
+    try:
+        if (
+            estimator == "ppml"
+            and family == "first_stage"
+            and _can_use_event_conditional_ppml(fe_cols, cmp_cfg, cluster_col)
+        ):
+            fit = _fit_event_conditional_ppml(panel, lhs, term_cols, term_to_time, cmp_cfg, cluster_col, fe_cols=fe_cols)
+        else:
+            fit = _fit_model(panel, lhs, term_cols, estimator, fe_cols, cluster_col)
+    except Exception as exc:
+        if _verbose(cmp_cfg):
+            _log(f"regression failed | stacked_did/{spec}/{family}/{outcome_col}: {exc}", indent=3)
+        rows = [
+            _empty_result(family, "stacked_did", spec, estimator, "rel_time", v, outcome_col, str(exc))
+            for v in non_ref_times
+        ]
+        rows.append(
+            _reference_result(
+                family=family,
+                design="stacked_did",
+                spec=spec,
+                estimator=estimator,
+                time_name="rel_time",
+                time_value=ref_event_time,
+                outcome_col=outcome_col,
+                extra={"fe_cols": "+".join(fe_cols), "sa_aggregation": "cohort_weighted"},
+            )
+        )
+        return rows
+    if _verbose(cmp_cfg):
+        _log(
+            f"stacked_did/{spec}: {family}/{outcome_col} Sun-Abraham finished in "
+            f"{_fmt_seconds(time.perf_counter() - started)}",
+            indent=3,
+        )
+    params, cov = _fit_params_cov(fit)
+    weights = _stacked_sun_abraham_weights(panel, term_meta)
+    fit_nobs = int(getattr(fit, "nobs", len(panel)) or len(panel))
+    n_units = panel[_unit_id_col(cmp_cfg)].nunique() if _unit_id_col(cmp_cfg) in panel.columns else None
+    rows: list[dict[str, object]] = []
+    for rel_time in non_ref_times:
+        cols = [col for col, (_, event_t) in term_meta.items() if int(event_t) == int(rel_time) and col in params.index]
+        coef: Optional[float]
+        se: Optional[float]
+        if cols:
+            raw_weights = np.array([weights.get(col, 0.0) for col in cols], dtype=float)
+            if raw_weights.sum() <= 0:
+                raw_weights = np.ones(len(cols), dtype=float)
+            norm_weights = raw_weights / raw_weights.sum()
+            beta = params.reindex(cols).astype(float).to_numpy()
+            coef = float(np.dot(norm_weights, beta))
+            subcov = cov.reindex(index=cols, columns=cols).fillna(0.0).to_numpy(dtype=float)
+            var = float(norm_weights @ subcov @ norm_weights)
+            se = math.sqrt(var) if var >= 0 and np.isfinite(var) else float("nan")
+        else:
+            coef, se = None, None
+        row = _result_base(family, "stacked_did", spec, estimator, "rel_time", int(rel_time), outcome_col, fit_nobs, n_units)
+        row.update(
+            {
+                "coef": coef,
+                "se": se,
+                "f_stat": _single_term_f(coef, se),
+                "fe_cols": "+".join(fe_cols),
+                "sa_aggregation": "cohort_weighted",
+                "n_treatment_cohorts": len(cols),
+            }
+        )
+        if prefilter_note:
+            row["ppml_prefilter"] = prefilter_note
+        rows.append(row)
+    rows.append(
+        _reference_result(
+            family=family,
+            design="stacked_did",
+            spec=spec,
+            estimator=estimator,
+            time_name="rel_time",
+            time_value=ref_event_time,
+            outcome_col=outcome_col,
+            extra={
+                "fe_cols": "+".join(fe_cols),
+                "sa_aggregation": "cohort_weighted",
+                "n_treatment_cohorts": int(pd.to_numeric(panel.loc[pd.to_numeric(panel["treated"], errors="coerce").eq(1), "g"], errors="coerce").nunique()),
+            },
+        )
+    )
+    return rows
+
+
+def _stacked_sun_abraham_weights(panel: pd.DataFrame, term_meta: dict[str, tuple[int, int]]) -> dict[str, float]:
+    if not term_meta or not {"treated", "g", "rel_time"}.issubset(panel.columns):
+        return {col: 1.0 for col in term_meta}
+    treated = pd.to_numeric(panel["treated"], errors="coerce").fillna(0).eq(1)
+    cells = (
+        panel.loc[treated, ["g", "rel_time"]]
+        .assign(g=lambda x: pd.to_numeric(x["g"], errors="coerce"), rel_time=lambda x: pd.to_numeric(x["rel_time"], errors="coerce"))
+        .dropna(subset=["g", "rel_time"])
+    )
+    if cells.empty:
+        return {col: 1.0 for col in term_meta}
+    counts = cells.groupby(["g", "rel_time"]).size()
+    return {
+        col: float(counts.get((float(cohort), float(rel_time)), 0.0))
+        for col, (cohort, rel_time) in term_meta.items()
+    }
+
+
+def _stacked_fe_cols(work: pd.DataFrame, cmp_cfg: dict, estimator_label: str) -> list[str]:
+    if estimator_label == "sun_abraham":
+        # Match the pooled-control Sun-Abraham style used in the labor-lunch
+        # relabels build: entity FE plus pooled calendar-year FE, not year x
+        # stack FE. Matching already handles baseline size/growth, so stacked
+        # regressions intentionally ignore the global size-year FE toggle.
+        return [_unit_id_col(cmp_cfg), "t"]
+    cols = [_unit_id_col(cmp_cfg), "t"]
+    if bool(cmp_cfg.get("stacked_twfe_include_size_year_fe", False)) and _use_size_year_fe(cmp_cfg) and "baseline_size_growth_year_fe" in work.columns:
+        cols.append("baseline_size_growth_year_fe")
+    return cols
+
+
+def _stacked_cluster_col(estimator_label: str, cmp_cfg: dict) -> str:
+    if estimator_label == "sun_abraham":
+        return _unit_id_col(cmp_cfg)
+    return "stack_id"
 
 
 def detect_largest_jump_events(
@@ -1022,46 +1583,93 @@ def detect_largest_jump_events(
     cohort_min_year: int,
     cohort_max_year: int,
     min_jump: float,
+    jump_quantile: Optional[float] = None,
+    treated_jump_percentile: Optional[float] = None,
+    control_min_jump_percentile: Optional[float] = None,
 ) -> pd.DataFrame:
     unit_col = "c"
     work = panel[[unit_col, "t", exposure_col]].dropna(subset=[unit_col, "t"]).copy()
     work["t"] = pd.to_numeric(work["t"], errors="coerce")
     work = work.dropna(subset=["t"])
     if work.empty:
-        return pd.DataFrame(columns=["c", "g", "largest_jump", "treated"])
+        return pd.DataFrame(columns=["c", "g", "largest_jump", "min_jump", "treated", "control_eligible"])
     work["t"] = work["t"].astype(int)
-    work[exposure_col] = pd.to_numeric(work[exposure_col], errors="coerce").fillna(0.0)
+    work[exposure_col] = pd.to_numeric(work[exposure_col], errors="coerce")
     work = work.sort_values([unit_col, "t"])
+
+    panel_years = set(int(v) for v in work["t"].dropna().unique())
+    needed_years = [
+        year
+        for year in range(int(cohort_min_year) - 1, int(cohort_max_year) + 1)
+        if year in panel_years
+    ]
+    if not needed_years:
+        return pd.DataFrame(columns=["c", "g", "largest_jump", "min_jump", "treated", "control_eligible"])
+    required_n_years = len(needed_years)
+    in_needed_years = work["t"].isin(needed_years)
+    window_year_counts = (
+        work.loc[in_needed_years & work[exposure_col].notna(), [unit_col, "t"]]
+        .drop_duplicates([unit_col, "t"])
+        .groupby(unit_col)["t"]
+        .nunique()
+    )
+    valid_units = set(window_year_counts.loc[window_year_counts.eq(required_n_years)].index)
+    work = work.loc[work[unit_col].isin(valid_units)].copy()
+    if work.empty:
+        return pd.DataFrame(columns=["c", "g", "largest_jump", "min_jump", "treated", "control_eligible"])
+
     work["jump"] = work[exposure_col] - work.groupby(unit_col, sort=False)[exposure_col].shift(1)
 
-    max_jump = (
-        work.groupby(unit_col, as_index=False)["jump"]
-        .max()
-        .rename(columns={"jump": "largest_jump"})
+    in_window = work["t"].between(int(cohort_min_year), int(cohort_max_year))
+    window_jumps = work.loc[in_window & work["jump"].notna(), [unit_col, "t", "jump"]].copy()
+    if window_jumps.empty:
+        return pd.DataFrame(columns=["c", "g", "largest_jump", "min_jump", "treated", "control_eligible"])
+    jump_summary = (
+        window_jumps.groupby(unit_col, as_index=False)
+        .agg(largest_jump=("jump", "max"), min_jump=("jump", "min"))
     )
-    max_jump["largest_jump"] = pd.to_numeric(max_jump["largest_jump"], errors="coerce").fillna(0.0)
 
     threshold = float(min_jump)
-    in_window = work["t"].between(int(cohort_min_year), int(cohort_max_year))
-    if threshold <= 0:
-        passes_threshold = work["jump"].gt(0.0)
-    else:
-        passes_threshold = work["jump"].ge(threshold)
-    candidates = work.loc[in_window & passes_threshold, [unit_col, "t", "jump"]].copy()
-    if candidates.empty:
-        out = max_jump.copy()
-        out["g"] = np.nan
-        out["treated"] = 0
-        return out[["c", "g", "largest_jump", "treated"]]
+    if treated_jump_percentile is not None:
+        q = _percentile_to_quantile(treated_jump_percentile)
+        q_threshold = float(jump_summary["largest_jump"].quantile(q))
+        threshold = max(threshold, q_threshold)
+    elif jump_quantile is not None:
+        q = _percentile_to_quantile(jump_quantile)
+        q_threshold = float(jump_summary["largest_jump"].quantile(q))
+        threshold = max(threshold, q_threshold)
+    control_threshold = np.nan
+    if control_min_jump_percentile is not None:
+        control_threshold = float(jump_summary["min_jump"].quantile(_percentile_to_quantile(control_min_jump_percentile)))
 
+    candidates = window_jumps.loc[window_jumps["jump"].ge(threshold)].copy()
     events = (
         candidates.sort_values([unit_col, "jump", "t"], ascending=[True, False, True])
         .drop_duplicates(unit_col, keep="first")
         .rename(columns={"t": "g"})
     )
-    out = max_jump.merge(events[[unit_col, "g"]], on=unit_col, how="left")
+    out = jump_summary.merge(events[[unit_col, "g"]], on=unit_col, how="left")
     out["treated"] = out["g"].notna().astype(int)
-    return out[["c", "g", "largest_jump", "treated"]]
+    if control_min_jump_percentile is None or not np.isfinite(control_threshold):
+        out["control_eligible"] = out["treated"].eq(0)
+    else:
+        out["control_eligible"] = out["treated"].eq(0) & out["min_jump"].le(control_threshold)
+    out["treated_jump_threshold"] = threshold
+    out["control_min_jump_threshold"] = control_threshold
+    out["event_jump_threshold"] = threshold
+    return out[
+        [
+            "c",
+            "g",
+            "largest_jump",
+            "min_jump",
+            "treated",
+            "control_eligible",
+            "treated_jump_threshold",
+            "control_min_jump_threshold",
+            "event_jump_threshold",
+        ]
+    ]
 
 
 def build_comparison_stacked_panel(
@@ -1070,24 +1678,46 @@ def build_comparison_stacked_panel(
     cmp_cfg: dict,
     *,
     matching_style: str,
+    exposure_col: Optional[str] = None,
 ) -> pd.DataFrame:
+    started = time.perf_counter()
     pre_window = int(cmp_cfg.get("stacked_pre_years", 3))
     post_window = int(cmp_cfg.get("stacked_post_years", 3))
     treated = event_df.loc[event_df["treated"].eq(1)].dropna(subset=["g"]).copy()
-    controls = event_df.loc[event_df["treated"].eq(0), ["c"]].copy()
+    if "control_eligible" in event_df.columns:
+        controls = event_df.loc[event_df["treated"].eq(0) & event_df["control_eligible"].fillna(False), ["c"]].copy()
+    else:
+        controls = event_df.loc[event_df["treated"].eq(0), ["c"]].copy()
     if treated.empty or controls.empty:
         return pd.DataFrame()
-    pair_df = _build_pair_frame(panel, treated, controls, matching_style=matching_style)
+    if _verbose(cmp_cfg):
+        _log(
+            f"stacked inputs: treated={len(treated):,} | controls={len(controls):,} | "
+            f"panel={_panel_summary_text(panel)}",
+            indent=3,
+        )
+    pair_started = time.perf_counter()
+    pair_df = _build_pair_frame(panel, treated, controls, matching_style=matching_style, cmp_cfg=cmp_cfg)
     if pair_df.empty:
         return pd.DataFrame()
-    matched_panel = _materialize_matched_panel(panel, pair_df)
-    stacked, _ = build_stacked_did_panel(
-        matched_panel,
+    if _verbose(cmp_cfg):
+        _log(f"built pair frame: {len(pair_df):,} pairs in {_fmt_seconds(time.perf_counter() - pair_started)}", indent=3)
+    stack_started = time.perf_counter()
+    stacked = _build_stacked_panel_fast(
+        panel,
         pair_df,
         treated[["c", "g"]].copy(),
+        cmp_cfg=cmp_cfg,
         pre_window=pre_window,
         post_window=post_window,
+        exposure_col=exposure_col,
     )
+    if _verbose(cmp_cfg):
+        _log(
+            f"materialized stacked panel fast: {_panel_summary_text(stacked)} "
+            f"in {_fmt_seconds(time.perf_counter() - stack_started)} | total {_fmt_seconds(time.perf_counter() - started)}",
+            indent=3,
+        )
     return stacked
 
 
@@ -1097,11 +1727,57 @@ def filter_analysis_sample(panel: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
         return work
     t = pd.to_numeric(work["t"], errors="coerce")
     work = work.loc[t.between(int(cmp_cfg.get("data_min_t", 2010)), int(cmp_cfg.get("data_max_t", 2022)))].copy()
+    if _exclude_outside_negative_analysis(cmp_cfg):
+        work = _drop_outside_negative_firms(work)
     size_col = _first_present(work, ["firm_size_annual_pre_level", "headcount_size_baseline", "total_headcount_annual_pre_level"])
     if size_col is not None:
         work[size_col] = pd.to_numeric(work[size_col], errors="coerce")
         work = work.loc[work[size_col].ge(float(cmp_cfg.get("min_pre_avg_employment", 10)))].copy()
     return work.reset_index(drop=True)
+
+
+def _drop_outside_negative_firms(panel: pd.DataFrame) -> pd.DataFrame:
+    if panel.empty or "outside_negative_candidate" not in panel.columns or "c" not in panel.columns:
+        return panel
+    flags = pd.to_numeric(panel["outside_negative_candidate"], errors="coerce").fillna(0)
+    outside_ids = set(panel.loc[flags.eq(1), "c"].astype(str))
+    if not outside_ids:
+        return panel
+    return panel.loc[~panel["c"].astype(str).isin(outside_ids)].copy()
+
+
+def _filter_opt_index_analysis_sample(panel: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
+    """Mirror exposure_event_study's OPT-index analysis sample, not model-training sample."""
+    work = panel.copy()
+    before = len(work)
+    if "event_study_sample" in work.columns:
+        sample = pd.to_numeric(work["event_study_sample"], errors="coerce").fillna(0)
+        if str(cmp_cfg.get("unit", "firm")) == "local_market":
+            work = work.loc[sample.gt(0)].copy()
+        else:
+            work = work.loc[sample.eq(1)].copy()
+    if _exclude_outside_negative_analysis(cmp_cfg):
+        work = _drop_outside_negative_firms(work)
+    if _verbose(cmp_cfg):
+        _log(
+            f"OPT-index analysis filter: {before - len(work):,} rows removed; "
+            f"{len(work):,} rows remain",
+            indent=2,
+        )
+    return work
+
+
+def _exclude_outside_negative_analysis(cmp_cfg: dict) -> bool:
+    explicit = cmp_cfg.get("exclude_outside_negative_firms", None)
+    if explicit is not None:
+        return bool(explicit)
+    try:
+        cfg_path = _path_or_default(cmp_cfg.get("source_config_path"), DEFAULT_SOURCE_CONFIG_PATH)
+        source_cfg = load_config(cfg_path)
+        exp_cfg = get_cfg_section(source_cfg, "exposure_event_study")
+        return bool(exp_cfg.get("event_study_exclude_outside_negatives", False))
+    except Exception:
+        return False
 
 
 def aggregate_to_local_market(panel: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
@@ -1122,6 +1798,139 @@ def aggregate_to_local_market(panel: pd.DataFrame, cmp_cfg: dict) -> pd.DataFram
     return out
 
 
+def ensure_shift_share_share_variants(panel: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
+    """Derive share-based shift-share instruments when old caches lack them."""
+    if panel.empty or not {"c", "t"}.issubset(panel.columns):
+        return panel.copy()
+    requested = set(_configured_shift_share_variant_cols(cmp_cfg))
+    if "international_share" in set(_stacked_exposures_to_run(cmp_cfg)):
+        requested.add("z_ct_international_share")
+    needed_ihmp = [col for col in ("z_ct_ihmp_share", "z_ct_ihmp_share_ar_resid") if col in requested and col not in panel.columns]
+    needed_intl = "z_ct_international_share" in requested and "z_ct_international_share" not in panel.columns
+    if not needed_ihmp and not needed_intl:
+        return panel.copy()
+    out = panel.copy()
+    derived_frames: list[pd.DataFrame] = []
+    try:
+        shift_cfg = load_config(DEFAULT_SHIFT_SHARE_CONFIG_PATH)
+        paths = get_cfg_section(shift_cfg, "paths")
+        transition_path = Path(str(paths.get("transition_shares", "")))
+        growth_path = Path(str(paths.get("ipeds_unit_growth", "")))
+        school_metric_path = Path(str(paths.get("school_shift_metric_panel", "")))
+    except Exception as exc:
+        if _verbose(cmp_cfg):
+            _log(f"could not resolve share-based shift-share input paths: {exc}", indent=1)
+        return panel.copy()
+
+    if needed_ihmp:
+        try:
+            if transition_path.exists() and growth_path.exists():
+                growth_cols = pd.read_parquet(growth_path).columns
+                growth = pd.read_parquet(
+                    growth_path,
+                    columns=[col for col in ["k", "t", "metric_share"] if col in growth_cols],
+                )
+                if {"k", "t", "metric_share"}.issubset(growth.columns):
+                    growth = growth[["k", "t", "metric_share"]].dropna(subset=["k", "t"]).copy()
+                    growth["k"] = pd.to_numeric(growth["k"], errors="coerce").astype("Int64")
+                    growth["t"] = pd.to_numeric(growth["t"], errors="coerce").astype("Int64")
+                    growth["g_kt_ihmp_share"] = pd.to_numeric(growth["metric_share"], errors="coerce").fillna(0.0)
+                    growth = growth.sort_values(["k", "t"]).copy()
+                    growth["_metric_share_lag1"] = growth.groupby("k", sort=False)["g_kt_ihmp_share"].shift(1)
+                    growth["g_kt_ihmp_share_ar_resid"] = _ar_residual_school_metric(
+                        growth,
+                        value_col="g_kt_ihmp_share",
+                        lag_col="_metric_share_lag1",
+                    )
+                    import duckdb as ddb
+
+                    con = ddb.connect(database=":memory:")
+                    con.register("growth", growth[["k", "t", "g_kt_ihmp_share", "g_kt_ihmp_share_ar_resid"]])
+                    derived_frames.append(
+                        con.sql(
+                            f"""
+                            SELECT
+                                CAST(s.c AS BIGINT) AS c,
+                                CAST(g.t AS BIGINT) AS t,
+                                SUM(CASE WHEN s.share_ck > 1 THEN NULL ELSE s.share_ck END * g.g_kt_ihmp_share) AS z_ct_ihmp_share,
+                                SUM(CASE WHEN s.share_ck > 1 THEN NULL ELSE s.share_ck END * g.g_kt_ihmp_share_ar_resid) AS z_ct_ihmp_share_ar_resid,
+                                COUNT(DISTINCT CASE
+                                    WHEN s.share_ck IS NOT NULL AND s.share_ck > 0 AND g.g_kt_ihmp_share != 0 THEN s.k
+                                    END
+                                ) AS n_universities_ihmp_share,
+                                COUNT(DISTINCT CASE
+                                    WHEN s.share_ck IS NOT NULL AND s.share_ck > 0 AND g.g_kt_ihmp_share_ar_resid != 0 THEN s.k
+                                    END
+                                ) AS n_universities_ihmp_share_ar_resid
+                            FROM read_parquet('{_sql_path(transition_path)}') s
+                            JOIN growth g
+                              ON CAST(s.k AS BIGINT) = CAST(g.k AS BIGINT)
+                            GROUP BY 1, 2
+                            """
+                        ).df()
+                    )
+                    con.close()
+        except Exception as exc:
+            if _verbose(cmp_cfg):
+                _log(f"could not derive IHMP-share shift-share variants: {exc}", indent=1)
+
+    if needed_intl:
+        try:
+            if transition_path.exists() and school_metric_path.exists():
+                import duckdb as ddb
+
+                con = ddb.connect(database=":memory:")
+                derived_frames.append(
+                    con.sql(
+                        f"""
+                        WITH intl_metric AS (
+                            SELECT
+                                CAST(k AS VARCHAR) AS k,
+                                CAST(t AS BIGINT) AS t,
+                                CASE
+                                    WHEN TRY_CAST(ipeds_total_students AS DOUBLE) > 0 THEN
+                                        TRY_CAST(ipeds_total_intl_students AS DOUBLE)
+                                        / TRY_CAST(ipeds_total_students AS DOUBLE)
+                                    ELSE NULL
+                                END AS international_share
+                            FROM read_parquet('{_sql_path(school_metric_path)}')
+                        )
+                        SELECT
+                            CAST(s.c AS BIGINT) AS c,
+                            CAST(m.t AS BIGINT) AS t,
+                            SUM(
+                                CASE WHEN s.share_ck > 1 THEN NULL ELSE s.share_ck END
+                                * COALESCE(m.international_share, 0.0)
+                            ) AS z_ct_international_share,
+                            COUNT(DISTINCT CASE
+                                WHEN s.share_ck IS NOT NULL AND s.share_ck > 0
+                                 AND COALESCE(m.international_share, 0.0) != 0 THEN s.k
+                                END
+                            ) AS n_universities_international_share
+                        FROM read_parquet('{_sql_path(transition_path)}') s
+                        JOIN intl_metric m
+                          ON CAST(s.k AS VARCHAR) = m.k
+                        GROUP BY 1, 2
+                        """
+                    ).df()
+                )
+                con.close()
+        except Exception as exc:
+            if _verbose(cmp_cfg):
+                _log(f"could not derive international-share shift-share variant: {exc}", indent=1)
+
+    for derived in derived_frames:
+        if derived.empty:
+            continue
+        out = out.drop(columns=[col for col in derived.columns if col not in {"c", "t"} and col in out.columns], errors="ignore")
+        out = out.merge(derived, on=["c", "t"], how="left")
+    if _verbose(cmp_cfg):
+        present = [col for col in [*needed_ihmp, "z_ct_international_share"] if col in out.columns]
+        if present:
+            _log(f"derived missing share-based shift-share variants: {', '.join(present)}", indent=1)
+    return out
+
+
 def attach_company_features(panel: pd.DataFrame, features: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
     del cmp_cfg
     if panel.empty or features.empty or "c" not in panel.columns or "c" not in features.columns:
@@ -1139,6 +1948,9 @@ def attach_company_features(panel: pd.DataFrame, features: pd.DataFrame, cmp_cfg
             "school_opt_share_new_hire_annual_pre_level",
             "school_opt_share_tenured_annual_pre_level",
             "company_n_users_log1p",
+            "preferred_rcid_source",
+            "outside_negative_candidate",
+            "in_analysis_universe",
         ]
         if col in features.columns
     ]
@@ -1151,7 +1963,19 @@ def attach_company_features(panel: pd.DataFrame, features: pd.DataFrame, cmp_cfg
 def attach_opt_probability_index(panel: pd.DataFrame, pred_df: pd.DataFrame) -> pd.DataFrame:
     if panel.empty or pred_df.empty or "c" not in pred_df.columns:
         return panel.copy()
-    candidates = ["c", "predicted_prob", "opt_probability_index", "ntile", "ntile_label"]
+    candidates = [
+        "c",
+        "predicted_prob",
+        "predicted_index",
+        "predicted_class",
+        "opt_probability_index",
+        "ntile",
+        "ntile_label",
+        "event_study_sample",
+        "preferred_rcid_source",
+        "outside_negative_candidate",
+        "target_source",
+    ]
     cols = [c for c in candidates if c in pred_df.columns]
     right = pred_df[cols].drop_duplicates("c")
     if "predicted_prob" not in right.columns and "opt_probability_index" in right.columns:
@@ -1171,6 +1995,65 @@ def attach_shift_share_exposures(panel: pd.DataFrame, shift_panel: pd.DataFrame)
     right = shift_panel[["c", "t", *exposure_cols]].drop_duplicates(["c", "t"])
     overlap = [c for c in exposure_cols if c in panel.columns]
     return panel.drop(columns=overlap, errors="ignore").merge(right, on=["c", "t"], how="left")
+
+
+def _needs_workforce_design_outcomes(panel: pd.DataFrame, cmp_cfg: dict) -> bool:
+    requested = set(_list_cfg(cmp_cfg.get("outcome_cols", DEFAULT_OUTCOMES)))
+    return "avg_tenure_years_lag0" in requested and "avg_tenure_years_lag0" not in panel.columns
+
+
+def attach_workforce_design_outcomes(panel: pd.DataFrame, workforce: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
+    del cmp_cfg
+    if panel.empty or workforce.empty or not {"c", "t"}.issubset(panel.columns) or not {"c", "t"}.issubset(workforce.columns):
+        return panel.copy()
+    right_cols = ["c", "t"]
+    rename: dict[str, str] = {}
+    if "avg_tenure_years_annual" in workforce.columns:
+        right_cols.append("avg_tenure_years_annual")
+        rename["avg_tenure_years_annual"] = "avg_tenure_years_lag0"
+    if not rename:
+        return panel.copy()
+    right = workforce[right_cols].rename(columns=rename).drop_duplicates(["c", "t"])
+    return panel.drop(columns=[c for c in right.columns if c not in {"c", "t"} and c in panel.columns], errors="ignore").merge(right, on=["c", "t"], how="left")
+
+
+def _needs_design3_position_outcomes(panel: pd.DataFrame, cmp_cfg: dict) -> bool:
+    needed = set(_design3_position_outcome_cols_for_config(cmp_cfg))
+    override_requested = bool(needed.intersection(DESIGN3_NEW_GRAD_OVERRIDE_OUTCOMES))
+    return bool(needed) and (override_requested or any(col not in panel.columns for col in needed))
+
+
+def attach_design3_position_outcomes(panel: pd.DataFrame, outcomes: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
+    if panel.empty or outcomes.empty or not {"c", "t"}.issubset(panel.columns) or not {"c", "t"}.issubset(outcomes.columns):
+        return panel.copy()
+    value_cols = [col for col in _design3_position_outcome_cols_for_config(cmp_cfg) if col in outcomes.columns]
+    if not value_cols:
+        return panel.copy()
+    right = outcomes[["c", "t", *value_cols]].drop_duplicates(["c", "t"])
+    out = panel.drop(columns=[col for col in value_cols if col in panel.columns], errors="ignore").merge(right, on=["c", "t"], how="left")
+    for col in value_cols:
+        if _is_count_outcome(col):
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+    return out
+
+
+def _design3_position_outcome_cols_for_config(cmp_cfg: dict) -> list[str]:
+    requested = set(_list_cfg(cmp_cfg.get("outcome_cols", DEFAULT_OUTCOMES)))
+    candidates = list(DESIGN3_POSITION_OUTCOMES)
+    if not bool(cmp_cfg.get("design3_replace_new_hires_with_new_grad", False)):
+        candidates = [col for col in candidates if col not in DESIGN3_NEW_GRAD_OVERRIDE_OUTCOMES]
+    return [col for col in candidates if col in requested]
+
+
+def ensure_design_outcome_derivations(panel: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
+    requested = set(_list_cfg(cmp_cfg.get("outcome_cols", DEFAULT_OUTCOMES)))
+    if "y_new_hires_foreign_minus_one_lag0" not in requested or "y_new_hires_foreign_lag0" not in panel.columns:
+        return panel
+    out = panel.copy()
+    out["y_new_hires_foreign_minus_one_lag0"] = (
+        pd.to_numeric(out["y_new_hires_foreign_lag0"], errors="coerce") - 1.0
+    )
+    return out
 
 
 def recompute_baseline_size_growth(panel: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
@@ -1263,13 +2146,11 @@ def build_final_comparison_table(coef_df: pd.DataFrame) -> pd.DataFrame:
     if coef_df.empty:
         return pd.DataFrame()
     first = coef_df.loc[coef_df["family"].eq("first_stage")].copy()
-    reduced = coef_df.loc[
-        coef_df["family"].eq("reduced_form") & coef_df["outcome_col"].eq(FOREIGN_NEW_HIRE_OUTCOME)
-    ].copy()
     first = _pick_event_row(first)
-    reduced = _pick_event_row(reduced)
     key_cols = ["design", "spec"]
-    table = first[key_cols + ["coef", "se", "f_stat", "n_obs", "estimator"]].rename(
+    value_cols = ["coef", "se", "f_stat", "baseline_mean", "effect_size", "n_obs", "estimator"]
+    available_value_cols = [col for col in value_cols if col in first.columns]
+    table = first[key_cols + available_value_cols].rename(
         columns={
             "coef": "first_stage_coef",
             "se": "first_stage_se",
@@ -1277,14 +2158,78 @@ def build_final_comparison_table(coef_df: pd.DataFrame) -> pd.DataFrame:
             "estimator": "first_stage_estimator",
         }
     )
-    rf = reduced[key_cols + ["coef", "se", "n_obs"]].rename(
-        columns={
-            "coef": "foreign_new_hire_rf_coef",
-            "se": "foreign_new_hire_rf_se",
-            "n_obs": "foreign_new_hire_rf_n",
-        }
+    return table.sort_values(key_cols).reset_index(drop=True)
+
+
+def add_baseline_effect_stats(coef_df: pd.DataFrame, prepared: dict[str, pd.DataFrame], cmp_cfg: dict) -> pd.DataFrame:
+    if coef_df.empty:
+        return coef_df
+    out = coef_df.copy()
+    if "outcome_col" in out.columns:
+        out["outcome_label"] = out["outcome_col"].map(_pretty_outcome_label)
+    baseline_cache: dict[tuple[str, str, str], float] = {}
+
+    def _baseline_for(row: pd.Series) -> float:
+        design = str(row.get("design"))
+        family = str(row.get("family"))
+        outcome = str(row.get("outcome_col"))
+        key = (design, family, outcome)
+        if key in baseline_cache:
+            return baseline_cache[key]
+        panel = prepared.get(design)
+        value = float("nan")
+        if isinstance(panel, pd.DataFrame) and outcome in panel.columns and "t" in panel.columns:
+            work = panel.copy()
+            t = pd.to_numeric(work["t"], errors="coerce")
+            work = work.loc[t.between(int(cmp_cfg.get("baseline_start", 2010)), int(cmp_cfg.get("baseline_end", 2013)))].copy()
+            values = pd.to_numeric(work[outcome], errors="coerce")
+            if family == "first_stage":
+                values = _first_stage_transform(values, cmp_cfg)
+            elif family == "reduced_form":
+                values = _transform_outcome(values, outcome, cmp_cfg)
+            value = float(values.mean()) if values.notna().any() else float("nan")
+        baseline_cache[key] = value
+        return value
+
+    out["baseline_mean"] = out.apply(_baseline_for, axis=1)
+    coef = pd.to_numeric(out["coef"], errors="coerce")
+    baseline = pd.to_numeric(out["baseline_mean"], errors="coerce")
+    out["effect_size"] = np.where(baseline.abs().gt(1.0e-12), coef / baseline, np.nan)
+    return out
+
+
+def format_final_comparison_table_latex(table: pd.DataFrame) -> str:
+    if table.empty:
+        return "\\begin{tabular}{l}\\toprule\\nNo rows.\\\\\\n\\bottomrule\\n\\end{tabular}\\n"
+
+    def _coef_se(row: pd.Series) -> str:
+        coef = _fmt_num(row.get("first_stage_coef"), digits=3)
+        se = _fmt_num(row.get("first_stage_se"), digits=3)
+        return rf"\shortstack{{{coef}\\({se})}}"
+
+    lines = [
+        "\\begin{tabular}{llcccc}",
+        "\\toprule",
+        "Design & Specification & First stage & Baseline mean & Effect / mean & F-stat \\\\",
+        "\\midrule",
+    ]
+    for _, row in table.iterrows():
+        lines.append(
+            f"{_latex_escape(_pretty_design_label(row.get('design')))} & "
+            f"{_latex_escape(_pretty_spec_label(row.get('spec')))} & "
+            f"{_coef_se(row)} & "
+            f"{_fmt_num(row.get('baseline_mean'), digits=3)} & "
+            f"{_fmt_num(row.get('effect_size'), digits=2)} & "
+            f"{_fmt_num(row.get('f_stat'), digits=1, comma=True)} \\\\"
+        )
+    lines.extend(
+        [
+            "\\bottomrule",
+            "\\end{tabular}",
+            "",
+        ]
     )
-    return table.merge(rf, on=key_cols, how="outer").sort_values(key_cols).reset_index(drop=True)
+    return "\n".join(lines)
 
 
 def build_prepared_panel_summary(prepared: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -1323,10 +2268,19 @@ def _estimate_single_term(
 ) -> dict[str, object]:
     if lhs not in work.columns:
         return _empty_result(family, design, spec, estimator, time_name, time_value, outcome_col, "missing lhs")
-    panel = _regression_rows(work, [lhs, term, *(fe_cols or _fe_cols(work, cmp_cfg))])
+    requested_fe = fe_cols or _fe_cols(work, cmp_cfg)
+    panel = _regression_rows(work, [lhs, term, *requested_fe])
+    panel, prefilter_note = _prefilter_ppml_first_stage_panel(
+        panel,
+        lhs=lhs,
+        estimator=estimator,
+        family=family,
+        fe_cols=requested_fe,
+        cmp_cfg=cmp_cfg,
+        context=f"{design}/{spec}/{family}/{outcome_col} {time_name}={time_value}",
+    )
     if panel.empty or panel[lhs].nunique(dropna=True) <= 1 or panel[term].nunique(dropna=True) <= 1:
         return _empty_result(family, design, spec, estimator, time_name, time_value, outcome_col, "insufficient variation")
-    requested_fe = fe_cols or _fe_cols(panel, cmp_cfg)
     try:
         fit = _fit_model(panel, lhs, [term], estimator, requested_fe, cluster_col or _unit_id_col(cmp_cfg))
         actual_fe = requested_fe
@@ -1376,6 +2330,8 @@ def _estimate_single_term(
     out["fe_cols"] = "+".join(actual_fe)
     out["used_fallback_fe"] = bool(fallback_reason)
     out["fallback_reason"] = fallback_reason
+    if prefilter_note:
+        out["ppml_prefilter"] = prefilter_note
     return out
 
 
@@ -1439,6 +2395,15 @@ def _estimate_multi_term_event_from_base(
     if lhs in panel.columns:
         panel[lhs] = pd.to_numeric(panel[lhs], errors="coerce")
         panel = panel.loc[panel[lhs].notna()].copy()
+    panel, prefilter_note = _prefilter_ppml_first_stage_panel(
+        panel,
+        lhs=lhs,
+        estimator=estimator,
+        family=family,
+        fe_cols=fe_cols,
+        cmp_cfg=cmp_cfg,
+        context=f"{design}/{spec}/{family}/{outcome_col}",
+    )
     if panel.empty or lhs not in panel.columns or panel[lhs].nunique(dropna=True) <= 1:
         return [
             _empty_result(family, design, spec, estimator, time_name, time_value, outcome_col, "insufficient variation")
@@ -1455,7 +2420,22 @@ def _estimate_multi_term_event_from_base(
     started = time.perf_counter()
     try:
         if design == "event_study" and estimator == "ols":
-            fit = _fit_event_panelols(panel, lhs, term_cols, term_to_time, cmp_cfg, cluster_col or _unit_id_col(cmp_cfg))
+            fit = _fit_event_residualized_ols(panel, lhs, term_cols, fe_cols, cmp_cfg, cluster_col or _unit_id_col(cmp_cfg))
+        elif (
+            design == "event_study"
+            and estimator == "ppml"
+            and family == "first_stage"
+            and _can_use_event_conditional_ppml(fe_cols, cmp_cfg, cluster_col or _unit_id_col(cmp_cfg))
+        ):
+            fit = _fit_event_conditional_ppml(
+                panel,
+                lhs,
+                term_cols,
+                term_to_time,
+                cmp_cfg,
+                cluster_col or _unit_id_col(cmp_cfg),
+                fe_cols=fe_cols,
+            )
         else:
             fit = _fit_model(panel, lhs, term_cols, estimator, fe_cols, cluster_col or _unit_id_col(cmp_cfg))
     except Exception as exc:
@@ -1475,19 +2455,144 @@ def _estimate_multi_term_event_from_base(
             indent=3,
         )
     rows: list[dict[str, object]] = []
+    fit_nobs = int(getattr(fit, "nobs", len(panel)) or len(panel))
     for term, time_value in term_to_time.items():
         coef, se = _coef_se(fit, term)
-        row = _result_base(family, design, spec, estimator, time_name, int(time_value), outcome_col, len(panel), panel[_unit_id_col(cmp_cfg)].nunique() if _unit_id_col(cmp_cfg) in panel.columns else None)
+        row = _result_base(family, design, spec, estimator, time_name, int(time_value), outcome_col, fit_nobs, panel[_unit_id_col(cmp_cfg)].nunique() if _unit_id_col(cmp_cfg) in panel.columns else None)
         row.update(
             {
                 "coef": coef,
                 "se": se,
                 "f_stat": _single_term_f(coef, se),
-                "fe_cols": _event_panelols_fe_label(cmp_cfg) if design == "event_study" and estimator == "ols" else "+".join(fe_cols),
+                "fe_cols": "+".join(_event_ols_absorb_cols(fe_cols, panel, cmp_cfg)) if design == "event_study" and estimator == "ols" else "+".join(fe_cols),
             }
         )
+        if prefilter_note:
+            row["ppml_prefilter"] = prefilter_note
         rows.append(row)
     return rows
+
+
+def _fit_event_residualized_ols(
+    panel: pd.DataFrame,
+    lhs: str,
+    term_cols: list[str],
+    fe_cols: list[str],
+    cmp_cfg: dict,
+    cluster_col: str,
+) -> _LinearFit:
+    absorb_cols = _event_ols_absorb_cols(fe_cols, panel, cmp_cfg)
+    required = _dedupe_existing([lhs, *term_cols, *absorb_cols, cluster_col], panel)
+    work = panel.loc[:, required].dropna(subset=required).copy()
+    work[lhs] = pd.to_numeric(work[lhs], errors="coerce")
+    for col in term_cols:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.dropna(subset=[lhs, *term_cols, *absorb_cols, cluster_col]).copy()
+    if work.empty:
+        raise ValueError("Residualized event-study OLS sample is empty after filtering.")
+
+    y = work[lhs].to_numpy(dtype=float)
+    x = work[term_cols].to_numpy(dtype=float)
+    values = np.column_stack([y, x])
+    group_codes = [_group_codes(work[col]) for col in absorb_cols]
+    residualized = _residualize_matrix_by_groups(
+        values,
+        group_codes,
+        tol=float(cmp_cfg.get("event_ols_residualize_tol", 1e-8)),
+        max_iter=int(cmp_cfg.get("event_ols_residualize_max_iter", 200)),
+    )
+    y_res = residualized[:, 0]
+    x_res = residualized[:, 1:]
+    keep = np.nanstd(x_res, axis=0) > float(cmp_cfg.get("event_ols_min_residualized_sd", 1e-12))
+    kept_terms = [col for col, ok in zip(term_cols, keep) if bool(ok)]
+    if not kept_terms:
+        raise ValueError("All event-study OLS terms were absorbed by fixed effects.")
+    x_res = x_res[:, keep]
+
+    xtx = x_res.T @ x_res
+    xtx_inv = np.linalg.pinv(xtx)
+    beta = xtx_inv @ (x_res.T @ y_res)
+    resid = y_res - x_res @ beta
+    cluster_codes = _group_codes(work[cluster_col]) if cluster_col in work.columns else _group_codes(work[_unit_id_col(cmp_cfg)])
+    meat = _cluster_meat(x_res, resid, cluster_codes)
+    cov = xtx_inv @ meat @ xtx_inv
+    nobs = int(len(work))
+    n_params = int(len(kept_terms))
+    n_clusters = int(cluster_codes.max() + 1) if len(cluster_codes) else 0
+    if n_clusters > 1 and nobs > n_params:
+        cov *= (n_clusters / (n_clusters - 1)) * ((nobs - 1) / (nobs - n_params))
+    diag = np.diag(cov)
+    ses = np.sqrt(np.where(diag >= 0, diag, np.nan))
+    return _LinearFit(
+        params=pd.Series(beta, index=kept_terms),
+        std_errors=pd.Series(ses, index=kept_terms),
+        covariance=pd.DataFrame(cov, index=kept_terms, columns=kept_terms),
+        nobs=nobs,
+    )
+
+
+def _event_ols_absorb_cols(fe_cols: list[str], panel: pd.DataFrame, cmp_cfg: dict) -> list[str]:
+    unit_col = _unit_id_col(cmp_cfg)
+    baseline_col = "baseline_size_growth_year_fe"
+    out = [unit_col] if unit_col in panel.columns else []
+    if "t" in fe_cols and "t" in panel.columns:
+        out.append("t")
+    if baseline_col in fe_cols and baseline_col in panel.columns:
+        out.append(baseline_col)
+    for col in fe_cols:
+        if col not in out and col not in {unit_col, "t", baseline_col} and col in panel.columns:
+            out.append(col)
+    return out
+
+
+def _group_codes(values: pd.Series) -> np.ndarray:
+    return pd.Categorical(values.astype(str), ordered=False).codes.astype(np.int64, copy=False)
+
+
+def _residualize_matrix_by_groups(
+    values: np.ndarray,
+    group_codes: list[np.ndarray],
+    *,
+    tol: float,
+    max_iter: int,
+) -> np.ndarray:
+    out = np.asarray(values, dtype=float).copy()
+    if not group_codes:
+        return out - out.mean(axis=0, keepdims=True)
+    for codes in group_codes:
+        if len(codes) != len(out) or np.any(codes < 0):
+            raise ValueError("Invalid fixed-effect group codes for residualization.")
+    last_norm = np.inf
+    for _ in range(max_iter):
+        for codes in group_codes:
+            n_groups = int(codes.max()) + 1
+            counts = np.bincount(codes, minlength=n_groups).astype(float)
+            counts[counts == 0] = 1.0
+            for j in range(out.shape[1]):
+                sums = np.bincount(codes, weights=out[:, j], minlength=n_groups)
+                out[:, j] -= sums[codes] / counts[codes]
+        norm = 0.0
+        for codes in group_codes:
+            n_groups = int(codes.max()) + 1
+            counts = np.bincount(codes, minlength=n_groups).astype(float)
+            counts[counts == 0] = 1.0
+            for j in range(out.shape[1]):
+                means = np.bincount(codes, weights=out[:, j], minlength=n_groups) / counts
+                norm = max(norm, float(np.nanmax(np.abs(means))))
+        if abs(last_norm - norm) <= tol or norm <= tol:
+            break
+        last_norm = norm
+    return out
+
+
+def _cluster_meat(x: np.ndarray, residual: np.ndarray, cluster_codes: np.ndarray) -> np.ndarray:
+    n_clusters = int(cluster_codes.max()) + 1 if len(cluster_codes) else 0
+    if n_clusters <= 0:
+        return np.zeros((x.shape[1], x.shape[1]))
+    scores = np.empty((n_clusters, x.shape[1]), dtype=float)
+    for j in range(x.shape[1]):
+        scores[:, j] = np.bincount(cluster_codes, weights=x[:, j] * residual, minlength=n_clusters)
+    return scores.T @ scores
 
 
 def _fit_event_panelols(
@@ -1516,12 +2621,12 @@ def _fit_event_panelols(
     work = work.loc[t_num.notna()].copy()
     work["_t_panelols"] = t_num.loc[work.index].astype(int)
     years = sorted(work["_t_panelols"].unique())
-    non_ref_years = set(int(v) for v in term_to_time.values())
-    ref_candidates = [year for year in years if year not in non_ref_years]
-    ref_year = ref_candidates[0] if ref_candidates else years[0]
+    treatment_ref_years = [year for year in years if int(year) not in set(int(v) for v in term_to_time.values())]
+    treatment_ref_year = treatment_ref_years[0] if treatment_ref_years else None
+    calendar_ref_year = _calendar_year_dummy_reference(years, treatment_ref_year)
 
     year_dummies = pd.get_dummies(work["_t_panelols"], prefix="yr", dtype=float)
-    ref_year_col = f"yr_{ref_year}"
+    ref_year_col = f"yr_{calendar_ref_year}"
     if ref_year_col in year_dummies.columns:
         year_dummies = year_dummies.drop(columns=[ref_year_col])
 
@@ -1551,6 +2656,243 @@ def _fit_event_panelols(
         check_rank=False,
     )
     return model.fit(cov_type="clustered", cluster_entity=True, low_memory=True)
+
+
+def _can_use_event_conditional_ppml(fe_cols: list[str], cmp_cfg: dict, cluster_col: str) -> bool:
+    if minimize is None:
+        return False
+    unit_col = _unit_id_col(cmp_cfg)
+    if cluster_col != unit_col or unit_col not in fe_cols:
+        return False
+    allowed = {unit_col, "t", "baseline_size_growth_year_fe"}
+    return set(fe_cols).issubset(allowed)
+
+
+def _fit_event_conditional_ppml(
+    panel: pd.DataFrame,
+    lhs: str,
+    term_cols: list[str],
+    term_to_time: dict[str, int],
+    cmp_cfg: dict,
+    cluster_col: str,
+    *,
+    fe_cols: Optional[list[str]] = None,
+) -> _ConditionalPPMLFit:
+    del cluster_col
+    if minimize is None:
+        raise ImportError("scipy is required to run the fast event-study conditional PPML estimator.")
+    design = _build_event_conditional_ppml_design(panel, lhs, term_cols, term_to_time, cmp_cfg, fe_cols=fe_cols)
+    if _verbose(cmp_cfg):
+        _log(
+            "fast conditional PPML first-stage sample | "
+            f"kept rows={design.kept_rows:,}; "
+            f"dropped all-zero outcome rows={design.dropped_zero_outcome_rows:,}; "
+            f"dropped all-zero units={design.dropped_zero_outcome_units:,}; "
+            f"parameters={len(design.param_names):,}",
+            indent=4,
+        )
+    objective = _ConditionalPPMLObjective(design=design, sum_yx=design.x.T @ design.y)
+    theta0 = np.zeros(len(design.param_names), dtype=float)
+
+    def fun(theta: np.ndarray) -> float:
+        value, _ = objective.objective_gradient(theta)
+        return value
+
+    def jac(theta: np.ndarray) -> np.ndarray:
+        _, gradient = objective.objective_gradient(theta)
+        return gradient
+
+    result = minimize(
+        fun,
+        theta0,
+        jac=jac,
+        method="BFGS",
+        options={
+            "gtol": float(cmp_cfg.get("event_ppml_gradient_tol", 1e-7)),
+            "maxiter": int(cmp_cfg.get("event_ppml_maxiter", 200)),
+        },
+    )
+    if not np.isfinite(result.fun):
+        raise ValueError("Fast conditional PPML failed: objective is not finite.")
+    _, final_gradient = objective.objective_gradient(result.x)
+    max_abs_gradient = float(np.max(np.abs(final_gradient))) if len(final_gradient) else 0.0
+    success_tol = float(cmp_cfg.get("event_ppml_success_gradient_tol", 1e-4))
+    converged = bool(result.success or max_abs_gradient <= success_tol)
+
+    hessian = objective.hessian(result.x)
+    meat = objective.cluster_meat(result.x)
+    inv_hessian = np.linalg.pinv(hessian)
+    vcov = inv_hessian @ meat @ inv_hessian
+    n_groups = len(design.group_totals)
+    n_params = len(design.param_names)
+    if n_groups > 1 and design.kept_rows > n_params:
+        vcov *= (n_groups / (n_groups - 1)) * ((design.kept_rows - 1) / (design.kept_rows - n_params))
+    diag = np.diag(vcov)
+    ses = np.sqrt(np.where(diag >= 0, diag, np.nan))
+    return _ConditionalPPMLFit(
+        params=pd.Series(result.x, index=design.param_names),
+        std_errors=pd.Series(ses, index=design.param_names),
+        covariance=pd.DataFrame(vcov, index=design.param_names, columns=design.param_names),
+        nobs=design.kept_rows,
+        converged=converged,
+        message=f"{result.message}; max_abs_gradient={max_abs_gradient:.3g}",
+    )
+
+
+def _build_event_conditional_ppml_design(
+    panel: pd.DataFrame,
+    lhs: str,
+    term_cols: list[str],
+    term_to_time: dict[str, int],
+    cmp_cfg: dict,
+    *,
+    fe_cols: Optional[list[str]] = None,
+) -> _ConditionalPPMLDesign:
+    unit_col = _unit_id_col(cmp_cfg)
+    explicit_fe_cols = _conditional_ppml_explicit_fe_cols(fe_cols or [unit_col, "t"], cmp_cfg)
+    required = _dedupe_existing([lhs, unit_col, "t", *term_cols, *explicit_fe_cols], panel)
+    work = panel.loc[:, required].dropna(subset=required).copy()
+    work[lhs] = pd.to_numeric(work[lhs], errors="coerce")
+    work = work.loc[work[lhs].ge(0)].copy()
+    for col in term_cols:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work["t"] = pd.to_numeric(work["t"], errors="coerce")
+    work = work.dropna(subset=[lhs, unit_col, "t", *term_cols]).copy()
+    if work.empty:
+        raise ValueError("Fast conditional PPML sample is empty after filtering.")
+
+    unit_totals = work.groupby(unit_col, sort=False)[lhs].transform("sum")
+    positive_unit_mask = unit_totals.gt(0)
+    dropped_rows = int((~positive_unit_mask).sum())
+    dropped_units = int(work.loc[~positive_unit_mask, unit_col].nunique(dropna=True))
+    work = work.loc[positive_unit_mask].copy()
+    if work.empty:
+        raise ValueError("Fast conditional PPML sample has no units with positive first-stage outcomes.")
+
+    nuisance_cols: list[str] = []
+    if explicit_fe_cols:
+        dummy_frames: list[pd.DataFrame] = []
+        for fe_col in explicit_fe_cols:
+            dummies = pd.get_dummies(work[fe_col].astype(str), prefix=f"__fe_{_safe_name(fe_col)}", dtype=float)
+            if dummies.shape[1] > 0:
+                dummies = dummies.reindex(sorted(dummies.columns), axis=1)
+                dummies = dummies.iloc[:, 1:]
+            if not dummies.empty:
+                dummy_frames.append(dummies)
+            nuisance_cols.extend(str(col) for col in dummies.columns)
+        if dummy_frames:
+            work = pd.concat([work, *dummy_frames], axis=1, copy=False)
+    else:
+        years = sorted(int(v) for v in work["t"].dropna().unique())
+        treatment_ref_years = [year for year in years if int(year) not in set(int(v) for v in term_to_time.values())]
+        treatment_ref_year = treatment_ref_years[0] if treatment_ref_years else None
+        calendar_ref_year = _calendar_year_dummy_reference(years, treatment_ref_year)
+        year_frames: list[pd.Series] = []
+        for year in years:
+            if int(year) == int(calendar_ref_year):
+                continue
+            col = f"__year_{int(year)}"
+            year_frames.append(work["t"].eq(int(year)).astype(float).rename(col))
+            nuisance_cols.append(col)
+        if year_frames:
+            work = pd.concat([work, *year_frames], axis=1, copy=False)
+
+    param_cols = [*nuisance_cols, *term_cols]
+    x_frame = work.loc[:, param_cols].astype(float)
+    nonzero_cols = x_frame.columns[x_frame.std(axis=0).gt(0)].tolist()
+    dropped_param_cols = [col for col in param_cols if col not in nonzero_cols]
+    if not nonzero_cols:
+        raise ValueError("Fast conditional PPML design has no varying regressors.")
+    x_frame = x_frame.loc[:, nonzero_cols]
+
+    work["_unit_sort"] = work[unit_col].astype(str)
+    work = work.assign(_row_order=np.arange(len(work))).sort_values(["_unit_sort", "t", "_row_order"])
+    x = x_frame.loc[work.index].to_numpy(dtype=float)
+    y = work[lhs].to_numpy(dtype=float)
+    unit_codes = pd.Categorical(work["_unit_sort"], ordered=False).codes
+    group_starts = np.r_[0, np.flatnonzero(np.diff(unit_codes)) + 1]
+    group_ids = np.repeat(np.arange(len(group_starts)), np.diff(np.r_[group_starts, len(work)]))
+    group_totals = np.add.reduceat(y, group_starts)
+    if np.any(group_totals <= 0):
+        raise ValueError("Fast conditional PPML retained a nonpositive-outcome unit.")
+    if dropped_param_cols and _verbose(cmp_cfg):
+        _log(
+            "fast conditional PPML dropped non-varying parameters: "
+            + ", ".join(dropped_param_cols[:8])
+            + ("..." if len(dropped_param_cols) > 8 else ""),
+            indent=4,
+        )
+    return _ConditionalPPMLDesign(
+        x=x,
+        y=y,
+        group_ids=group_ids,
+        group_starts=group_starts,
+        group_totals=group_totals,
+        param_names=list(x_frame.columns),
+        kept_rows=int(len(work)),
+        dropped_zero_outcome_rows=dropped_rows,
+        dropped_zero_outcome_units=dropped_units,
+    )
+
+
+def _conditional_ppml_explicit_fe_cols(fe_cols: list[str], cmp_cfg: dict) -> list[str]:
+    unit_col = _unit_id_col(cmp_cfg)
+    return [col for col in fe_cols if col not in {unit_col, "t"}]
+
+
+def _prefilter_ppml_first_stage_panel(
+    panel: pd.DataFrame,
+    *,
+    lhs: str,
+    estimator: str,
+    family: str,
+    fe_cols: list[str],
+    cmp_cfg: dict,
+    context: str,
+) -> tuple[pd.DataFrame, Optional[str]]:
+    if (
+        estimator != "ppml"
+        or family != "first_stage"
+        or not bool(cmp_cfg.get("ppml_drop_all_zero_fe_groups", True))
+        or lhs not in panel.columns
+    ):
+        return panel, None
+    group_col = _ppml_first_stage_group_col(panel, fe_cols, cmp_cfg)
+    if group_col is None:
+        return panel, None
+    work = panel.copy()
+    y = pd.to_numeric(work[lhs], errors="coerce")
+    work = work.loc[y.notna() & y.ge(0)].copy()
+    if work.empty:
+        return work, "all rows dropped after nonnegative PPML outcome filter"
+    y = pd.to_numeric(work[lhs], errors="coerce")
+    group_totals = y.groupby(work[group_col].astype(str), sort=False).transform("sum")
+    keep = group_totals.gt(0)
+    dropped_rows = int((~keep).sum())
+    if dropped_rows == 0:
+        return work, None
+    dropped_groups = int(work.loc[~keep, group_col].astype(str).nunique(dropna=True))
+    out = work.loc[keep].copy()
+    note = (
+        f"dropped {dropped_rows:,} all-zero {group_col} rows "
+        f"({dropped_groups:,} FE groups)"
+    )
+    if _verbose(cmp_cfg):
+        _log(f"PPML prefilter | {context}: {note}", indent=4)
+    return out, note
+
+
+def _ppml_first_stage_group_col(panel: pd.DataFrame, fe_cols: list[str], cmp_cfg: dict) -> Optional[str]:
+    unit_col = _unit_id_col(cmp_cfg)
+    if unit_col in fe_cols and unit_col in panel.columns:
+        return unit_col
+    for col in fe_cols:
+        if col in panel.columns and ("unit" in col or col == unit_col):
+            return col
+    for col in fe_cols:
+        if col in panel.columns and col not in {"t", "year_stack_fe", "baseline_size_growth_year_fe"}:
+            return col
+    return None
 
 
 def _fit_model(panel: pd.DataFrame, lhs: str, terms: list[str], estimator: str, fe_cols: list[str], cluster_col: str):
@@ -1597,13 +2939,13 @@ def plot_dynamic_design(results: pd.DataFrame, design: str, x_col: str, figures_
         sub = results.loc[results["design"].eq(design) & results["family"].eq(family)].copy()
         if family == "reduced_form":
             for outcome, group in sub.groupby("outcome_col", dropna=False):
-                _plot_coef_group(
-                    group,
-                    x_col,
-                    figures_dir / f"dynamic_{family}_{design}_{_safe_name(outcome)}.png",
-                    f"{design}: {family} {outcome}",
-                    show_figures=bool(results.attrs.get("show_figures", False)),
-                )
+	                _plot_coef_group(
+	                    group,
+	                    x_col,
+	                    figures_dir / f"dynamic_{family}_{design}_{_safe_name(outcome)}.png",
+	                    f"{design}: {family} {_pretty_outcome_label(outcome)}",
+	                    show_figures=bool(results.attrs.get("show_figures", False)),
+	                )
         else:
             _plot_coef_group(
                 sub,
@@ -1620,48 +2962,82 @@ def plot_raw_means_by_exposure(
     cmp_cfg: dict,
     design: str,
     figures_dir: Path,
+    *,
+    stats: Optional[pd.DataFrame] = None,
 ) -> None:
     if plt is None or panel.empty:
         return
-    x_col = _x_col(panel)
+    _apply_laborlunch_plot_style()
+    x_col = _x_col(panel, cmp_cfg)
     for spec, exposure_col in variants:
         if exposure_col not in panel.columns or x_col not in panel.columns:
             continue
         work = panel[["t", exposure_col, x_col]].dropna().copy()
         if work.empty:
             continue
+        plot_col = "_first_stage_plot_value"
+        work[plot_col] = _first_stage_transform(pd.to_numeric(work[x_col], errors="coerce"), cmp_cfg)
         q = pd.qcut(pd.to_numeric(work[exposure_col], errors="coerce"), 4, labels=False, duplicates="drop")
         work["exposure_q"] = q
-        raw = work.groupby(["t", "exposure_q"], as_index=False)[x_col].mean()
-        fig, ax = plt.subplots(figsize=(8.4, 4.8))
-        for qv, group in raw.groupby("exposure_q"):
-            ax.plot(group["t"], group[x_col], marker="o", linewidth=1.4, label=f"Q{int(qv) + 1}")
-        ax.axvline(float(cmp_cfg.get("event_year", 2016)), color="grey", linestyle="--", linewidth=1)
-        ax.set_title(f"{design} raw first stage: {spec}")
+        raw = work.groupby(["t", "exposure_q"], as_index=False)[plot_col].mean()
+        fig, ax = plt.subplots(figsize=_figsize())
+        for idx, (qv, group) in enumerate(raw.groupby("exposure_q")):
+            color = _plot_color(idx)
+            ax.plot(
+                group["t"],
+                group[plot_col],
+                marker="o",
+                markersize=MULTI_PLOT_MARKER_SIZE,
+                linewidth=PLOT_LINE_WIDTH,
+                color=color,
+                label=f"Q{int(qv) + 1}",
+            )
+        ax.axvline(float(cmp_cfg.get("event_year", 2016)), color="gray", linestyle="--", linewidth=1)
         ax.set_xlabel("Year")
-        ax.set_ylabel(f"Mean {x_col}")
-        ax.legend(fontsize=8)
+        ax.set_ylabel(f"Mean {_first_stage_axis_label(cmp_cfg)}")
+        _annotate_raw_summary(ax, work, spec, stats, time_col="t", outcome_col=plot_col, cmp_cfg=cmp_cfg)
+        _right_legend(ax)
         fig.tight_layout()
-        fig.savefig(figures_dir / f"raw_first_stage_{design}_{_safe_name(spec)}.png", dpi=150, bbox_inches="tight")
+        fig.savefig(figures_dir / f"raw_first_stage_{design}_{_safe_name(spec)}.png", dpi=220, bbox_inches="tight")
         _display_figure_if_requested(fig, cmp_cfg)
         plt.close(fig)
 
 
-def plot_stacked_raw_means(stacked: pd.DataFrame, spec: str, cmp_cfg: dict, figures_dir: Path) -> None:
+def plot_stacked_raw_means(
+    stacked: pd.DataFrame,
+    spec: str,
+    cmp_cfg: dict,
+    figures_dir: Path,
+    *,
+    stats: Optional[pd.DataFrame] = None,
+) -> None:
     if plt is None or stacked.empty:
         return
-    x_col = _x_col(stacked)
-    raw = stacked.groupby(["rel_time", "treated"], as_index=False)[x_col].mean()
-    fig, ax = plt.subplots(figsize=(8.4, 4.8))
-    for treated, group in raw.groupby("treated"):
-        ax.plot(group["rel_time"], group[x_col], marker="o", linewidth=1.4, label="Treated" if treated else "Control")
-    ax.axvline(0, color="grey", linestyle="--", linewidth=1)
-    ax.set_title(f"Stacked DiD raw first stage: {spec}")
+    _apply_laborlunch_plot_style()
+    x_col = _x_col(stacked, cmp_cfg)
+    work = stacked.copy()
+    plot_col = "_first_stage_plot_value"
+    work[plot_col] = _first_stage_transform(pd.to_numeric(work[x_col], errors="coerce"), cmp_cfg)
+    raw = work.groupby(["rel_time", "treated"], as_index=False)[plot_col].mean()
+    fig, ax = plt.subplots(figsize=_figsize())
+    for idx, (treated, group) in enumerate(raw.groupby("treated")):
+        color = _plot_color(idx)
+        ax.plot(
+            group["rel_time"],
+            group[plot_col],
+            marker="o",
+            markersize=MULTI_PLOT_MARKER_SIZE,
+            linewidth=PLOT_LINE_WIDTH,
+            color=color,
+            label="Treated" if treated else "Control",
+        )
+    ax.axvline(0, color="gray", linestyle="--", linewidth=1)
     ax.set_xlabel("Event time")
-    ax.set_ylabel(f"Mean {x_col}")
-    ax.legend()
+    ax.set_ylabel(f"Mean {_first_stage_axis_label(cmp_cfg)}")
+    _annotate_raw_summary(ax, work, spec, stats, time_col="rel_time", outcome_col=plot_col, cmp_cfg=cmp_cfg)
+    _right_legend(ax)
     fig.tight_layout()
-    fig.savefig(figures_dir / f"raw_first_stage_stacked_did_{_safe_name(spec)}.png", dpi=150, bbox_inches="tight")
+    fig.savefig(figures_dir / f"raw_first_stage_stacked_did_{_safe_name(spec)}.png", dpi=220, bbox_inches="tight")
     _display_figure_if_requested(fig, cmp_cfg)
     plt.close(fig)
 
@@ -1672,25 +3048,255 @@ def _plot_coef_group(group: pd.DataFrame, x_col: str, path: Path, title: str, *,
     work = group.dropna(subset=["coef", "se", x_col]).copy()
     if work.empty:
         return
+    _apply_laborlunch_plot_style()
     specs = list(work["spec"].drop_duplicates())
-    offsets = np.linspace(-0.18, 0.18, max(len(specs), 1))
-    fig, ax = plt.subplots(figsize=(9.2, 5.2))
+    offsets = _plot_offsets(len(specs), span=0.42)
+    fig, ax = plt.subplots(figsize=_figsize())
     for idx, spec in enumerate(specs):
         sub = work.loc[work["spec"].eq(spec)].sort_values(x_col)
         x = pd.to_numeric(sub[x_col], errors="coerce") + float(offsets[idx])
-        ax.errorbar(x, sub["coef"], yerr=1.96 * sub["se"], marker="o", linestyle="-", capsize=3, linewidth=1.3, label=str(spec))
-    ax.axhline(0, color="black", linewidth=1)
+        color = _plot_color(idx)
+        ax.errorbar(
+            x,
+            sub["coef"],
+            yerr=1.96 * sub["se"],
+            fmt="-",
+            color=color,
+            marker="o",
+            markersize=PLOT_MARKER_SIZE,
+            linewidth=PLOT_LINE_WIDTH,
+            label=_pretty_spec_label(spec),
+            **_errorbar_kwargs(color, marker_size=PLOT_MARKER_SIZE),
+        )
+    ax.axhline(0, color="gray", linestyle="--", linewidth=1)
     if 0 in set(pd.to_numeric(work[x_col], errors="coerce").dropna().astype(int)):
-        ax.axvline(0, color="grey", linestyle="--", linewidth=1)
-    ax.set_title(title)
-    ax.set_xlabel(x_col)
+        ax.axvline(0, color="gray", linestyle=":", linewidth=1)
+    ax.set_title("")
+    ax.set_xlabel(_axis_label(x_col))
     ax.set_ylabel("Coefficient on normalized exposure")
-    ax.legend(fontsize=7)
+    _annotate_effect_summary(ax, work, x_col)
+    _right_legend(ax)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=150, bbox_inches="tight")
+    fig.savefig(path, dpi=220, bbox_inches="tight")
     _display_figure_if_requested(fig, {"show_figures": show_figures})
     plt.close(fig)
+
+
+def _apply_laborlunch_plot_style() -> None:
+    if plt is None:
+        return
+    if llstyle is not None:
+        llstyle.apply_style()
+        return
+    plt.rcParams.update(
+        {
+            "figure.figsize": _figsize(),
+            "font.size": 10,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": True,
+            "grid.alpha": 0.22,
+        }
+    )
+
+
+def _figsize() -> tuple[float, float]:
+    return tuple(llstyle.FIGSIZE) if llstyle is not None else (9.2, 5.1)
+
+
+def _plot_color(idx: int) -> str:
+    return llstyle.color(idx) if llstyle is not None else PLOT_PALETTE[idx % len(PLOT_PALETTE)]
+
+
+def _plot_offsets(n_series: int, *, span: float) -> np.ndarray:
+    return llstyle.offsets(n_series, span=span) if llstyle is not None else (
+        np.array([0.0]) if n_series <= 1 else np.linspace(-span / 2.0, span / 2.0, num=n_series)
+    )
+
+
+def _errorbar_kwargs(series_color: str, marker_size: float) -> dict[str, object]:
+    if llstyle is not None:
+        return llstyle.errorbar_kwargs(series_color, marker_size=marker_size, alpha=ERRORBAR_INTERVAL_ALPHA)
+    return {
+        "ecolor": series_color,
+        "elinewidth": marker_size,
+        "capsize": 0,
+        "alpha": ERRORBAR_INTERVAL_ALPHA,
+    }
+
+
+def _right_legend(ax) -> None:
+    if llstyle is not None:
+        llstyle.right_legend(ax)
+    else:
+        ax.legend(loc="best", frameon=True, framealpha=0.86, fontsize=9)
+
+
+def _annotate_effect_summary(ax, work: pd.DataFrame, x_col: str) -> None:
+    if work.empty:
+        return
+    pieces = []
+    for spec, sub in work.groupby("spec", sort=False):
+        row = _annotation_row(sub, x_col)
+        if row is None:
+            continue
+        pieces.append(
+            f"{_pretty_spec_label(spec)}: "
+            f"base={_fmt_num(row.get('baseline_mean'), digits=2)}, "
+            f"eff={_fmt_num(row.get('effect_size'), digits=2)}, "
+            f"F={_fmt_num(row.get('f_stat'), digits=1)}"
+        )
+    if not pieces:
+        return
+    ax.text(
+        0.015,
+        0.02,
+        "\n".join(pieces),
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=8,
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "none", "alpha": 0.78},
+    )
+
+
+def _annotate_raw_summary(
+    ax,
+    work: pd.DataFrame,
+    spec: str,
+    stats: Optional[pd.DataFrame],
+    *,
+    time_col: str,
+    outcome_col: str,
+    cmp_cfg: dict,
+) -> None:
+    stat_row: Optional[pd.Series] = None
+    if isinstance(stats, pd.DataFrame) and not stats.empty and "spec" in stats.columns:
+        sub = stats.loc[stats["spec"].eq(spec) & stats["family"].eq("first_stage")].copy()
+        if not sub.empty:
+            stat_row = _annotation_row(sub, "rel_time" if "rel_time" in sub.columns else "horizon" if "horizon" in sub.columns else "year")
+    baseline = stat_row.get("baseline_mean") if stat_row is not None else np.nan
+    if not pd.notna(baseline):
+        baseline = _raw_baseline_mean(work, time_col=time_col, outcome_col=outcome_col, cmp_cfg=cmp_cfg)
+    effect = stat_row.get("effect_size") if stat_row is not None else np.nan
+    f_stat = stat_row.get("f_stat") if stat_row is not None else np.nan
+    ax.text(
+        0.015,
+        0.02,
+        f"base={_fmt_num(baseline, digits=2)}, eff={_fmt_num(effect, digits=2)}, F={_fmt_num(f_stat, digits=1)}",
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=8,
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "none", "alpha": 0.78},
+    )
+
+
+def _raw_baseline_mean(work: pd.DataFrame, *, time_col: str, outcome_col: str, cmp_cfg: dict) -> float:
+    if time_col not in work.columns or outcome_col not in work.columns:
+        return float("nan")
+    t = pd.to_numeric(work[time_col], errors="coerce")
+    if time_col == "rel_time":
+        mask = t.lt(0)
+    else:
+        mask = t.between(int(cmp_cfg.get("baseline_start", 2010)), int(cmp_cfg.get("baseline_end", 2013)))
+    values = pd.to_numeric(work.loc[mask, outcome_col], errors="coerce")
+    return float(values.mean()) if values.notna().any() else float("nan")
+
+
+def _annotation_row(sub: pd.DataFrame, x_col: str) -> Optional[pd.Series]:
+    if sub.empty:
+        return None
+    picked = _pick_event_row(sub)
+    if not picked.empty:
+        return picked.iloc[0]
+    if x_col not in sub.columns:
+        return sub.iloc[0]
+    work = sub.copy()
+    x = pd.to_numeric(work[x_col], errors="coerce")
+    if x.notna().any():
+        work = work.assign(_annotation_distance=x.abs())
+        return work.sort_values("_annotation_distance").iloc[0]
+    return work.iloc[0]
+
+
+def _axis_label(x_col: str) -> str:
+    labels = {"event_time": "Event time", "rel_time": "Event time", "horizon": "Outcome horizon", "year": "Year"}
+    return labels.get(str(x_col), str(x_col))
+
+
+def _pretty_spec_label(spec: object) -> str:
+    labels = {
+        "ihmp_levels": "IHMP levels",
+        "ihmp_share_levels": "IHMP share",
+        "ihmp_levels_ar_residual": "IHMP levels (AR)",
+        "ihmp_share_ar_residual": "IHMP share (AR)",
+        "school_opt_share_binary": "School OPT share, binary",
+        "school_opt_share_continuous": "School OPT share, continuous",
+        "opt_probability_index_binary": "OPT index, binary",
+        "opt_probability_index_continuous": "OPT index, continuous",
+        "unmatched_ihmp_share": "Unmatched IHMP share",
+        "matched_ihmp_share": "Matched IHMP share",
+        "matched_international_share": "Matched international share",
+        "unmatched_opt_takeup": "Unmatched OPT take-up",
+        "matched_opt_takeup": "Matched OPT take-up",
+    }
+    return labels.get(str(spec), str(spec).replace("_", " "))
+
+
+def _pretty_design_label(design: object) -> str:
+    labels = {
+        "shift_share": "Shift-share",
+        "event_study": "Common-break event study",
+        "stacked_did": "Stacked DiD",
+    }
+    return labels.get(str(design), str(design).replace("_", " "))
+
+
+def _pretty_outcome_label(outcome: object) -> str:
+    labels = {
+        "y_new_hires_foreign_lag0": "IHS(foreign new grad hires)",
+        "y_new_hires_native_lag0": "IHS(native new grad hires)",
+        "y_new_hires_foreign_opt_likely_lag0": "IHS(foreign new grad hires, OPT-likely SOC2)",
+        "y_new_hires_foreign_masters_lag0": "IHS(foreign master's new grad hires)",
+        "y_new_hires_native_masters_lag0": "IHS(native master's new grad hires)",
+        "y_new_hires_foreign_opt_likely_masters_lag0": "IHS(foreign master's new grad hires, OPT-likely SOC2)",
+        "avg_tenure_foreign_new_hires_lag0": "Avg tenure among foreign new grad hires",
+        "avg_tenure_new_hires_lag0": "Avg tenure among all new grad hires",
+        "avg_tenure_foreign_new_hires_masters_lag0": "Avg tenure among foreign master's new grad hires",
+        "avg_tenure_new_hires_masters_lag0": "Avg tenure among master's new grad hires",
+        "y_intern_positions_opt_likely_lag0": "IHS(intern users, OPT-likely SOC2)",
+        "y_intern_positions_foreign_lag0": "IHS(foreign intern users)",
+        "y_intern_positions_opt_likely_foreign_lag0": "IHS(foreign intern users, OPT-likely SOC2)",
+    }
+    return labels.get(str(outcome), str(outcome).replace("_", " "))
+
+
+def _fmt_num(value: object, *, digits: int, comma: bool = False) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(number):
+        return ""
+    fmt = f",.{digits}f" if comma else f".{digits}f"
+    return f"{number:{fmt}}"
+
+
+def _latex_escape(value: object) -> str:
+    text = str(value)
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+    }
+    return "".join(replacements.get(ch, ch) for ch in text)
 
 
 def _display_figure_if_requested(fig, cmp_cfg: dict) -> None:
@@ -1744,7 +3350,7 @@ def _event_study_needed_cols(work: pd.DataFrame, cmp_cfg: dict, exposure_col: st
         _unit_id_col(cmp_cfg),
         "t",
         exposure_col,
-        _x_col(work),
+        _x_col(work, cmp_cfg),
         *_available_outcomes(work, cmp_cfg),
         *_fe_cols(work, cmp_cfg),
     ]
@@ -1787,9 +3393,33 @@ def _first_stage_lhs(work: pd.DataFrame, values: pd.Series, cmp_cfg: dict) -> tu
         col = "first_stage_lhs_ols_continuous"
         work[col] = pd.to_numeric(values, errors="coerce")
         return col, "ols"
+    if first_stage_type == "ols_ihs":
+        col = "first_stage_lhs_ols_ihs"
+        work[col] = _first_stage_transform(values, cmp_cfg)
+        return col, "ols"
     col = "first_stage_lhs_ols_binary"
-    work[col] = (pd.to_numeric(values, errors="coerce").fillna(0.0) > 0).astype(float)
+    work[col] = _first_stage_transform(values, cmp_cfg)
     return col, "ols"
+
+
+def _first_stage_transform(values: pd.Series, cmp_cfg: dict) -> pd.Series:
+    vals = pd.to_numeric(values, errors="coerce")
+    first_stage_type = str(cmp_cfg.get("first_stage_type", "ppml"))
+    if first_stage_type == "ols_binary":
+        return vals.fillna(0.0).gt(0).astype(float)
+    if first_stage_type == "ols_ihs":
+        return np.arcsinh(vals)
+    return vals
+
+
+def _first_stage_axis_label(cmp_cfg: dict) -> str:
+    first_stage_type = str(cmp_cfg.get("first_stage_type", "ppml"))
+    x_label = "master's OPT hires" if str(cmp_cfg.get("first_stage_col", "")).startswith("masters_") else "OPT hires"
+    if first_stage_type == "ols_binary":
+        return "master's OPT hire indicator" if x_label.startswith("master") else "any OPT hire indicator"
+    if first_stage_type == "ols_ihs":
+        return f"IHS({x_label})"
+    return x_label
 
 
 def _dynamic_value(panel: pd.DataFrame, value_col: str, horizon: int, *, unit_col: str) -> pd.Series:
@@ -1824,9 +3454,15 @@ def _transform_outcome(values: pd.Series, outcome: str, cmp_cfg: dict) -> pd.Ser
     vals = pd.to_numeric(values, errors="coerce")
     if str(outcome).startswith("avg_tenure") and not bool(cmp_cfg.get("use_log_tenure_outcome", False)):
         return vals
+    if _is_count_outcome(str(outcome)) and str(cmp_cfg.get("count_outcome_transform", "")).lower() in {"ihs", "asinh"}:
+        return np.arcsinh(vals)
     if bool(cmp_cfg.get("use_log_outcome", True)):
         return vals.apply(lambda v: math.log1p(max(float(v), 0.0)) if pd.notna(v) else np.nan)
     return vals
+
+
+def _is_count_outcome(outcome: str) -> bool:
+    return str(outcome).startswith(COUNT_OUTCOME_PREFIXES)
 
 
 def _regression_rows(work: pd.DataFrame, required_cols: list[str]) -> pd.DataFrame:
@@ -1850,16 +3486,77 @@ def _add_year_interactions(work: pd.DataFrame, reg_col: str, years: list[int], r
     return terms
 
 
-def _build_pair_frame(panel: pd.DataFrame, treated: pd.DataFrame, controls: pd.DataFrame, *, matching_style: str) -> pd.DataFrame:
-    control_ids = list(pd.to_numeric(controls["c"], errors="coerce").dropna().astype(int).unique())
+def _calendar_year_dummy_reference(years: Sequence[int], treatment_ref_year: Optional[int]) -> int:
+    ordered = [int(year) for year in years]
+    if not ordered:
+        raise ValueError("Cannot choose a calendar-year reference from an empty year list.")
+    if treatment_ref_year is None:
+        return ordered[0]
+    for year in ordered:
+        if int(year) != int(treatment_ref_year):
+            return int(year)
+    return ordered[0]
+
+
+def _stacked_matching_styles(cmp_cfg: dict) -> list[str]:
+    raw = cmp_cfg.get("stacked_matching_styles", ["unmatched", "matched"])
+    styles = _list_cfg(raw) if raw is not None else ["unmatched", "matched"]
+    allowed = {"unmatched", "matched"}
+    invalid = [style for style in styles if style not in allowed]
+    if invalid:
+        raise ValueError(f"Unknown stacked matching style(s): {invalid}. Valid styles: {sorted(allowed)}")
+    return styles or ["unmatched", "matched"]
+
+
+def _stacked_event_jump_quantile(cmp_cfg: dict, exposure_name: str) -> Optional[float]:
+    by_exposure = cmp_cfg.get("stacked_event_jump_quantiles")
+    if isinstance(by_exposure, dict) and exposure_name in by_exposure:
+        raw = by_exposure.get(exposure_name)
+    else:
+        raw = cmp_cfg.get("stacked_event_jump_quantile")
+    if raw is None or str(raw).strip().lower() in {"", "none", "null"}:
+        return None
+    return float(raw)
+
+
+def _percentile_to_quantile(raw: float) -> float:
+    value = float(raw)
+    if value > 1.0:
+        value = value / 100.0
+    return min(max(value, 0.0), 1.0)
+
+
+def _build_pair_frame(
+    panel: pd.DataFrame,
+    treated: pd.DataFrame,
+    controls: pd.DataFrame,
+    *,
+    matching_style: str,
+    cmp_cfg: Optional[dict] = None,
+) -> pd.DataFrame:
+    control_ids = list(controls["c"].dropna().unique())
     if not control_ids:
         return pd.DataFrame()
     features = panel.drop_duplicates("c").copy()
+    treated_rows = treated.dropna(subset=["c", "g"]).copy()
+    if matching_style == "unmatched":
+        n_pairs = min(len(treated_rows), len(control_ids))
+        if n_pairs <= 0:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            {
+                "pair_id": range(n_pairs),
+                "treated_c": treated_rows["c"].iloc[:n_pairs].to_numpy(),
+                "control_c": control_ids[:n_pairs],
+            }
+        )
+    if matching_style == "matched":
+        return _build_nearest_neighbor_pair_frame(features, treated_rows, control_ids, cmp_cfg or {})
     rows = []
-    used_controls: set[int] = set()
+    used_controls: set[object] = set()
     pair_id = 0
-    for _, row in treated.iterrows():
-        treated_c = int(row["c"])
+    for _, row in treated_rows.iterrows():
+        treated_c = row["c"]
         if matching_style == "matched":
             control_c = _nearest_control(features, treated_c, control_ids, used_controls)
             if control_c is None:
@@ -1871,23 +3568,388 @@ def _build_pair_frame(panel: pd.DataFrame, treated: pd.DataFrame, controls: pd.D
                 break
             control_c = available[0]
             used_controls.add(control_c)
-        rows.append({"pair_id": pair_id, "treated_c": treated_c, "control_c": int(control_c)})
+        rows.append({"pair_id": pair_id, "treated_c": treated_c, "control_c": control_c})
         pair_id += 1
     return pd.DataFrame(rows)
 
 
-def _nearest_control(features: pd.DataFrame, treated_c: int, control_ids: list[int], used_controls: set[int]) -> Optional[int]:
+def _build_nearest_neighbor_pair_frame(
+    features: pd.DataFrame,
+    treated: pd.DataFrame,
+    control_ids: list[object],
+    cmp_cfg: dict,
+) -> pd.DataFrame:
+    if NearestNeighbors is None:
+        return _build_nearest_control_pair_frame_slow(features, treated, control_ids, cmp_cfg)
+    feature_cols = _matching_feature_cols(features)
+    if not feature_cols:
+        return _build_nearest_control_pair_frame_slow(features, treated, control_ids, cmp_cfg)
+
+    firm_features = _prepare_matching_features(features.drop_duplicates("c").copy(), cmp_cfg)
+    firm_features["c_key"] = firm_features["c"].astype(str)
+    control_keys = {str(c) for c in control_ids}
+    controls = firm_features.loc[firm_features["c_key"].isin(control_keys)].copy()
+    treated_features = treated.assign(c_key=treated["c"].astype(str)).merge(
+        firm_features,
+        on="c_key",
+        how="left",
+        suffixes=("", "_feature"),
+    )
+    treated_features = treated_features.dropna(subset=["c_key", *feature_cols]).copy()
+    if controls.empty or treated_features.empty:
+        return pd.DataFrame()
+    exact_cols = _stacked_exact_match_cols(controls, cmp_cfg)
+    if exact_cols:
+        controls = controls.dropna(subset=exact_cols).copy()
+        treated_features = treated_features.dropna(subset=exact_cols).copy()
+        if controls.empty or treated_features.empty:
+            return pd.DataFrame()
+
+    medians = {
+        col: _finite_or_default(pd.to_numeric(controls[col], errors="coerce").median(), 0.0)
+        for col in feature_cols
+    }
+    scales = {
+        col: _finite_or_default(pd.to_numeric(controls[col], errors="coerce").std(skipna=True), 1.0)
+        for col in feature_cols
+    }
+    control_matrix = _matching_matrix(controls, feature_cols, medians, scales)
+    treated_matrix = _matching_matrix(treated_features, feature_cols, medians, scales)
+    controls = controls.reset_index(drop=True)
+    treated_features = treated_features.reset_index(drop=True)
+
+    rows: list[dict[str, object]] = []
+    used_controls: set[object] = set()
+    if exact_cols:
+        controls["_stacked_exact_key"] = controls[exact_cols].astype(str).agg("\x1f".join, axis=1)
+        treated_features["_stacked_exact_key"] = treated_features[exact_cols].astype(str).agg("\x1f".join, axis=1)
+        control_groups = {
+            str(key): np.fromiter(idx, dtype=int)
+            for key, idx in controls.groupby("_stacked_exact_key", sort=False).groups.items()
+        }
+        for key, pos_index in treated_features.groupby("_stacked_exact_key", sort=False).groups.items():
+            positions = list(pos_index)
+            control_positions = control_groups.get(str(key))
+            if control_positions is None or len(control_positions) == 0:
+                continue
+            _assign_exact_cell_greedy(
+                controls,
+                control_matrix,
+                treated_features,
+                treated_matrix,
+                positions,
+                control_positions,
+                used_controls,
+                rows,
+                allow_reuse=bool(cmp_cfg.get("stacked_match_with_replacement", False)),
+            )
+    else:
+        global_index = _NeighborIndex(controls, control_matrix)
+        _assign_neighbor_batch(
+            global_index,
+            treated_features,
+            treated_matrix,
+            list(range(len(treated_features))),
+            used_controls,
+            rows,
+            allow_reuse=bool(cmp_cfg.get("stacked_match_with_replacement", False)),
+            initial_k=int(cmp_cfg.get("stacked_match_nn_initial_k", 25)),
+            max_k=int(cmp_cfg.get("stacked_match_nn_max_k", 50)),
+        )
+    return pd.DataFrame(rows)
+
+
+@dataclass
+class _NeighborIndex:
+    controls: pd.DataFrame
+    matrix: np.ndarray
+
+    def __post_init__(self) -> None:
+        self.nn = NearestNeighbors(algorithm="auto").fit(self.matrix)  # type: ignore[union-attr]
+
+
+def _assign_neighbor_batch(
+    index: _NeighborIndex,
+    treated_features: pd.DataFrame,
+    treated_matrix: np.ndarray,
+    positions: list[int],
+    used_controls: set[object],
+    rows: list[dict[str, object]],
+    *,
+    allow_reuse: bool = False,
+    initial_k: int = 25,
+    max_k: int = 100,
+) -> list[int]:
+    if not positions or len(index.controls) == 0:
+        return positions
+    pending = list(positions)
+    n_controls = len(index.controls)
+    max_neighbors = min(max(int(max_k), int(initial_k)), n_controls)
+    k = min(int(initial_k), max_neighbors)
+    while pending and k <= max_neighbors:
+        query = treated_matrix[pending, :]
+        _, neighbor_positions = index.nn.kneighbors(query, n_neighbors=k)
+        still_pending: list[int] = []
+        for treated_pos, candidates in zip(pending, neighbor_positions):
+            control_c = None
+            for candidate_pos in candidates:
+                candidate_c = index.controls.iloc[int(candidate_pos)]["c"]
+                if allow_reuse or candidate_c not in used_controls:
+                    control_c = candidate_c
+                    break
+            if control_c is None:
+                still_pending.append(treated_pos)
+                continue
+            if not allow_reuse:
+                used_controls.add(control_c)
+            rows.append(
+                {
+                    "pair_id": len(rows),
+                    "treated_c": treated_features.iloc[int(treated_pos)]["c"],
+                    "control_c": control_c,
+                }
+            )
+        if not still_pending or k == max_neighbors:
+            return still_pending
+        pending = still_pending
+        k = min(k * 2, max_neighbors)
+    return pending
+
+
+def _assign_exact_cell_greedy(
+    controls: pd.DataFrame,
+    control_matrix: np.ndarray,
+    treated_features: pd.DataFrame,
+    treated_matrix: np.ndarray,
+    treated_positions: list[int],
+    control_positions: np.ndarray,
+    used_controls: set[object],
+    rows: list[dict[str, object]],
+    *,
+    allow_reuse: bool = False,
+) -> None:
+    if not treated_positions or len(control_positions) == 0:
+        return
+    local_controls = controls.iloc[control_positions].reset_index(drop=True)
+    local_matrix = control_matrix[control_positions, :]
+    available_mask = np.ones(len(local_controls), dtype=bool)
+    if not allow_reuse and used_controls:
+        available_mask = ~local_controls["c"].isin(used_controls).to_numpy()
+    if not available_mask.any():
+        return
+    local_positions = np.flatnonzero(available_mask)
+    local_controls = local_controls.iloc[local_positions].reset_index(drop=True)
+    local_matrix = local_matrix[local_positions, :]
+    query = treated_matrix[treated_positions, :]
+    dist = np.square(query[:, None, :] - local_matrix[None, :, :]).sum(axis=2)
+    if allow_reuse:
+        best = np.argmin(dist, axis=1)
+        for treated_pos, control_pos in zip(treated_positions, best):
+            rows.append(
+                {
+                    "pair_id": len(rows),
+                    "treated_c": treated_features.iloc[int(treated_pos)]["c"],
+                    "control_c": local_controls.iloc[int(control_pos)]["c"],
+                }
+            )
+        return
+
+    assigned_treated: set[int] = set()
+    assigned_controls: set[int] = set()
+    order = np.argsort(dist, axis=None)
+    n_controls = dist.shape[1]
+    for flat_pos in order:
+        treated_ix = int(flat_pos // n_controls)
+        control_ix = int(flat_pos % n_controls)
+        if treated_ix in assigned_treated or control_ix in assigned_controls:
+            continue
+        treated_pos = treated_positions[treated_ix]
+        control_c = local_controls.iloc[control_ix]["c"]
+        used_controls.add(control_c)
+        assigned_treated.add(treated_ix)
+        assigned_controls.add(control_ix)
+        rows.append(
+            {
+                "pair_id": len(rows),
+                "treated_c": treated_features.iloc[int(treated_pos)]["c"],
+                "control_c": control_c,
+            }
+        )
+        if len(assigned_treated) == len(treated_positions) or len(assigned_controls) == len(local_controls):
+            break
+
+
+def _matching_feature_cols(features: pd.DataFrame) -> list[str]:
+    cols = []
+    size_col = _first_present(features, ["firm_size_annual_pre_level", "headcount_size_baseline", "total_headcount_annual_pre_level"])
+    growth_col = _first_present(features, ["firm_size_annual_pre_growth", "headcount_growth_asinh"])
+    if size_col is not None:
+        cols.append(size_col)
+    if growth_col is not None:
+        cols.append(growth_col)
+    return cols
+
+
+def _prepare_matching_features(features: pd.DataFrame, cmp_cfg: dict) -> pd.DataFrame:
+    out = features.copy()
+    if bool(cmp_cfg.get("stacked_match_exact_size_bin", True)):
+        configured_col = cmp_cfg.get("stacked_match_size_bin_col")
+        if configured_col is not None and str(configured_col) in out.columns:
+            out["_stacked_match_size_bin"] = out[str(configured_col)].astype(str)
+        elif "_stacked_match_size_bin" not in out.columns:
+            size_col = _first_present(out, ["firm_size_annual_pre_level", "headcount_size_baseline", "total_headcount_annual_pre_level"])
+            if size_col is not None:
+                out["_stacked_match_size_bin"] = _qbin(
+                    pd.to_numeric(out[size_col], errors="coerce"),
+                    int(cmp_cfg.get("baseline_size_bins", 10)),
+                )
+            else:
+                out["_stacked_match_size_bin"] = "missing"
+    return out
+
+
+def _stacked_exact_match_cols(features: pd.DataFrame, cmp_cfg: dict) -> list[str]:
+    cols: list[str] = []
+    if bool(cmp_cfg.get("stacked_match_exact_naics", True)) and "naics2" in features.columns:
+        cols.append("naics2")
+    metro_col = str(cmp_cfg.get("stacked_match_metro_col", "company_metro_feature"))
+    if bool(cmp_cfg.get("stacked_match_exact_metro", True)) and metro_col in features.columns:
+        cols.append(metro_col)
+    if bool(cmp_cfg.get("stacked_match_exact_size_bin", True)) and "_stacked_match_size_bin" in features.columns:
+        cols.append("_stacked_match_size_bin")
+    return cols
+
+
+def _matching_matrix(df: pd.DataFrame, cols: list[str], medians: dict[str, float], scales: dict[str, float]) -> np.ndarray:
+    pieces = []
+    for col in cols:
+        values = pd.to_numeric(df[col], errors="coerce").fillna(medians.get(col, 0.0))
+        scale = scales.get(col, 1.0) or 1.0
+        pieces.append(((values - medians.get(col, 0.0)) / scale).to_numpy(dtype=float))
+    return np.column_stack(pieces) if pieces else np.empty((len(df), 0))
+
+
+def _finite_or_default(value: object, default: float) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not np.isfinite(out) or out == 0:
+        return float(default)
+    return out
+
+
+def _build_nearest_control_pair_frame_slow(
+    features: pd.DataFrame,
+    treated: pd.DataFrame,
+    control_ids: list[object],
+    cmp_cfg: Optional[dict] = None,
+) -> pd.DataFrame:
+    rows = []
+    used_controls: set[object] = set()
+    prepared = _prepare_matching_features(features, cmp_cfg or {})
+    for _, row in treated.iterrows():
+        control_c = _nearest_control(prepared, row["c"], control_ids, used_controls, cmp_cfg or {})
+        if control_c is None:
+            continue
+        if not bool((cmp_cfg or {}).get("stacked_match_with_replacement", False)):
+            used_controls.add(control_c)
+        rows.append({"pair_id": len(rows), "treated_c": row["c"], "control_c": control_c})
+    return pd.DataFrame(rows)
+
+
+def _build_stacked_panel_fast(
+    panel: pd.DataFrame,
+    pair_df: pd.DataFrame,
+    cohort_df: pd.DataFrame,
+    *,
+    cmp_cfg: dict,
+    pre_window: int,
+    post_window: int,
+    exposure_col: Optional[str] = None,
+) -> pd.DataFrame:
+    if panel.empty or pair_df.empty or cohort_df.empty:
+        return pd.DataFrame()
+    cohort_lookup = cohort_df.dropna(subset=["g"]).rename(columns={"c": "treated_c", "g": "treated_g"})
+    pair_cohorts = pair_df.merge(cohort_lookup[["treated_c", "treated_g"]], on="treated_c", how="inner")
+    if pair_cohorts.empty:
+        return pd.DataFrame()
+
+    pair_long = pd.concat(
+        [
+            pair_cohorts[["pair_id", "treated_c", "treated_g"]].rename(columns={"treated_c": "c"}),
+            pair_cohorts[["pair_id", "control_c", "treated_g"]].rename(columns={"control_c": "c"}),
+        ],
+        ignore_index=True,
+    )
+    pair_long["treated"] = [1] * len(pair_cohorts) + [0] * len(pair_cohorts)
+    pair_long = pair_long.dropna(subset=["c", "treated_g"]).copy()
+
+    work = panel.merge(pair_long, on="c", how="inner")
+    if work.empty:
+        return pd.DataFrame()
+    work["t"] = pd.to_numeric(work["t"], errors="coerce")
+    work["treated_g"] = pd.to_numeric(work["treated_g"], errors="coerce")
+    work = work.loc[
+        work["t"].between(work["treated_g"] - int(pre_window), work["treated_g"] + int(post_window))
+    ].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    window_len = int(pre_window) + int(post_window) + 1
+    control = work.loc[work["treated"].eq(0)].copy()
+    control_counts = control.groupby("pair_id")["t"].nunique()
+    valid_pairs = set(control_counts[control_counts.eq(window_len)].index)
+    pair_year_counts = work.groupby("pair_id")["t"].nunique()
+    valid_pairs &= set(pair_year_counts[pair_year_counts.eq(window_len)].index)
+    if exposure_col is not None and exposure_col in work.columns:
+        nonmissing_exposure_counts = (
+            work.loc[pd.to_numeric(work[exposure_col], errors="coerce").notna()]
+            .groupby("pair_id")["t"]
+            .count()
+        )
+        valid_pairs &= set(nonmissing_exposure_counts[nonmissing_exposure_counts.eq(2 * window_len)].index)
+    if not valid_pairs:
+        return pd.DataFrame()
+    out = work.loc[work["pair_id"].isin(valid_pairs)].copy()
+    out["stack_id"] = out["pair_id"].astype(int)
+    out["g"] = out["treated_g"].astype(int)
+    out["rel_time"] = out["t"].astype(int) - out["g"].astype(int)
+    out["pair_stack_fe"] = out["pair_id"].astype(str) + "__" + out["stack_id"].astype(str)
+    out["unit_stack_fe"] = out["c"].astype(str) + "__" + out["stack_id"].astype(str)
+    out["year_stack_fe"] = out["t"].astype(int).astype(str) + "__" + out["stack_id"].astype(str)
+    out["high_exposure"] = out["treated"]
+    out["trajectory_name"] = "comparison"
+    return out.sort_values(["stack_id", "c", "t"]).reset_index(drop=True)
+
+
+def _nearest_control(
+    features: pd.DataFrame,
+    treated_c: object,
+    control_ids: list[object],
+    used_controls: set[object],
+    cmp_cfg: Optional[dict] = None,
+) -> Optional[object]:
+    cfg = cmp_cfg or {}
     t = features.loc[features["c"].eq(treated_c)]
     if t.empty:
         return None
     trow = t.iloc[0]
-    controls = features.loc[features["c"].isin([c for c in control_ids if c not in used_controls])].copy()
+    if bool(cfg.get("stacked_match_with_replacement", False)):
+        available_ids = control_ids
+    else:
+        available_ids = [c for c in control_ids if c not in used_controls]
+    controls = features.loc[features["c"].isin(available_ids)].copy()
     if controls.empty:
         return None
-    if "naics2" in controls.columns and "naics2" in trow:
-        exact = controls.loc[controls["naics2"].astype(str).eq(str(trow.get("naics2")))].copy()
-        if not exact.empty:
-            controls = exact
+    exact_cols = _stacked_exact_match_cols(controls, cfg)
+    for col in exact_cols:
+        if pd.isna(trow.get(col)):
+            return None
+        controls = controls.loc[controls[col].notna()].copy()
+        controls = controls.loc[controls[col].astype(str).eq(str(trow.get(col)))].copy()
+        if controls.empty:
+            return None
     size_col = _first_present(controls, ["firm_size_annual_pre_level", "headcount_size_baseline", "total_headcount_annual_pre_level"])
     growth_col = _first_present(controls, ["firm_size_annual_pre_growth", "headcount_growth_asinh"])
     score = pd.Series(0.0, index=controls.index)
@@ -1897,14 +3959,14 @@ def _nearest_control(features: pd.DataFrame, treated_c: int, control_ids: list[i
     if growth_col is not None:
         scale = pd.to_numeric(features[growth_col], errors="coerce").std(skipna=True) or 1.0
         score += (pd.to_numeric(controls[growth_col], errors="coerce") - float(trow.get(growth_col, 0.0))).abs() / scale
-    return int(controls.loc[score.sort_values().index[0], "c"])
+    return controls.loc[score.sort_values().index[0], "c"]
 
 
 def _materialize_matched_panel(panel: pd.DataFrame, pair_df: pd.DataFrame) -> pd.DataFrame:
     frames = []
     for _, pair in pair_df.iterrows():
-        t_panel = panel.loc[panel["c"].eq(int(pair["treated_c"]))].copy()
-        c_panel = panel.loc[panel["c"].eq(int(pair["control_c"]))].copy()
+        t_panel = panel.loc[panel["c"].eq(pair["treated_c"])].copy()
+        c_panel = panel.loc[panel["c"].eq(pair["control_c"])].copy()
         t_panel["pair_id"] = int(pair["pair_id"])
         c_panel["pair_id"] = int(pair["pair_id"])
         t_panel["treated"] = 1
@@ -1939,6 +4001,23 @@ def _coef_se(fit, term: str) -> tuple[Optional[float], Optional[float]]:
     return None, None
 
 
+def _fit_params_cov(fit) -> tuple[pd.Series, pd.DataFrame]:
+    if hasattr(fit, "params") and hasattr(fit, "covariance"):
+        params = pd.Series(getattr(fit, "params"), dtype=float)
+        cov = pd.DataFrame(getattr(fit, "covariance"))
+        cov = cov.reindex(index=params.index, columns=params.index)
+        return params, cov
+    params = pd.Series(fit.coef(), dtype=float)
+    raw_cov = getattr(fit, "_vcov", None)
+    if raw_cov is not None:
+        cov_array = np.asarray(raw_cov, dtype=float)
+        if cov_array.shape == (len(params), len(params)):
+            return params, pd.DataFrame(cov_array, index=params.index, columns=params.index)
+    ses = pd.Series(fit.se(), dtype=float).reindex(params.index)
+    cov = pd.DataFrame(np.diag(np.square(ses.to_numpy(dtype=float))), index=params.index, columns=params.index)
+    return params, cov
+
+
 def _single_term_f(coef: Optional[float], se: Optional[float]) -> Optional[float]:
     if coef is None or se is None or not se or not np.isfinite(se):
         return None
@@ -1949,6 +4028,33 @@ def _empty_result(family: str, design: str, spec: str, estimator: str, time_name
     row = _result_base(family, design, spec, estimator, time_name, time_value, outcome_col, None, None)
     row["error"] = error
     return row
+
+
+def _reference_result(
+    *,
+    family: str,
+    design: str,
+    spec: str,
+    estimator: str,
+    time_name: str,
+    time_value: int,
+    outcome_col: str,
+    extra: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
+    row = _result_base(family, design, spec, estimator, time_name, time_value, outcome_col, None, None)
+    row.update({"coef": 0.0, "se": 0.0, "f_stat": np.nan, "is_reference": True})
+    if extra:
+        row.update(extra)
+    return row
+
+
+def _annotate_event_time(rows: list[dict[str, object]], *, event_year: int) -> None:
+    for row in rows:
+        if "year" not in row:
+            continue
+        year = pd.to_numeric(pd.Series([row.get("year")]), errors="coerce").iloc[0]
+        row["event_time"] = int(year - int(event_year)) if pd.notna(year) else np.nan
+        row["is_reference"] = False
 
 
 def _result_base(
@@ -1982,14 +4088,16 @@ def _pick_event_row(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     work = df.copy()
-    if "horizon" in work.columns:
-        work["_event_distance"] = pd.to_numeric(work["horizon"], errors="coerce").abs()
-    elif "rel_time" in work.columns:
-        work["_event_distance"] = pd.to_numeric(work["rel_time"], errors="coerce").abs()
-    elif "year" in work.columns:
-        work["_event_distance"] = (pd.to_numeric(work["year"], errors="coerce") - 2016).abs()
-    else:
-        work["_event_distance"] = 0
+    distance = pd.Series(np.nan, index=work.index, dtype=float)
+    for col in ("event_time", "horizon", "rel_time"):
+        if col not in work.columns:
+            continue
+        values = pd.to_numeric(work[col], errors="coerce")
+        distance = distance.fillna(values.abs())
+    if "year" in work.columns:
+        years = pd.to_numeric(work["year"], errors="coerce")
+        distance = distance.fillna((years - 2016).abs())
+    work["_event_distance"] = distance.fillna(0)
     return work.sort_values(["design", "spec", "_event_distance"]).drop_duplicates(["design", "spec"])
 
 
@@ -2000,6 +4108,8 @@ def _validate_comparison_config(cmp_cfg: dict) -> None:
     first_stage_type = str(cmp_cfg.get("first_stage_type", "ppml"))
     if first_stage_type not in FIRST_STAGE_TYPES:
         raise ValueError(f"design_comparison.first_stage_type must be one of {sorted(FIRST_STAGE_TYPES)}")
+    _selected_designs(cmp_cfg)
+    _stacked_exposures_to_run(cmp_cfg)
 
 
 def _verbose(cmp_cfg: dict) -> bool:
@@ -2086,6 +4196,10 @@ def _matched_base_cfg(cfg: dict) -> dict:
     return {"matched_exposure_design": {}}
 
 
+def _sql_path(path: Path | str) -> str:
+    return str(path).replace("'", "''")
+
+
 def _path_or_default(value: object, default: Path) -> Path:
     if value is None or str(value).strip() == "":
         return default
@@ -2107,6 +4221,73 @@ def _list_cfg(raw: object) -> list[str]:
     return [str(v).strip() for v in raw if str(v).strip()]  # type: ignore[union-attr]
 
 
+def _parse_design_list(raw: Sequence[str] | str) -> list[str]:
+    if isinstance(raw, str):
+        values = [v.strip() for v in raw.split(",") if v.strip()]
+    else:
+        values = [str(v).strip() for v in raw if str(v).strip()]
+    return values or list(DESIGN_NAMES)
+
+
+def _selected_designs(cmp_cfg: dict) -> list[str]:
+    raw = cmp_cfg.get("designs_to_run", DESIGN_NAMES)
+    selected = _parse_design_list(raw) if raw is not None else list(DESIGN_NAMES)
+    invalid = [name for name in selected if name not in DESIGN_NAMES]
+    if invalid:
+        raise ValueError(f"Unknown design(s) in designs_to_run: {invalid}. Valid designs: {list(DESIGN_NAMES)}")
+    return [name for name in DESIGN_NAMES if name in set(selected)]
+
+
+def _stacked_exposures_to_run(cmp_cfg: dict) -> list[str]:
+    valid = ["ihmp_share", "international_share", "opt_takeup"]
+    raw = cmp_cfg.get("stacked_exposures_to_run", valid)
+    selected = _list_cfg(raw) if raw is not None else valid
+    selected = selected or valid
+    invalid = [name for name in selected if name not in valid]
+    if invalid:
+        raise ValueError(f"Unknown stacked exposure(s): {invalid}. Valid exposures: {valid}")
+    return [name for name in valid if name in set(selected)]
+
+
+def _configured_shift_share_variant_cols(cmp_cfg: dict) -> list[str]:
+    configured = cmp_cfg.get("shift_share_instrument_variants")
+    if not configured:
+        return []
+    raw = configured.items() if isinstance(configured, dict) else configured
+    cols: list[str] = []
+    for item in raw:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            _, col = item
+        else:
+            col = item
+        cols.append(str(col))
+    return cols
+
+
+def _ar_residual_school_metric(growth: pd.DataFrame, *, value_col: str, lag_col: str) -> pd.Series:
+    resid = pd.Series(0.0, index=growth.index, dtype="float64")
+    mask = growth[value_col].notna() & growth[lag_col].notna()
+    if mask.sum() < 3:
+        return growth.groupby("k", sort=False)[value_col].diff().fillna(0.0)
+    try:
+        y = pd.to_numeric(growth.loc[mask, value_col], errors="coerce").astype(float)
+        lag = pd.to_numeric(growth.loc[mask, lag_col], errors="coerce").astype(float)
+        y_resid = ssa._residualize_fixed_effects(  # noqa: SLF001
+            y,
+            [growth.loc[mask, "k"].astype(str), growth.loc[mask, "t"].astype(str)],
+        )
+        lag_resid = ssa._residualize_fixed_effects(  # noqa: SLF001
+            lag,
+            [growth.loc[mask, "k"].astype(str), growth.loc[mask, "t"].astype(str)],
+        )
+        denom = float(np.dot(lag_resid, lag_resid))
+        beta = float(np.dot(lag_resid, y_resid) / denom) if denom > 0 else 0.0
+        resid.loc[mask] = y_resid - beta * lag_resid
+    except Exception:
+        resid = growth.groupby("k", sort=False)[value_col].diff().fillna(0.0)
+    return resid
+
+
 def _dedupe_existing(cols: Sequence[object], df: pd.DataFrame) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -2125,7 +4306,13 @@ def _available_outcomes(panel: pd.DataFrame, cmp_cfg: dict) -> list[str]:
     return [col for col in _list_cfg(cmp_cfg.get("outcome_cols", DEFAULT_OUTCOMES)) if col in panel.columns]
 
 
-def _x_col(panel: pd.DataFrame) -> str:
+def _x_col(panel: pd.DataFrame, cmp_cfg: Optional[dict] = None) -> str:
+    configured = None if cmp_cfg is None else cmp_cfg.get("first_stage_col")
+    if configured is not None and str(configured).strip():
+        configured_col = str(configured).strip()
+        if configured_col not in panel.columns:
+            raise ValueError(f"Configured first-stage column {configured_col!r} is missing.")
+        return configured_col
     col = _first_present(panel, ["any_opt_hires_correction_aware", "masters_opt_hires_correction_aware", "masters_opt_hires", "x_bin_any_nonzero"])
     if col is None:
         raise ValueError("No first-stage treatment column found.")
@@ -2209,6 +4396,9 @@ def _parse_args(args: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--force-rebuild-base", action="store_true")
     parser.add_argument("--unit", choices=sorted(UNITS))
     parser.add_argument("--first-stage", choices=sorted(FIRST_STAGE_TYPES), dest="first_stage_type")
+    parser.add_argument("--first-stage-col", type=str, help="Override the first-stage treatment/outcome column")
+    parser.add_argument("--designs", type=str, help="Comma-separated subset: shift_share,event_study,stacked_did")
+    parser.add_argument("--stacked-exposures", type=str, help="Comma-separated subset: ihmp_share,opt_takeup")
     parser.add_argument("--out-dir", type=Path)
     if args is None and _running_under_ipykernel():
         args = []
@@ -2227,6 +4417,9 @@ def main(args: Optional[Iterable[str]] = None) -> dict[str, object]:
         force_rebuild_base=parsed.force_rebuild_base,
         unit=parsed.unit,
         first_stage_type=parsed.first_stage_type,
+        first_stage_col=parsed.first_stage_col,
+        designs=parsed.designs,
+        stacked_exposures=parsed.stacked_exposures,
         out_dir=parsed.out_dir,
     )
 

@@ -29,6 +29,7 @@ from company_shift_share.source_exposure_data import (
     SourceExposurePaths,
     _build_wrds_task_queue,
     _build_testing_analysis_firm_sample_from_counts,
+    build_design3_position_outcomes_from_local_caches,
     build_source_analysis_panel,
     load_or_build_source_firm_universe,
     load_or_build_wrds_company_year_workforce_cache,
@@ -120,6 +121,75 @@ def _small_lasso_target_frame() -> pd.DataFrame:
 
 
 class ExposureIndexTests(unittest.TestCase):
+    def test_build_design3_position_outcomes_from_local_caches(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            positions_path = tmp / "positions.parquet"
+            users_path = tmp / "users.parquet"
+            profile_path = tmp / "profile.parquet"
+            pd.DataFrame(
+                [
+                    {"user_id": 1, "position_id": 1, "rcid": 10, "startdate": "2020-07-01", "enddate": "2022-07-01", "onet_code": "15-1000.00"},
+                    {"user_id": 2, "position_id": 2, "rcid": 10, "startdate": "2020-08-01", "enddate": "2021-08-01", "onet_code": "17-1000.00"},
+                    {"user_id": 3, "position_id": 3, "rcid": 10, "startdate": "2020-09-01", "enddate": "2021-09-01", "onet_code": "13-1000.00"},
+                    {"user_id": 4, "position_id": 4, "rcid": 20, "startdate": "2020-10-01", "enddate": "2021-10-01", "onet_code": "19-1000.00"},
+                    {"user_id": 5, "position_id": 5, "rcid": 20, "startdate": "2020-11-01", "enddate": "2021-11-01", "onet_code": "29-1000.00"},
+                    {"user_id": 6, "position_id": 6, "rcid": 10, "startdate": "2020-01-01", "enddate": "2020-03-01", "onet_code": "15-1000.00"},
+                    {"user_id": 6, "position_id": 7, "rcid": 10, "startdate": "2020-02-01", "enddate": "2020-04-01", "onet_code": "15-1000.00"},
+                    {"user_id": 7, "position_id": 8, "rcid": 10, "startdate": "2017-01-01", "enddate": "2017-03-01", "onet_code": "15-1000.00"},
+                ]
+            ).to_parquet(positions_path, index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "user_id": i,
+                        "education_number": 1,
+                        "ed_startdate": "2018-09-01",
+                        "ed_enddate": "2020-06-01",
+                        "degree": "Master" if i in {1, 2, 4, 6, 7} else "Bachelor",
+                        "degree_raw": "",
+                        "field_raw": "",
+                        "university_raw": "Example University",
+                    }
+                    for i in range(1, 8)
+                ]
+            ).to_parquet(users_path, index=False)
+            pd.DataFrame(
+                {
+                    "user_id": [1, 2, 3, 4, 5, 6, 7],
+                    "p_likely_foreign": [1.0, 0.5, 0.0, 0.25, 1.0, 0.75, 0.75],
+                    "signal_current_country_nonus": [1, 1, 0, 0, 1, 1, 1],
+                }
+            ).to_parquet(profile_path, index=False)
+
+            out, meta = build_design3_position_outcomes_from_local_caches(
+                selected_positions_path=positions_path,
+                users_path=users_path,
+                user_profile_path=profile_path,
+                year_min=2020,
+                year_max=2020,
+                firm_ids=[10, 20],
+                opt_likely_soc2=["15", "17", "19", "13", "11"],
+                top_n_soc2=4,
+            )
+
+        self.assertEqual(meta["opt_likely_soc2"], ["11", "13", "15", "17", "19"])
+        self.assertEqual(meta["opt_likely_soc2_source"], "fixed_config")
+        keyed = out.set_index(["c", "t"])
+        self.assertAlmostEqual(float(keyed.loc[(10, 2020), "y_new_hires_foreign_lag0"]), 2.0)
+        self.assertAlmostEqual(float(keyed.loc[(10, 2020), "y_new_hires_native_lag0"]), 1.0)
+        self.assertAlmostEqual(float(keyed.loc[(20, 2020), "y_new_hires_foreign_lag0"]), 1.0)
+        self.assertAlmostEqual(float(keyed.loc[(20, 2020), "y_new_hires_native_lag0"]), 1.0)
+        self.assertAlmostEqual(float(keyed.loc[(10, 2020), "y_new_hires_foreign_opt_likely_lag0"]), 2.0)
+        self.assertAlmostEqual(float(keyed.loc[(20, 2020), "y_new_hires_foreign_opt_likely_lag0"]), 0.0)
+        self.assertAlmostEqual(float(keyed.loc[(10, 2020), "y_new_hires_foreign_masters_lag0"]), 2.0)
+        self.assertAlmostEqual(float(keyed.loc[(10, 2020), "y_new_hires_native_masters_lag0"]), 0.0)
+        self.assertAlmostEqual(float(keyed.loc[(10, 2020), "y_new_hires_foreign_opt_likely_masters_lag0"]), 2.0)
+        self.assertAlmostEqual(float(keyed.loc[(10, 2020), "y_intern_positions_opt_likely_lag0"]), 1.0)
+        self.assertAlmostEqual(float(keyed.loc[(10, 2020), "y_intern_positions_foreign_lag0"]), 1.0)
+        self.assertAlmostEqual(float(keyed.loc[(10, 2020), "y_intern_positions_opt_likely_foreign_lag0"]), 1.0)
+        self.assertTrue(pd.notna(keyed.loc[(10, 2020), "avg_tenure_new_hires_lag0"]))
+
     def test_summarize_pre_period_features_respects_window(self) -> None:
         annual = pd.DataFrame(
             {

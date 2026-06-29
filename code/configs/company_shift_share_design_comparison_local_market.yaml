@@ -1,4 +1,4 @@
-company_shift_share_design_comparison_out_dir: "{root}/data/out/company_shift_share_apr2026/design_comparison"
+company_shift_share_design_comparison_out_dir: "{root}/data/out/company_shift_share_apr2026/design_comparison_local_market_loose_controls"
 
 paths:
   out_dir: "${company_shift_share_design_comparison_out_dir}"
@@ -20,7 +20,7 @@ design_comparison:
     - event_study
     - stacked_did
 
-  unit: firm
+  unit: local_market
   local_market_col: company_metro_feature
   first_stage_type: ols_ihs
   exclude_size_year_fe: false
@@ -57,20 +57,17 @@ design_comparison:
 
   stacked_min_cohort_year: 2013
   stacked_max_cohort_year: 2016
-  stacked_jump_min_year: 2013
-  stacked_jump_max_year: 2016
   stacked_pre_years: 3
   stacked_post_years: 3
   stacked_ref_event_time: -1
   stacked_min_event_jump: 1.0e-9
-  stacked_treated_jump_percentile: 75
-  stacked_control_min_jump_percentile: 25
+  # At the local-market level almost every metro has a small positive jump.
+  # Treat only large-jump metros as events; below-threshold metros can serve
+  # as controls.
+  stacked_event_jump_quantile: 0.75
+  stacked_require_clean_controls: false
   stacked_matching_styles:
     - matched
-  stacked_match_exact_naics: true
-  stacked_match_exact_metro: true
-  stacked_match_exact_size_bin: true
-  stacked_match_with_replacement: false
   stacked_match_nn_initial_k: 25
   stacked_match_nn_max_k: 25
 

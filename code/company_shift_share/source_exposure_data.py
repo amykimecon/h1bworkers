@@ -73,6 +73,7 @@ WORKFORCE_WRDS_EXTRACT_METHOD = "company_shift_share_workforce_wrds_extract_v3"
 LOCAL_WORKFORCE_PANEL_METHOD = "duckdb_local_workforce_panel_v1"
 LOCAL_SCHOOL_FLOWS_METHOD = "duckdb_local_school_flows_v1"
 SOURCE_ANALYSIS_PANEL_METHOD = "firm_year_cartesian_with_origin_split_outcomes_v2"
+DESIGN3_POSITION_OUTCOME_METHOD = "design3_position_outcomes_foia_soc2_recent_grad_v3_masters"
 OPT_COUNT_COLUMNS = [f"{degree}_opt_hires_correction_aware" for degree in DEGREE_GROUPS] + [
     "any_opt_hires_correction_aware"
 ]
@@ -161,6 +162,7 @@ _LOCAL_WRDS_USERS_PATH_CANDIDATES = [
     "{root}/data/int/f1_indiv_merge/02_rev_import/wrds_users_apr2026v1.parquet",
 ]
 _LOCAL_WRDS_POSITIONS_PATH_CANDIDATES = [
+    "{root}/data/int/wrds_positions_jul31.parquet",
     "{root}/data/int/wrds_positions_feb2026.parquet",
     "{root}/data/int/f1_indiv_merge/02_rev_import/wrds_positions_apr2026v1.parquet",
 ]
@@ -235,6 +237,39 @@ def _candidate_existing_path(candidates: list[str]) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def _resolve_cfg_path_value(value: object) -> Path | None:
+    if value is None or str(value).strip().lower() in {"", "none", "null"}:
+        return None
+    root = str(Path(__file__).resolve().parents[2])
+    return Path(str(value).replace("{root}", root))
+
+
+def _cfg_list(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    text = str(value).strip()
+    if not text:
+        return []
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _normalize_design3_opt_likely_soc2(value: object) -> list[str]:
+    out: list[str] = []
+    for raw in _cfg_list(value):
+        text = str(raw).strip()
+        if not text:
+            continue
+        text = text.split("-")[0].strip()
+        if text.isdigit():
+            text = f"{int(text):02d}"
+        if len(text) != 2:
+            raise ValueError(f"Design 3 OPT-likely SOC2 values must be two-digit SOC codes; got {raw!r}")
+        out.append(text)
+    return sorted(dict.fromkeys(out))
 
 
 def _selected_firms_hash(firms: pd.DataFrame) -> str:
@@ -5755,6 +5790,478 @@ def load_or_build_wrds_school_flows_cache(
     return df, meta
 
 
+def _default_design3_position_outcomes_path(cfg: dict) -> Path:
+    paths_cfg = get_cfg_section(cfg, "paths")
+    configured = paths_cfg.get("design3_position_outcomes_out")
+    if configured:
+        root = str(Path(__file__).resolve().parents[2])
+        return Path(str(configured).replace("{root}", root))
+    workforce_path = _resolve_path(paths_cfg, "wrds_company_year_workforce_out", allow_missing=True)
+    return workforce_path.with_name("design3_position_outcomes.parquet")
+
+
+def build_design3_position_outcomes_from_local_caches(
+    *,
+    selected_positions_path: Path,
+    position_history_path: Path | str | None = None,
+    users_path: Path,
+    user_profile_path: Path,
+    year_min: int,
+    year_max: int,
+    firm_ids: Optional[pd.Series | pd.DataFrame | list[int]] = None,
+    opt_likely_soc2: Optional[list[str] | tuple[str, ...] | str] = None,
+    top_n_soc2: int = 4,
+    intern_max_days: int = 183,
+) -> tuple[pd.DataFrame, dict]:
+    """Build Design 3 firm-year outcomes from local WRDS/Revelio cache files."""
+    selected_positions_path = Path(selected_positions_path)
+    position_history_path = _resolve_cfg_path_value(position_history_path)
+    users_path = Path(users_path)
+    user_profile_path = Path(user_profile_path)
+    if not selected_positions_path.exists():
+        raise FileNotFoundError(f"Missing selected positions cache: {selected_positions_path}")
+    if not users_path.exists():
+        raise FileNotFoundError(f"Missing WRDS users cache: {users_path}")
+    if not user_profile_path.exists():
+        raise FileNotFoundError(f"Missing user-profile origin cache: {user_profile_path}")
+    fixed_opt_likely_soc2 = _normalize_design3_opt_likely_soc2(opt_likely_soc2)
+
+    if isinstance(firm_ids, pd.DataFrame):
+        selected = _clean_selected_firm_ids(firm_ids)
+    elif isinstance(firm_ids, pd.Series):
+        selected = _clean_selected_firm_ids(pd.DataFrame({"c": firm_ids}))
+    elif firm_ids is None:
+        selected = pd.DataFrame(columns=["c"])
+    else:
+        selected = _clean_selected_firm_ids(pd.DataFrame({"c": firm_ids}))
+
+    con = ddb.connect()
+    try:
+        profile_cols = set(
+            con.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{_escape(user_profile_path)}') LIMIT 1"
+            ).df()["column_name"].astype(str)
+        )
+        signal_current_country_ref = (
+            "COALESCE(TRY_CAST(signal_current_country_nonus AS DOUBLE), NULL)"
+            if "signal_current_country_nonus" in profile_cols
+            else "NULL::DOUBLE"
+        )
+        if "likely_foreign_hard" in profile_cols:
+            likely_foreign_hard_expr = "COALESCE(TRY_CAST(likely_foreign_hard AS INTEGER), 0)"
+        else:
+            likely_foreign_hard_expr = _sql_new_hire_origin_hard_expr(
+                "COALESCE(TRY_CAST(p_likely_foreign AS DOUBLE), 0.0)",
+                signal_current_country_ref,
+            )
+        if not selected.empty:
+            con.register("selected_firms_df", selected)
+            firm_join = "JOIN selected_firms sf ON CAST(p.rcid AS BIGINT) = sf.c"
+            con.sql(
+                "CREATE OR REPLACE TEMP VIEW selected_firms AS "
+                "SELECT CAST(c AS BIGINT) AS c FROM selected_firms_df"
+            )
+        else:
+            firm_join = ""
+        if fixed_opt_likely_soc2:
+            values_sql = ", ".join(f"('{soc2}')" for soc2 in fixed_opt_likely_soc2)
+            opt_like_soc2_cte = f"""
+        opt_like_soc2 AS MATERIALIZED (
+            SELECT CAST(soc2 AS VARCHAR) AS soc2
+            FROM (VALUES {values_sql}) AS v(soc2)
+        ),
+            """
+            opt_likely_source = "fixed_config"
+        else:
+            opt_like_soc2_cte = f"""
+        opt_like_soc2 AS MATERIALIZED (
+            SELECT soc2
+            FROM (
+                SELECT
+                    soc2,
+                    COUNT(DISTINCT user_id) AS n_users,
+                    ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT user_id) DESC, soc2 ASC) AS rn
+                FROM new_grad_hires
+                WHERE soc2 IS NOT NULL
+                  AND first_start <= grad_date + INTERVAL '365 days'
+                GROUP BY 1
+            )
+            WHERE rn <= {int(top_n_soc2)}
+        ),
+            """
+            opt_likely_source = "top_n_recent_grad"
+
+        base_ctes = f"""
+        WITH pos AS MATERIALIZED (
+            SELECT
+                CAST(p.rcid AS BIGINT) AS c,
+                CAST(p.user_id AS BIGINT) AS user_id,
+                CAST(p.position_id AS BIGINT) AS position_id,
+                TRY_CAST(p.startdate AS DATE) AS startdate,
+                COALESCE(TRY_CAST(p.enddate AS DATE), DATE '2026-12-31') AS enddate,
+                CASE
+                    WHEN p.onet_code IS NULL OR TRIM(CAST(p.onet_code AS VARCHAR)) = '' THEN NULL
+                    ELSE SUBSTRING(CAST(p.onet_code AS VARCHAR), 1, 2)
+                END AS soc2
+            FROM read_parquet('{_escape(selected_positions_path)}') AS p
+            {firm_join}
+            WHERE p.user_id IS NOT NULL
+              AND p.rcid IS NOT NULL
+              AND TRY_CAST(p.startdate AS DATE) IS NOT NULL
+	              AND EXTRACT(YEAR FROM TRY_CAST(p.startdate AS DATE))::INT <= {int(year_max)}
+	              AND EXTRACT(YEAR FROM COALESCE(TRY_CAST(p.enddate AS DATE), DATE '2026-12-31'))::INT >= {int(year_min)}
+	        ),
+	        profile AS MATERIALIZED (
+	            SELECT
+	                CAST(user_id AS BIGINT) AS user_id,
+	                COALESCE(TRY_CAST(p_likely_foreign AS DOUBLE), 0.0) AS p_likely_foreign,
+	                CAST({likely_foreign_hard_expr} AS INTEGER) AS likely_foreign_hard
+	            FROM read_parquet('{_escape(user_profile_path)}')
+	            WHERE user_id IS NOT NULL
+	        ),
+	        education_base AS MATERIALIZED (
+	            SELECT
+	                CAST(user_id AS BIGINT) AS user_id,
+	                TRY_CAST(ed_startdate AS DATE) AS education_start_date,
+	                TRY_CAST(ed_enddate AS DATE) AS grad_date,
+	                NULLIF(TRIM(CAST(degree AS VARCHAR)), '') AS degree,
+	                COALESCE(NULLIF(TRIM(CAST(degree_raw AS VARCHAR)), ''), '') AS degree_raw,
+	                COALESCE(NULLIF(TRIM(CAST(field_raw AS VARCHAR)), ''), '') AS field_raw,
+	                COALESCE(NULLIF(TRIM(CAST(university_raw AS VARCHAR)), ''), '') AS university_raw
+	            FROM read_parquet('{_escape(users_path)}')
+	            WHERE user_id IS NOT NULL
+	              AND TRY_CAST(ed_enddate AS DATE) IS NOT NULL
+	        ),
+	        education_clean AS MATERIALIZED (
+	            SELECT
+	                user_id,
+	                education_start_date,
+	                grad_date,
+	                COALESCE({degree_clean_regex_sql()}, 'Missing') AS degree_clean
+	            FROM education_base
+	        ),
+	        education_ranked AS MATERIALIZED (
+	            SELECT *
+	            FROM (
+	                SELECT
+	                    user_id,
+	                    education_start_date,
+	                    grad_date,
+	                    degree_clean,
+	                    CASE WHEN degree_clean = 'Master' THEN 1 ELSE 0 END AS is_masters,
+	                    ROW_NUMBER() OVER (
+	                        PARTITION BY user_id
+	                        ORDER BY grad_date DESC NULLS LAST,
+	                                 education_start_date ASC NULLS LAST
+	                    ) AS rn
+	                FROM education_clean
+	            )
+	            WHERE rn = 1
+	        ),
+	        grad AS MATERIALIZED (
+	            SELECT user_id, education_start_date, grad_date, degree_clean, is_masters
+	            FROM education_ranked
+	            WHERE grad_date IS NOT NULL
+	        ),
+	        first_position AS MATERIALIZED (
+	            SELECT *
+            FROM (
+                SELECT
+                    p.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY p.c, p.user_id
+                        ORDER BY p.startdate ASC, p.position_id ASC NULLS LAST
+                    ) AS rn
+                FROM pos p
+            )
+            WHERE rn = 1
+        ),
+        company_user_bounds AS MATERIALIZED (
+            SELECT
+                p.c,
+                p.user_id,
+                MIN(p.startdate) AS first_start,
+                MAX(p.enddate) AS last_end
+	            FROM pos p
+	            GROUP BY 1, 2
+	        ),
+	        new_grad_hires AS MATERIALIZED (
+	            SELECT
+	                fp.c,
+	                fp.user_id,
+                fp.position_id,
+	                fp.startdate AS first_start,
+	                b.last_end,
+	                fp.soc2,
+	                EXTRACT(YEAR FROM fp.startdate)::INTEGER AS t,
+	                COALESCE(pr.p_likely_foreign, 0.0) AS p_likely_foreign,
+	                COALESCE(pr.likely_foreign_hard, 0) AS likely_foreign_hard,
+	                COALESCE(g.is_masters, 0) AS is_masters,
+	                g.education_start_date,
+	                g.grad_date
+	            FROM first_position fp
+	            JOIN company_user_bounds b
+	              ON b.c = fp.c
+	             AND b.user_id = fp.user_id
+	            JOIN grad g
+	              ON g.user_id = fp.user_id
+	            LEFT JOIN profile pr
+	              ON pr.user_id = fp.user_id
+	            WHERE EXTRACT(YEAR FROM fp.startdate)::INT BETWEEN {int(year_min)} AND {int(year_max)}
+	              AND fp.startdate >= g.grad_date
+	              AND fp.startdate <= g.grad_date + INTERVAL '365 days'
+	        ),
+	        {opt_like_soc2_cte}
+	        new_grad_hire_outcomes AS (
+	            SELECT
+	                c,
+	                t,
+	                SUM(COALESCE(likely_foreign_hard, 0))::DOUBLE AS y_new_hires_foreign_lag0,
+	                SUM(1 - COALESCE(likely_foreign_hard, 0))::DOUBLE AS y_new_hires_native_lag0,
+	                SUM(CASE WHEN soc2 IN (SELECT soc2 FROM opt_like_soc2) THEN COALESCE(likely_foreign_hard, 0) ELSE 0 END)::DOUBLE
+	                    AS y_new_hires_foreign_opt_likely_lag0,
+	                SUM(CASE WHEN is_masters = 1 THEN COALESCE(likely_foreign_hard, 0) ELSE 0 END)::DOUBLE
+	                    AS y_new_hires_foreign_masters_lag0,
+	                SUM(CASE WHEN is_masters = 1 THEN 1 - COALESCE(likely_foreign_hard, 0) ELSE 0 END)::DOUBLE
+	                    AS y_new_hires_native_masters_lag0,
+	                SUM(CASE
+	                        WHEN is_masters = 1 AND soc2 IN (SELECT soc2 FROM opt_like_soc2) THEN COALESCE(likely_foreign_hard, 0)
+	                        ELSE 0
+	                    END)::DOUBLE AS y_new_hires_foreign_opt_likely_masters_lag0,
+	                AVG(GREATEST(0.0, (last_end - first_start)::DOUBLE / 365.25))
+	                    AS avg_tenure_new_hires_lag0,
+	                AVG(
+	                    CASE
+	                        WHEN is_masters = 1 THEN
+	                            GREATEST(0.0, (last_end - first_start)::DOUBLE / 365.25)
+	                        ELSE NULL
+	                    END
+	                ) AS avg_tenure_new_hires_masters_lag0,
+	                AVG(
+	                    CASE
+	                        WHEN COALESCE(likely_foreign_hard, 0) = 1 THEN
+	                            GREATEST(0.0, (last_end - first_start)::DOUBLE / 365.25)
+	                        ELSE NULL
+	                    END
+	                ) AS avg_tenure_foreign_new_hires_lag0
+	                ,
+	                AVG(
+	                    CASE
+	                        WHEN is_masters = 1 AND COALESCE(likely_foreign_hard, 0) = 1 THEN
+	                            GREATEST(0.0, (last_end - first_start)::DOUBLE / 365.25)
+	                        ELSE NULL
+	                    END
+	                ) AS avg_tenure_foreign_new_hires_masters_lag0
+	            FROM new_grad_hires
+	            GROUP BY 1, 2
+	        ),
+        active_user_year AS MATERIALIZED (
+            SELECT
+                p.c,
+                gs.year::INTEGER AS t,
+                p.user_id,
+                MAX(CASE WHEN p.soc2 IN (SELECT soc2 FROM opt_like_soc2) THEN 1 ELSE 0 END) AS opt_likely_job,
+                MAX(b.first_start) AS first_start
+            FROM pos p
+            JOIN company_user_bounds b
+              ON b.c = p.c
+             AND b.user_id = p.user_id
+            JOIN LATERAL generate_series(
+                GREATEST(EXTRACT(YEAR FROM p.startdate)::INT, {int(year_min)}),
+                LEAST(EXTRACT(YEAR FROM p.enddate)::INT, {int(year_max)})
+            ) AS gs(year) ON TRUE
+            GROUP BY 1, 2, 3
+        ),
+        opt_likely_tenure AS (
+            SELECT
+                c,
+                t,
+                AVG(GREATEST(0.0, (make_date(t, 12, 31) - first_start)::DOUBLE / 365.25))
+                    AS avg_tenure_opt_likely_jobs_lag0
+            FROM active_user_year
+            WHERE opt_likely_job = 1
+            GROUP BY 1, 2
+        ),
+        intern_user_year AS MATERIALIZED (
+            SELECT
+                p.c,
+                EXTRACT(YEAR FROM p.startdate)::INTEGER AS t,
+                p.user_id,
+                MAX(CASE WHEN p.soc2 IN (SELECT soc2 FROM opt_like_soc2) THEN 1 ELSE 0 END) AS opt_likely_intern,
+                MAX(COALESCE(pr.likely_foreign_hard, 0)) AS likely_foreign_hard
+            FROM pos p
+            JOIN grad g
+              ON g.user_id = p.user_id
+            LEFT JOIN profile pr
+              ON pr.user_id = p.user_id
+            WHERE p.enddate < p.startdate + INTERVAL '{int(intern_max_days)} days'
+              AND p.startdate < g.grad_date
+              AND g.education_start_date IS NOT NULL
+              AND p.startdate >= g.education_start_date
+              AND EXTRACT(YEAR FROM p.startdate)::INT BETWEEN {int(year_min)} AND {int(year_max)}
+            GROUP BY 1, 2, 3
+        ),
+        intern_outcomes AS (
+            SELECT
+                c,
+                t,
+                SUM(opt_likely_intern)::DOUBLE AS y_intern_positions_opt_likely_lag0,
+                SUM(likely_foreign_hard)::DOUBLE AS y_intern_positions_foreign_lag0,
+                SUM(CASE WHEN opt_likely_intern = 1 THEN likely_foreign_hard ELSE 0 END)::DOUBLE
+                    AS y_intern_positions_opt_likely_foreign_lag0
+            FROM intern_user_year
+            GROUP BY 1, 2
+        )
+        """
+        out = con.sql(
+            base_ctes
+            + """
+            SELECT
+                COALESCE(nh.c, ot.c, i.c) AS c,
+                COALESCE(nh.t, ot.t, i.t) AS t,
+                nh.y_new_hires_foreign_lag0,
+                nh.y_new_hires_native_lag0,
+                nh.y_new_hires_foreign_opt_likely_lag0,
+                nh.y_new_hires_foreign_masters_lag0,
+                nh.y_new_hires_native_masters_lag0,
+                nh.y_new_hires_foreign_opt_likely_masters_lag0,
+                ot.avg_tenure_opt_likely_jobs_lag0,
+                nh.avg_tenure_foreign_new_hires_lag0,
+                nh.avg_tenure_new_hires_lag0,
+                nh.avg_tenure_foreign_new_hires_masters_lag0,
+                nh.avg_tenure_new_hires_masters_lag0,
+                i.y_intern_positions_opt_likely_lag0,
+                i.y_intern_positions_foreign_lag0,
+                i.y_intern_positions_opt_likely_foreign_lag0,
+                (SELECT string_agg(soc2, ',' ORDER BY soc2) FROM opt_like_soc2) AS _opt_likely_soc2_csv
+            FROM new_grad_hire_outcomes nh
+            FULL OUTER JOIN opt_likely_tenure ot
+              ON ot.c = nh.c
+             AND ot.t = nh.t
+            FULL OUTER JOIN intern_outcomes i
+              ON i.c = COALESCE(nh.c, ot.c)
+             AND i.t = COALESCE(nh.t, ot.t)
+            ORDER BY 1, 2
+            """
+        ).df()
+    finally:
+        con.close()
+
+    if "_opt_likely_soc2_csv" in out.columns and out["_opt_likely_soc2_csv"].notna().any():
+        top_soc2_values = [
+            v
+            for v in str(out["_opt_likely_soc2_csv"].dropna().iloc[0]).split(",")
+            if v
+        ]
+        out = out.drop(columns=["_opt_likely_soc2_csv"])
+    else:
+        top_soc2_values = []
+    if not out.empty:
+        out["c"] = pd.to_numeric(out["c"], errors="coerce").astype("Int64")
+        out["t"] = pd.to_numeric(out["t"], errors="coerce").astype("Int64")
+        out = out.dropna(subset=["c", "t"]).copy()
+        out["c"] = out["c"].astype(int)
+        out["t"] = out["t"].astype(int)
+    meta = {
+        "design3_position_outcome_method": DESIGN3_POSITION_OUTCOME_METHOD,
+        "year_min": int(year_min),
+        "year_max": int(year_max),
+        "top_n_soc2": int(top_n_soc2),
+        "opt_likely_soc2": top_soc2_values,
+        "opt_likely_soc2_source": opt_likely_source,
+        "intern_max_days": int(intern_max_days),
+        "selected_positions_path": str(selected_positions_path),
+        "position_history_path": str(position_history_path) if position_history_path is not None else None,
+        "users_path": str(users_path),
+        "user_profile_path": str(user_profile_path),
+        "n_rows": int(len(out)),
+    }
+    return out.reset_index(drop=True), meta
+
+
+def load_or_build_design3_position_outcomes_cache(
+    config_path: str | Path | None = None,
+    *,
+    cfg: Optional[dict] = None,
+    year_min: int,
+    year_max: int,
+    force_rebuild: bool = False,
+    firm_ids: Optional[pd.Series | pd.DataFrame | list[int]] = None,
+    position_history_path: Path | str | None = None,
+    opt_likely_soc2: Optional[list[str] | tuple[str, ...] | str] = None,
+    intern_max_days: Optional[int] = None,
+) -> tuple[pd.DataFrame, dict]:
+    cfg_full = cfg or load_config(config_path or DEFAULT_CONFIG_PATH)
+    paths_cfg = get_cfg_section(cfg_full, "paths")
+    out_path = _default_design3_position_outcomes_path(cfg_full)
+    selected_positions_path = _resolve_path(paths_cfg, "wrds_workforce_selected_us_positions_out")
+    users_path = _resolve_path(paths_cfg, "wrds_workforce_users_out")
+    user_profile_path = _resolve_path(paths_cfg, "wrds_user_profile_origin_out")
+    feature_cfg = get_cfg_section(cfg_full, "revelio_company_features")
+    configured_history_path = (
+        _resolve_cfg_path_value(position_history_path)
+        or _resolve_optional_existing_path(paths_cfg, "design3_position_history_path")
+    )
+    top_n_soc2 = int(feature_cfg.get("design3_opt_likely_top_n_soc2", 4))
+    if opt_likely_soc2 is None:
+        opt_likely_soc2 = feature_cfg.get("design3_opt_likely_soc2")
+    fixed_opt_likely_soc2 = _normalize_design3_opt_likely_soc2(opt_likely_soc2)
+    if intern_max_days is None:
+        intern_max_days = int(feature_cfg.get("design3_intern_max_days", 183))
+    else:
+        intern_max_days = int(intern_max_days)
+    selected_hash = None
+    if firm_ids is not None:
+        if isinstance(firm_ids, pd.DataFrame):
+            selected_hash = _selected_firms_hash(firm_ids)
+        elif isinstance(firm_ids, pd.Series):
+            selected_hash = _selected_firms_hash(pd.DataFrame({"c": firm_ids}))
+        else:
+            selected_hash = _selected_firms_hash(pd.DataFrame({"c": firm_ids}))
+    expected_meta = {
+        "design3_position_outcome_method": DESIGN3_POSITION_OUTCOME_METHOD,
+        "year_min": int(year_min),
+        "year_max": int(year_max),
+        "top_n_soc2": int(top_n_soc2),
+        "opt_likely_soc2": fixed_opt_likely_soc2,
+        "opt_likely_soc2_source": "fixed_config" if fixed_opt_likely_soc2 else "top_n_recent_grad",
+        "intern_max_days": int(intern_max_days),
+        "selected_positions_path": str(selected_positions_path),
+        "position_history_path": str(configured_history_path) if configured_history_path is not None else None,
+        "users_path": str(users_path),
+        "user_profile_path": str(user_profile_path),
+        "selected_firms_hash": selected_hash,
+    }
+    if out_path.exists() and not force_rebuild:
+        meta = _load_metadata(out_path)
+        if _metadata_compatible(meta, expected_meta):
+            cached = pd.read_parquet(out_path)
+            cached["t"] = pd.to_numeric(cached["t"], errors="coerce")
+            cached = cached[cached["t"].between(int(year_min), int(year_max))].copy()
+            _log(f"[design3_position_outcomes] REUSE: {out_path} | rows {len(cached):,}")
+            return cached.reset_index(drop=True), meta or {}
+
+    _log(f"[design3_position_outcomes] BUILD: {out_path}")
+    out, meta = build_design3_position_outcomes_from_local_caches(
+        selected_positions_path=selected_positions_path,
+        position_history_path=configured_history_path,
+        users_path=users_path,
+        user_profile_path=user_profile_path,
+        year_min=int(year_min),
+        year_max=int(year_max),
+        firm_ids=firm_ids,
+        opt_likely_soc2=fixed_opt_likely_soc2,
+        top_n_soc2=top_n_soc2,
+        intern_max_days=intern_max_days,
+    )
+    meta = {**expected_meta, **meta}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_parquet(out_path, index=False)
+    _write_metadata(out_path, meta)
+    _log(f"[design3_position_outcomes] DONE: wrote {out_path} | rows {len(out):,}")
+    return out, meta
+
+
 def build_source_analysis_panel(
     config_path: str | Path | None = None,
     *,
@@ -5807,23 +6314,27 @@ def build_source_analysis_panel(
         on=["c", "t"],
         how="left",
     )
+    workforce_cols = [
+        col
+        for col in [
+            "c",
+            "t",
+            "total_headcount_wrds_annual",
+            "total_headcount_foreign_weighted_annual",
+            "total_headcount_native_weighted_annual",
+            "total_headcount_foreign_hard_annual",
+            "total_headcount_native_hard_annual",
+            "n_new_hires_wrds_annual",
+            "n_new_hires_foreign_weighted_annual",
+            "n_new_hires_native_weighted_annual",
+            "n_new_hires_foreign_hard_annual",
+            "n_new_hires_native_hard_annual",
+            "avg_tenure_years_annual",
+        ]
+        if col in workforce.columns
+    ]
     panel = panel.merge(
-        workforce[
-            [
-                "c",
-                "t",
-                "total_headcount_wrds_annual",
-                "total_headcount_foreign_weighted_annual",
-                "total_headcount_native_weighted_annual",
-                "total_headcount_foreign_hard_annual",
-                "total_headcount_native_hard_annual",
-                "n_new_hires_wrds_annual",
-                "n_new_hires_foreign_weighted_annual",
-                "n_new_hires_native_weighted_annual",
-                "n_new_hires_foreign_hard_annual",
-                "n_new_hires_native_hard_annual",
-            ]
-        ],
+        workforce[workforce_cols],
         on=["c", "t"],
         how="left",
     )
@@ -5855,6 +6366,10 @@ def build_source_analysis_panel(
     panel["y_new_hires_native_hard_lag0"] = pd.to_numeric(
         panel["n_new_hires_native_hard_annual"], errors="coerce"
     ).fillna(0.0)
+    if "avg_tenure_years_annual" in panel.columns:
+        panel["avg_tenure_years_lag0"] = pd.to_numeric(
+            panel["avg_tenure_years_annual"], errors="coerce"
+        )
     panel = panel.drop(
         columns=[
             "total_headcount_wrds_annual",
@@ -5867,7 +6382,9 @@ def build_source_analysis_panel(
             "n_new_hires_native_weighted_annual",
             "n_new_hires_foreign_hard_annual",
             "n_new_hires_native_hard_annual",
-        ]
+            "avg_tenure_years_annual",
+        ],
+        errors="ignore",
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
