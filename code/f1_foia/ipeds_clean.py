@@ -12,17 +12,37 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from config import * 
 INT_FOLDER = f"{root}/data/int/int_files_nov2025"
+IPEDS_RAW_PATH = f"{root}/data/raw/ipeds_completions_all.dta"
+IPEDS_RAW_FALLBACK_PATH = f"{root}/data/raw/ipeds/completions_all.dta"
+
+
+def _resolve_ipeds_raw_path() -> str:
+    if os.path.exists(IPEDS_RAW_PATH):
+        return IPEDS_RAW_PATH
+    if os.path.exists(IPEDS_RAW_FALLBACK_PATH):
+        return IPEDS_RAW_FALLBACK_PATH
+    return IPEDS_RAW_PATH
+
+
+def _read_completions_with_labels(path: str) -> pd.DataFrame:
+    raw = pd.read_stata(path, convert_categoricals=False)
+    label_cols = ["cipcode_lab", "awlevel_lab", "cip2dig_lab"]
+    if all(col in raw.columns for col in label_cols):
+        raw[label_cols] = raw[label_cols].astype(str)
+        return raw
+
+    raw_labs = pd.read_stata(
+        path,
+        columns=["cipcode", "awlevel", "cip2dig", "year", "progid"],
+    ).rename(columns={"cipcode": "cipcode_lab", "awlevel": "awlevel_lab", "cip2dig": "cip2dig_lab"})
+    raw_labs[["cipcode_lab", "awlevel_lab", "cip2dig_lab"]] = raw_labs[
+        ["cipcode_lab", "awlevel_lab", "cip2dig_lab"]
+    ].astype(str)
+    return raw.merge(raw_labs, on=["year", "progid"])
 
 # READING IN RAW FILES
 # completions data
-raw_labs = pd.read_stata(
-    f"{root}/data/raw/ipeds_completions_all.dta",
-    columns=["cipcode", "awlevel", "cip2dig", "year", "progid"]
-).rename(columns={"cipcode": "cipcode_lab", "awlevel": "awlevel_lab", "cip2dig": "cip2dig_lab"})
-# Ensure label columns are strings so pyarrow doesn't choke on categorical/int hybrids
-raw_labs[["cipcode_lab", "awlevel_lab", "cip2dig_lab"]] = raw_labs[["cipcode_lab", "awlevel_lab", "cip2dig_lab"]].astype(str)
-
-raw = pd.read_stata(f"{root}/data/raw/ipeds_completions_all.dta", convert_categoricals=False).merge(raw_labs, on = ["year", "progid"])
+raw = _read_completions_with_labels(_resolve_ipeds_raw_path())
 
 # directory data
 raw_hd_labs = pd.read_stata(f"{root}/data/raw/ipeds/directoryinfo2023.dta", convert_categoricals=True, columns = ['sector','instcat','c21basic','instsize','UNITID']).rename(columns={'sector':'sector_lab', 'instcat':'instcat_lab', 'c21basic':'c21basic_lab', 'instsize':'instsize_lab'})
@@ -52,4 +72,5 @@ clean['awlevel_group'] = np.where(clean['awlevel'].isin([5, 7, 17, 9]), clean['a
 clean['intl_ihmp'] = clean['ihmp']*clean['cnralt']
 
 # SAVING TO PARQUET
+os.makedirs(INT_FOLDER, exist_ok=True)
 clean.to_parquet(f"{INT_FOLDER}/ipeds_completions_all.parquet", index = False)
